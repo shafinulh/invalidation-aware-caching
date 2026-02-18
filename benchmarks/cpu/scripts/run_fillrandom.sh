@@ -1,16 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# FillRandom workload (200M keys; key size 16B; value sizes 32..256).
+# FillRandom workload.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-THREADS=1
-source "${SCRIPT_DIR}/bench_env.sh"
+source "${SCRIPT_DIR}/benchmark_common.sh"
 
-# VALUE_SIZES="${VALUE_SIZES:-"32 64 128 256"}"
-VALUE_SIZES="${VALUE_SIZES:-"32 64 128 256"}"
+# FillRandom-specific knobs.
 NUM_KEYS="${NUM_KEYS:-20000000}"
-COMP_THREADS_LIST="${COMP_THREADS_LIST:-"1 2 4 8"}"
+WRITES="${WRITES:--1}"
 
 for value_size in ${VALUE_SIZES}; do
   for comp_threads in ${COMP_THREADS_LIST}; do
@@ -19,21 +17,24 @@ for value_size in ${VALUE_SIZES}; do
     WAL_DIR="${WAL_BASE_DIR}/fillrandom/value_${value_size}"
 
     mkdir -p "${RUN_DIR}" "${DB_DIR}" "${WAL_DIR}"
+    write_run_config "${RUN_DIR}" "run_fillrandom.sh"
 
     run_db_bench "${RUN_DIR}/db_bench.log" \
       --benchmarks=fillrandom \
       --num="${NUM_KEYS}" \
+      --writes="${WRITES}" \
       --value_size="${value_size}" \
       --db="${DB_DIR}" \
       --wal_dir="${WAL_DIR}" \
       --report_file="${RUN_DIR}/report.csv" \
       --use_existing_db=0 \
       --subcompactions="${comp_threads}" \
-      --max_background_compactions="${comp_threads}" \
-      --max_background_flushes=2 \
-      --use_direct_io_for_flush_and_compaction=true \
-      --use_direct_reads=true \
+      --max_background_compactions=1 \
       "${COMMON_FLAGS[@]}"
+
+    copy_latest_rocksdb_options "${DB_DIR}" "${RUN_DIR}" "after_fillrandom"
+    copy_rocksdb_log_file "${DB_DIR}" "${RUN_DIR}" "after_fillrandom"
+    cleanup_db_wal_dirs "${DB_DIR}" "${WAL_DIR}"
   done
 
 done

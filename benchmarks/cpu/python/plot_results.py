@@ -3,6 +3,30 @@ import glob
 import pandas as pd
 import matplotlib.pyplot as plt
 import re
+from pathlib import Path
+
+
+def _load_env_file(env_file):
+    values = {}
+    if not os.path.exists(env_file):
+        return values
+
+    with open(env_file, "r", encoding="utf-8") as f:
+        for raw_line in f:
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            key = key.strip()
+            value = value.strip()
+            if (
+                (value.startswith('"') and value.endswith('"'))
+                or (value.startswith("'") and value.endswith("'"))
+            ):
+                value = value[1:-1]
+            values[key] = value
+
+    return values
 
 
 def _extract_metadata_from_path(path_parts):
@@ -228,11 +252,31 @@ def _plot_readwritemix(results_base, out_dir):
     plt.close()
     print(f"ReadWriteMix real-time throughput graph saved to: {realtime_png}")
 
+def _resolve_results_paths():
+    script_dir = Path(__file__).resolve().parent
+    env_file = script_dir.parent / "config" / ".env.local"
+    env_values = _load_env_file(str(env_file))
+
+    output_dir = env_values.get("OUTPUT_DIR")
+    if not output_dir:
+        raise RuntimeError(
+            f"OUTPUT_DIR is not set in {env_file}. "
+            "Set OUTPUT_DIR in benchmarks/cpu/config/.env.local before plotting."
+        )
+
+    results_base = os.path.abspath(os.path.expandvars(os.path.expanduser(output_dir)))
+    out_dir = os.path.join(results_base, "plots")
+    os.makedirs(out_dir, exist_ok=True)
+    return results_base, out_dir, str(env_file)
+
+
 def plot_results():
-    results_base = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "bench_results"))
-    out_dir = os.path.dirname(__file__)
+    results_base, out_dir, env_file = _resolve_results_paths()
+    print(f"Using results directory from {env_file}: {results_base}")
+    print(f"Saving plots to: {out_dir}")
     _plot_fillrandom(results_base, out_dir)
     _plot_readwritemix(results_base, out_dir)
+
 
 if __name__ == "__main__":
     plot_results()
