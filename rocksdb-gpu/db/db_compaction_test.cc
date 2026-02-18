@@ -8,6 +8,7 @@
 // found in the LICENSE file. See the AUTHORS file for names of contributors.
 
 #include <tuple>
+#include <unordered_map>
 
 #include "compaction/compaction_picker_universal.h"
 #include "db/blob/blob_index.h"
@@ -11131,6 +11132,88 @@ TEST_F(DBCompactionTest, NumberOfSubcompactions) {
     EXPECT_EQ(listener->sub_compaction_finished_, i);
     Destroy(options);
   }
+}
+
+TEST_F(DBCompactionTest, AutoNonL0CompactionUsesSubcompactions) {
+  class NonL0SubcompactionListener : public EventListener {
+   public:
+    void OnSubcompactionCompleted(const SubcompactionJobInfo& si) override {
+      InstrumentedMutexLock l(&mutex_);
+      ++subcompactions_per_job_[si.job_id];
+    }
+
+    void OnCompactionCompleted(DB* /*db*/,
+                               const CompactionJobInfo& ci) override {
+      if (ci.stats.is_manual_compaction || ci.base_input_level <= 0 ||
+          ci.output_level <= ci.base_input_level ||
+          ci.stats.num_input_files_trivially_moved != 0) {
+        return;
+      }
+
+      InstrumentedMutexLock l(&mutex_);
+      ++qualified_non_l0_compactions_;
+      auto it = subcompactions_per_job_.find(ci.job_id);
+      ASSERT_NE(it, subcompactions_per_job_.end());
+      ASSERT_GT(it->second, 1);
+    }
+
+    int GetQualifiedNonL0Compactions() {
+      InstrumentedMutexLock l(&mutex_);
+      return qualified_non_l0_compactions_;
+    }
+
+   private:
+    InstrumentedMutex mutex_;
+    std::unordered_map<int, int> subcompactions_per_job_;
+    int qualified_non_l0_compactions_ = 0;
+  };
+
+  Options options = CurrentOptions();
+  options.compaction_style = kCompactionStyleLevel;
+  options.disable_auto_compactions = true;
+  options.compression = kNoCompression;
+  options.max_subcompactions = 4;
+  options.max_background_compactions = 1;
+  options.num_levels = 4;
+  options.write_buffer_size = 8 << 20;
+  options.target_file_size_base = 32 << 10;
+  options.max_bytes_for_level_base = 256 << 10;
+  options.max_bytes_for_level_multiplier = 20;
+  options.level0_file_num_compaction_trigger = 100;
+  auto* listener = new NonL0SubcompactionListener();
+  options.listeners.emplace_back(listener);
+  DestroyAndReopen(options);
+
+  Random rnd(301);
+  constexpr int kValueSize = 256;
+
+  // One wide file in L2.
+  for (int i = 0; i < 6000; ++i) {
+    ASSERT_OK(Put(Key(i), rnd.RandomString(kValueSize)));
+  }
+  ASSERT_OK(Flush());
+  MoveFilesToLevel(2);
+  ASSERT_GT(NumTableFilesAtLevel(2, 0), 0);
+
+  // Two L1 files that overlap the L2 file's key range.
+  for (int i = 1000; i < 3000; ++i) {
+    ASSERT_OK(Put(Key(i), rnd.RandomString(kValueSize)));
+  }
+  ASSERT_OK(Flush());
+
+  for (int i = 3000; i < 5000; ++i) {
+    ASSERT_OK(Put(Key(i), rnd.RandomString(kValueSize)));
+  }
+  ASSERT_OK(Flush());
+
+  MoveFilesToLevel(1);
+  ASSERT_GE(NumTableFilesAtLevel(1, 0), 2);
+  ASSERT_EQ(NumTableFilesAtLevel(0, 0), 0);
+
+  ASSERT_OK(dbfull()->EnableAutoCompaction({dbfull()->DefaultColumnFamily()}));
+  ASSERT_OK(dbfull()->TEST_WaitForCompact());
+
+  ASSERT_GT(listener->GetQualifiedNonL0Compactions(), 0);
 }
 
 TEST_F(DBCompactionTest, VerifyInputRecordCount) {

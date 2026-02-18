@@ -518,8 +518,8 @@ DEFINE_int32(max_background_compactions,
 DEFINE_uint64(subcompactions, 1,
               "For CompactRange, set max_subcompactions for each compaction "
               "job in this CompactRange, for auto compactions, this is "
-              "Maximum number of subcompactions to divide L0-L1 compactions "
-              "into.");
+              "maximum number of subcompactions to divide eligible leveled "
+              "compactions into.");
 static const bool FLAGS_subcompactions_dummy __attribute__((__unused__)) =
     RegisterFlagValidator(&FLAGS_subcompactions, &ValidateUint32Range);
 
