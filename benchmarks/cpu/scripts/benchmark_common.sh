@@ -15,33 +15,36 @@ if [[ ! -f "${BENCH_ENV_FILE}" ]]; then
 fi
 
 CONFIG_KEYS=(
-  # Required paths.
+  # Required paths
   DB_BENCH
   DB_BASE_DIR
   WAL_BASE_DIR
   OUTPUT_DIR
 
-  # Run metadata.
+  # Run metadata
   RUN_ID
 
-  # Workload knobs.
+  # Workload knobs
   THREADS
   KEY_SIZE
   VALUE_SIZES
   SEED
 
-  # CPU multithreading experimentation knob.
-  COMP_THREADS_LIST
+  # CPU multithreading experimentation knobs
+  SUBCOMP_THREADS_LIST
+  BG_COMP_THREADS_LIST
 
-  # LSM tree config knobs (additional defaults).
+  # LSM tree config knobs (additional defaults)
   COMPRESSION_TYPE
   MAX_BACKGROUND_FLUSHES
+  MAX_WRITE_BUFFER_NUMBER
+  DISABLE_WAL
 
-  # OS knobs.
+  # OS knobs
   DIRECT_IO
   OPEN_FILES
 
-  # LSM tree config knobs (GP-Comp paper-specific defaults).
+  # LSM tree config knobs (GP-Comp paper-specific defaults)
   WRITE_BUFFER_SIZE
   TARGET_FILE_SIZE_BASE
   MAX_BYTES_FOR_LEVEL_BASE
@@ -52,7 +55,7 @@ CONFIG_KEYS=(
   LEVEL0_SLOWDOWN_WRITES_TRIGGER
   LEVEL0_STOP_WRITES_TRIGGER
 
-  # Workload-specific knobs.
+  # Workload-specific knobs
   NUM_KEYS
   NUM_LOADS
   WRITES
@@ -62,7 +65,7 @@ CONFIG_KEYS=(
   MIX_BENCH
 )
 
-# Preserve caller-provided env so inline overrides used over .env.local.
+# Preserve caller-provided env so inline overrides used over .env.local
 for key in "${CONFIG_KEYS[@]}"; do
   cli_key="__CLI_${key}"
   if [[ -n "${!key+x}" ]]; then
@@ -118,6 +121,8 @@ LEVEL0_STOP_WRITES_TRIGGER="${LEVEL0_STOP_WRITES_TRIGGER:-12}"
 # LSM tree config settings
 COMPRESSION_TYPE="${COMPRESSION_TYPE:-none}"
 MAX_BACKGROUND_FLUSHES="${MAX_BACKGROUND_FLUSHES:-2}"
+MAX_WRITE_BUFFER_NUMBER="${MAX_WRITE_BUFFER_NUMBER:-2}"
+DISABLE_WAL="${DISABLE_WAL:-true}"
 
 # Workload settings
 THREADS="${THREADS:-1}"
@@ -133,14 +138,15 @@ if [[ "${DIRECT_IO}" != "true" && "${DIRECT_IO}" != "false" ]]; then
 fi
 OPEN_FILES="${OPEN_FILES:--1}"
 
-# CPU multithreading experimentation knob.
-# Applied in workload-specific scripts via --subcompactions and
-# --max_background_compactions so each workload phase can tune it independently
-COMP_THREADS_LIST="${COMP_THREADS_LIST:-1 2 4 8}"
+# CPU multithreading experimentation knobs
+SUBCOMP_THREADS_LIST="${SUBCOMP_THREADS_LIST:-1 2 4 8}"
+BG_COMP_THREADS_LIST="${BG_COMP_THREADS_LIST:-}"
 
 LSM_TREE_ADDITIONAL_FLAGS=(
   --compression_type="${COMPRESSION_TYPE}"
   --max_background_flushes="${MAX_BACKGROUND_FLUSHES}"
+  --max_write_buffer_number="${MAX_WRITE_BUFFER_NUMBER}"
+  --disable_wal="${DISABLE_WAL}"
 )
 
 LSM_TREE_PAPER_FLAGS=(
@@ -200,11 +206,14 @@ RUN_METADATA_KEYS=(
   SEED
 
   # CPU multithreading experimentation
-  COMP_THREADS_LIST
+  SUBCOMP_THREADS_LIST
+  BG_COMP_THREADS_LIST
 
   # LSM tree config settings
   COMPRESSION_TYPE
   MAX_BACKGROUND_FLUSHES
+  MAX_WRITE_BUFFER_NUMBER
+  DISABLE_WAL
 
   # OS settings
   DIRECT_IO

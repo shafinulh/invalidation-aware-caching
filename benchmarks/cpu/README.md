@@ -83,6 +83,7 @@ LSM tree config settings (GP-Comp paper-specific defaults):
 LSM tree config settings (additional defaults):
 - `COMPRESSION_TYPE` (default: `none`)
 - `MAX_BACKGROUND_FLUSHES` (default: `2`)
+- `DISABLE_WAL` (default: `true`)
 
 Workload settings:
 - `THREADS` (default: `1`)
@@ -95,8 +96,10 @@ OS settings:
 - `OPEN_FILES` (default: `-1`)
 
 CPU multithreading experimentation settings:
-- `COMP_THREADS_LIST` (default: `"1 2 4 8"`)
-  Used to set num `--subcompactions` and `--max_background_compactions`
+- `SUBCOMP_THREADS_LIST` (default: `"1 2 4 8"`)
+  Used to set `--subcompactions`.
+- `BG_COMP_THREADS_LIST` (default: `"1"`)
+  Used to set `--max_background_compactions`.
 
 Run identifier:
 - `RUN_ID` (default: `MMDD_HHMM`)
@@ -114,9 +117,7 @@ FillRandom-only settings (`scripts/run_fillrandom.sh`):
 
 ReadWriteMix-only settings (`scripts/run_readwritemix.sh`):
 - `WRITE_RATIOS` (default: `"25"`, write percentages)
-- `LOAD_BENCH` (default: `filluniquerandomdeterministic`)
-  If `LOAD_BENCH` is deterministic (`fillseqdeterministic` or `filluniquerandomdeterministic`),
-  the script automatically sets `--disable_auto_compactions=1` during preload.
+- `LOAD_BENCH` (default: `fillrandom`)
 - `NUM_KEYS` (default: `200000000`, shared keyspace for preload + mixed phase)
 - `NUM_LOADS` (default: `50000000`, number of preload writes)
 - `MIX_BENCH` (default: `readrandomwriterandom`)
