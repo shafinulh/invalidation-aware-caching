@@ -47,6 +47,7 @@ for value_size in ${VALUE_SIZES}; do
       --db="${PRELOAD_DB_DIR}" \
       --wal_dir="${PRELOAD_WAL_DIR}" \
       --report_file="${PRELOAD_RUN_DIR}/load_report.csv" \
+      --metrics_file="${PRELOAD_RUN_DIR}/load_metrics.csv" \
       --use_existing_db=0 \
       --subcompactions=8 \
       --max_background_compactions=1 \
@@ -94,6 +95,7 @@ for value_size in ${VALUE_SIZES}; do
           --db="${DB_DIR}" \
           --wal_dir="${WAL_DIR}" \
           --report_file="${RUN_DIR}/mix_report.csv" \
+          --metrics_file="${RUN_DIR}/metrics.csv" \
           --use_existing_db=1 \
           --subcompactions="${subcomp_threads}" \
           --max_background_compactions="${bg_comp_threads}" \

@@ -1492,6 +1492,15 @@ DEFINE_string(report_file, "report.csv",
               "Filename where some simple stats are reported to (if "
               "--report_interval_seconds is bigger than 0)");
 
+DEFINE_int64(metrics_interval_ms, 0,
+             "If greater than zero, periodically collect block-cache, "
+             "latency, and compaction metrics into --metrics_file every N "
+             "milliseconds.  Requires --statistics.");
+
+DEFINE_string(metrics_file, "metrics.csv",
+              "Filename for periodic metrics output (if "
+              "--metrics_interval_ms > 0)");
+
 DEFINE_int32(thread_status_per_interval, 0,
              "Takes and report a snapshot of the current status of each thread"
              " when this is greater than 0.");
@@ -2247,6 +2256,205 @@ class ReporterAgent {
   std::condition_variable stop_cv_;
   bool stop_;
 };
+
+// ---------------------------------------------------------------------------
+// MetricsCollectorAgent – periodic block-cache / latency / compaction CSV.
+// ---------------------------------------------------------------------------
+class MetricsCollectorAgent {
+ public:
+  MetricsCollectorAgent(Env* env, const std::string& fname,
+                        uint64_t interval_ms,
+                        std::shared_ptr<Statistics> stats)
+      : env_(env),
+        interval_ms_(interval_ms),
+        stats_(std::move(stats)),
+        stop_(false) {
+    // Snapshot initial ticker values so first row is a delta.
+    SnapshotTickers(prev_tickers_);
+    prev_get_count_ = 0;
+    prev_get_sum_ = 0;
+
+    auto s = env_->NewWritableFile(fname, &file_, EnvOptions());
+    if (s.ok()) {
+      s = file_->Append(Header() + "\n");
+    }
+    if (s.ok()) {
+      s = file_->Flush();
+    }
+    if (!s.ok()) {
+      fprintf(stderr, "MetricsCollectorAgent: can't open %s: %s\n",
+              fname.c_str(), s.ToString().c_str());
+      abort();
+    }
+    thread_ = port::Thread([this]() { Run(); });
+  }
+
+  ~MetricsCollectorAgent() {
+    {
+      std::unique_lock<std::mutex> lk(mu_);
+      stop_ = true;
+      cv_.notify_all();
+    }
+    thread_.join();
+  }
+
+ private:
+  // Tickers we track (order must match Header()).
+  static constexpr uint32_t kTickers[] = {
+      // foreground Get-only cache counters (indices 0-7)
+      BLOCK_CACHE_HIT_GET,
+      BLOCK_CACHE_MISS_GET,
+      BLOCK_CACHE_DATA_HIT_GET,
+      BLOCK_CACHE_DATA_MISS_GET,
+      BLOCK_CACHE_INDEX_HIT_GET,
+      BLOCK_CACHE_INDEX_MISS_GET,
+      BLOCK_CACHE_FILTER_HIT_GET,
+      BLOCK_CACHE_FILTER_MISS_GET,
+      // global cache byte counters (indices 8-9)
+      BLOCK_CACHE_BYTES_READ,
+      BLOCK_CACHE_BYTES_WRITE,
+      // write stalls & compaction IO (indices 10-12)
+      STALL_MICROS,
+      COMPACT_READ_BYTES,
+      COMPACT_WRITE_BYTES,
+  };
+  static constexpr size_t kNumTickers =
+      sizeof(kTickers) / sizeof(kTickers[0]);
+
+  std::string Header() const {
+    return "secs_elapsed"
+           ",cache_hit,cache_miss,cache_hit_rate"
+           ",data_hit,data_miss"
+           ",index_hit,index_miss"
+           ",filter_hit,filter_miss"
+           ",cache_bytes_read,cache_bytes_write"
+           ",stall_micros"
+           ",compact_read_bytes,compact_write_bytes"
+           ",get_p50_us,get_p95_us,get_p99_us,get_avg_us,get_count"
+           ",write_p50_us,write_p95_us,write_p99_us,write_avg_us,write_count"
+           ",read_block_get_p95_us";
+  }
+
+  void SnapshotTickers(uint64_t (&out)[kNumTickers]) const {
+    for (size_t i = 0; i < kNumTickers; ++i) {
+      out[i] = stats_->getTickerCount(kTickers[i]);
+    }
+  }
+
+  void Run() {
+    auto* clock = env_->GetSystemClock().get();
+    auto t0 = clock->NowMicros();
+
+    while (true) {
+      {
+        std::unique_lock<std::mutex> lk(mu_);
+        if (stop_ ||
+            cv_.wait_for(lk, std::chrono::milliseconds(interval_ms_),
+                         [&]() { return stop_; })) {
+          break;
+        }
+      }
+      // Elapsed time as fractional seconds (ms resolution).
+      auto elapsed_us = clock->NowMicros() - t0;
+      double secs = static_cast<double>(elapsed_us) / 1e6;
+
+      // --- ticker deltas ---
+      uint64_t cur[kNumTickers];
+      SnapshotTickers(cur);
+      uint64_t deltas[kNumTickers];
+      for (size_t i = 0; i < kNumTickers; ++i) {
+        deltas[i] = cur[i] - prev_tickers_[i];
+        prev_tickers_[i] = cur[i];
+      }
+
+      uint64_t hit = deltas[0];   // BLOCK_CACHE_HIT delta
+      uint64_t miss = deltas[1];  // BLOCK_CACHE_MISS delta
+      double hit_rate =
+          (hit + miss > 0) ? static_cast<double>(hit) / (hit + miss) : 0.0;
+
+      // --- histogram snapshots (cumulative p50/p95/p99, interval deltas) ---
+      HistogramData get_hist, write_hist, rb_hist;
+      stats_->histogramData(DB_GET, &get_hist);
+      stats_->histogramData(DB_WRITE, &write_hist);
+      stats_->histogramData(READ_BLOCK_GET_MICROS, &rb_hist);
+
+      // Compute interval-delta counts/avg for each histogram.
+      uint64_t get_interval_count = get_hist.count - prev_get_count_;
+      uint64_t get_interval_sum =
+          static_cast<uint64_t>(get_hist.sum) - prev_get_sum_;
+      double get_interval_avg =
+          (get_interval_count > 0)
+              ? static_cast<double>(get_interval_sum) / get_interval_count
+              : 0.0;
+      prev_get_count_ = get_hist.count;
+      prev_get_sum_ = static_cast<uint64_t>(get_hist.sum);
+
+      uint64_t write_interval_count = write_hist.count - prev_write_count_;
+      uint64_t write_interval_sum =
+          static_cast<uint64_t>(write_hist.sum) - prev_write_sum_;
+      double write_interval_avg =
+          (write_interval_count > 0)
+              ? static_cast<double>(write_interval_sum) / write_interval_count
+              : 0.0;
+      prev_write_count_ = write_hist.count;
+      prev_write_sum_ = static_cast<uint64_t>(write_hist.sum);
+
+      // Build CSV row.
+      char buf[1024];
+      int n = snprintf(
+          buf, sizeof(buf),
+          "%.3f"               // secs_elapsed (fractional seconds)
+          ",%" PRIu64 ",%" PRIu64 ",%.6f"  // cache hit, miss, rate
+          ",%" PRIu64 ",%" PRIu64  // data hit, miss
+          ",%" PRIu64 ",%" PRIu64  // index hit, miss
+          ",%" PRIu64 ",%" PRIu64  // filter hit, miss
+          ",%" PRIu64 ",%" PRIu64  // cache bytes read, write
+          ",%" PRIu64            // stall_micros
+          ",%" PRIu64 ",%" PRIu64  // compact read, write bytes
+          ",%.1f,%.1f,%.1f,%.1f,%" PRIu64  // get p50/p95/p99/avg/count
+          ",%.1f,%.1f,%.1f,%.1f,%" PRIu64  // write p50/p95/p99/avg/count
+          ",%.1f"              // read_block_get p95
+          "\n",
+          secs,
+          hit, miss, hit_rate,
+          deltas[2], deltas[3],   // data
+          deltas[4], deltas[5],   // index
+          deltas[6], deltas[7],   // filter
+          deltas[8], deltas[9],   // bytes
+          deltas[10],             // stall_micros
+          deltas[11], deltas[12], // compact bytes
+          get_hist.median, get_hist.percentile95, get_hist.percentile99,
+          get_interval_avg, get_interval_count,
+          write_hist.median, write_hist.percentile95, write_hist.percentile99,
+          write_interval_avg, write_interval_count,
+          rb_hist.percentile95);
+
+      auto s = file_->Append(Slice(buf, static_cast<size_t>(n)));
+      if (s.ok()) s = file_->Flush();
+      if (!s.ok()) {
+        fprintf(stderr, "MetricsCollectorAgent: write error, stopping\n");
+        break;
+      }
+    }
+  }
+
+  Env* env_;
+  uint64_t interval_ms_;
+  std::shared_ptr<Statistics> stats_;
+  std::unique_ptr<WritableFile> file_;
+  ROCKSDB_NAMESPACE::port::Thread thread_;
+  std::mutex mu_;
+  std::condition_variable cv_;
+  bool stop_;
+
+  uint64_t prev_tickers_[kNumTickers]{};
+  uint64_t prev_get_count_ = 0;
+  uint64_t prev_get_sum_ = 0;
+  uint64_t prev_write_count_ = 0;
+  uint64_t prev_write_sum_ = 0;
+};
+
+constexpr uint32_t MetricsCollectorAgent::kTickers[];
 
 enum OperationType : unsigned char {
   kRead = 0,
@@ -4128,6 +4336,13 @@ class Benchmark {
     if (FLAGS_report_interval_seconds > 0) {
       reporter_agent.reset(new ReporterAgent(FLAGS_env, FLAGS_report_file,
                                              FLAGS_report_interval_seconds));
+    }
+
+    std::unique_ptr<MetricsCollectorAgent> metrics_agent;
+    if (FLAGS_metrics_interval_ms > 0 && dbstats) {
+      metrics_agent.reset(new MetricsCollectorAgent(
+          FLAGS_env, FLAGS_metrics_file, FLAGS_metrics_interval_ms,
+          dbstats));
     }
 
     ThreadArg* arg = new ThreadArg[n];

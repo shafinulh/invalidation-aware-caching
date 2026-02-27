@@ -1,9 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# bloom enabled by default
-# measure how many files accumulated by the end of the run, and how that impacts read performance
-# might need read while writing, but experiment with that later
+### Context ###
+# Unbounded L0 (FPGA-style): no write stalls.
+# Bloom enabled by default.
+# Measure how L0 file accumulation at the end of the run impacts
+# read performance in a mixed workload.
+
+### GOAL ###
+# Determine whether faster compactions improve mixed read/write
+# throughput when write stalls are disabled.
 
 RUN_ID=fpga-rw-test_8th \
 NUM_LOADS=20000000 \

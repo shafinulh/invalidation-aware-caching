@@ -1,9 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# bloom enabled by default
-# measure how many files accumulated by the end of the run, and how that impacts read performance
-# might need read while writing, but experiment with that later
+### Context ###
+# Unbounded L0 (FPGA-style): no write stalls.
+# Uses readwhilewriting benchmark (dedicated writer thread) instead of
+# readrandomwriterandom.  Tests parallel background compaction threads
+# rather than subcompactions alone.
+
+### GOAL ###
+# Measure impact of background compaction parallelism on read
+# throughput while a separate thread is writing.
 
 RUN_ID=fpga-rwr-test_2th_db-compacted \
 MIX_BENCH=readwhilewriting \

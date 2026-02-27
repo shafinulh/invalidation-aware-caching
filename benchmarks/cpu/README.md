@@ -37,7 +37,34 @@ Required in `benchmarks/cpu/config/.env.local`:
 - `WAL_BASE_DIR`
 - `OUTPUT_DIR`
 
-## 3) Run workloads
+## 3) Run experiments
+
+Pre-configured experiment scripts live under `benchmarks/cpu/experiments/`,
+split by workload type:
+
+```
+experiments/
+  fillrandom/          # Write-heavy (FillRandom) workloads
+    bounded_l0.sh        GPComp-style (write stalls enabled)
+    unbounded_l0.sh      FPGA-style  (no write stalls)
+    unbounded_l0_cpu_contention.sh
+  readwrite/           # Mixed read/write workloads
+    bounded_l0_mix.sh
+    unbounded_l0_mix.sh
+    unbounded_l0_readwhilewriting.sh
+  cache_observation/   # Block-cache impact during compactions
+    bounded_l0_cache_impact.sh
+    unbounded_l0_cache_impact.sh
+```
+
+Run from the repository root:
+
+```bash
+./benchmarks/cpu/experiments/fillrandom/bounded_l0.sh
+./benchmarks/cpu/experiments/readwrite/unbounded_l0_mix.sh
+```
+
+Or run the underlying shared scripts directly with inline env overrides:
 
 ```bash
 ./benchmarks/cpu/scripts/run_fillrandom.sh
@@ -60,6 +87,19 @@ For each run:
 Run:
 ```bash
 python3 benchmarks/cpu/python/plot_results.py
+```
+
+## Block-cache metrics collection
+
+Set `METRICS_INTERVAL_MS=N` (e.g. `100` for 100 ms) in an experiment script to enable
+periodic metrics collection.  This activates the `MetricsCollectorAgent` in
+`db_bench` which writes `metrics.csv` with per-interval block-cache hit/miss,
+latency percentiles, compaction I/O, and write stall data.
+
+Plot the results:
+```bash
+python3 benchmarks/cpu/python/plot_cache_metrics.py --metrics-csv /path/to/metrics.csv
+python3 benchmarks/cpu/python/plot_cache_metrics.py --metrics-dir /path/to/base --compare
 ```
 
 ## Workload knobs
@@ -110,6 +150,7 @@ Statistics/reporting flags (fixed in `scripts/benchmark_common.sh`):
 - `--stats_per_interval=1`
 - `--stats_dump_period_sec=60`
 - `--report_interval_seconds=1`
+- `--metrics_interval_ms` (set via `METRICS_INTERVAL_MS`, default: `0` = disabled)
 
 FillRandom-only settings (`scripts/run_fillrandom.sh`):
 - `NUM_KEYS` (default: `20000000`)

@@ -552,6 +552,17 @@ enum Tickers : uint32_t {
   // Failure to load the UDI during SST table open
   SST_USER_DEFINED_INDEX_LOAD_FAIL_COUNT,
 
+  // Block-cache counters attributed to foreground Get() path only.
+  // These exclude compaction, iterator, and other background accesses.
+  BLOCK_CACHE_HIT_GET,
+  BLOCK_CACHE_MISS_GET,
+  BLOCK_CACHE_DATA_HIT_GET,
+  BLOCK_CACHE_DATA_MISS_GET,
+  BLOCK_CACHE_INDEX_HIT_GET,
+  BLOCK_CACHE_INDEX_MISS_GET,
+  BLOCK_CACHE_FILTER_HIT_GET,
+  BLOCK_CACHE_FILTER_MISS_GET,
+
   TICKER_ENUM_MAX
 };
 

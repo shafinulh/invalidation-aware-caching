@@ -117,17 +117,25 @@ void GetContext::SaveValue(const Slice& value, SequenceNumber /*seq*/) {
 void GetContext::ReportCounters() {
   if (get_context_stats_.num_cache_hit > 0) {
     RecordTick(statistics_, BLOCK_CACHE_HIT, get_context_stats_.num_cache_hit);
+    RecordTick(statistics_, BLOCK_CACHE_HIT_GET,
+               get_context_stats_.num_cache_hit);
   }
   if (get_context_stats_.num_cache_index_hit > 0) {
     RecordTick(statistics_, BLOCK_CACHE_INDEX_HIT,
+               get_context_stats_.num_cache_index_hit);
+    RecordTick(statistics_, BLOCK_CACHE_INDEX_HIT_GET,
                get_context_stats_.num_cache_index_hit);
   }
   if (get_context_stats_.num_cache_data_hit > 0) {
     RecordTick(statistics_, BLOCK_CACHE_DATA_HIT,
                get_context_stats_.num_cache_data_hit);
+    RecordTick(statistics_, BLOCK_CACHE_DATA_HIT_GET,
+               get_context_stats_.num_cache_data_hit);
   }
   if (get_context_stats_.num_cache_filter_hit > 0) {
     RecordTick(statistics_, BLOCK_CACHE_FILTER_HIT,
+               get_context_stats_.num_cache_filter_hit);
+    RecordTick(statistics_, BLOCK_CACHE_FILTER_HIT_GET,
                get_context_stats_.num_cache_filter_hit);
   }
   if (get_context_stats_.num_cache_compression_dict_hit > 0) {
@@ -137,13 +145,19 @@ void GetContext::ReportCounters() {
   if (get_context_stats_.num_cache_index_miss > 0) {
     RecordTick(statistics_, BLOCK_CACHE_INDEX_MISS,
                get_context_stats_.num_cache_index_miss);
+    RecordTick(statistics_, BLOCK_CACHE_INDEX_MISS_GET,
+               get_context_stats_.num_cache_index_miss);
   }
   if (get_context_stats_.num_cache_filter_miss > 0) {
     RecordTick(statistics_, BLOCK_CACHE_FILTER_MISS,
                get_context_stats_.num_cache_filter_miss);
+    RecordTick(statistics_, BLOCK_CACHE_FILTER_MISS_GET,
+               get_context_stats_.num_cache_filter_miss);
   }
   if (get_context_stats_.num_cache_data_miss > 0) {
     RecordTick(statistics_, BLOCK_CACHE_DATA_MISS,
+               get_context_stats_.num_cache_data_miss);
+    RecordTick(statistics_, BLOCK_CACHE_DATA_MISS_GET,
                get_context_stats_.num_cache_data_miss);
   }
   if (get_context_stats_.num_cache_compression_dict_miss > 0) {
@@ -156,6 +170,8 @@ void GetContext::ReportCounters() {
   }
   if (get_context_stats_.num_cache_miss > 0) {
     RecordTick(statistics_, BLOCK_CACHE_MISS,
+               get_context_stats_.num_cache_miss);
+    RecordTick(statistics_, BLOCK_CACHE_MISS_GET,
                get_context_stats_.num_cache_miss);
   }
   if (get_context_stats_.num_cache_add > 0) {

@@ -63,6 +63,9 @@ CONFIG_KEYS=(
   MIX_READS
   LOAD_BENCH
   MIX_BENCH
+
+  # Metrics collection knobs
+  METRICS_INTERVAL_MS
 )
 
 # Preserve caller-provided env so inline overrides used over .env.local
@@ -142,6 +145,9 @@ OPEN_FILES="${OPEN_FILES:--1}"
 SUBCOMP_THREADS_LIST="${SUBCOMP_THREADS_LIST:-1 2 4 8}"
 BG_COMP_THREADS_LIST="${BG_COMP_THREADS_LIST:-}"
 
+# Metrics collection (0 = disabled, value in milliseconds)
+METRICS_INTERVAL_MS="${METRICS_INTERVAL_MS:-0}"
+
 LSM_TREE_ADDITIONAL_FLAGS=(
   --compression_type="${COMPRESSION_TYPE}"
   --max_background_flushes="${MAX_BACKGROUND_FLUSHES}"
@@ -179,6 +185,7 @@ STATISTICS_FLAGS=(
   --stats_per_interval=1
   --stats_dump_period_sec=60
   --report_interval_seconds=1
+  --metrics_interval_ms="${METRICS_INTERVAL_MS}"
 )
 
 COMMON_FLAGS=(

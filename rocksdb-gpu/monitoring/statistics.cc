@@ -280,6 +280,14 @@ const std::vector<std::pair<Tickers, std::string>> TickersNameMap = {
     {NUMBER_WBWI_INGEST, "rocksdb.number.wbwi.ingest"},
     {SST_USER_DEFINED_INDEX_LOAD_FAIL_COUNT,
      "rocksdb.sst.user.defined.index.load.fail.count"},
+    {BLOCK_CACHE_HIT_GET, "rocksdb.block.cache.hit.get"},
+    {BLOCK_CACHE_MISS_GET, "rocksdb.block.cache.miss.get"},
+    {BLOCK_CACHE_DATA_HIT_GET, "rocksdb.block.cache.data.hit.get"},
+    {BLOCK_CACHE_DATA_MISS_GET, "rocksdb.block.cache.data.miss.get"},
+    {BLOCK_CACHE_INDEX_HIT_GET, "rocksdb.block.cache.index.hit.get"},
+    {BLOCK_CACHE_INDEX_MISS_GET, "rocksdb.block.cache.index.miss.get"},
+    {BLOCK_CACHE_FILTER_HIT_GET, "rocksdb.block.cache.filter.hit.get"},
+    {BLOCK_CACHE_FILTER_MISS_GET, "rocksdb.block.cache.filter.miss.get"},
 };
 
 const std::vector<std::pair<Histograms, std::string>> HistogramsNameMap = {

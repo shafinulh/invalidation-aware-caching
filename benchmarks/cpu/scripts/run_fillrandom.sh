@@ -33,6 +33,7 @@ for value_size in ${VALUE_SIZES}; do
         --db="${DB_DIR}" \
         --wal_dir="${WAL_DIR}" \
         --report_file="${RUN_DIR}/report.csv" \
+        --metrics_file="${RUN_DIR}/metrics.csv" \
         --use_existing_db=0 \
         --subcompactions="${subcomp_threads}" \
         --max_background_compactions="${bg_comp_threads}" \

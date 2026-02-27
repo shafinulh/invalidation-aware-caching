@@ -1,6 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+### Context ###
+# Bounded L0 (GPComp-style defaults) with readrandomwriterandom mix.
+# Write stalls may still occur, but the read-heavy mix is less
+# affected by compaction speed.
+
+### GOAL ###
+# Measure impact of subcompaction parallelism on mixed read/write
+# throughput under bounded L0 conditions.
+
 # WRITE_BUFFER_SIZE=33554432 \
 # TARGET_FILE_SIZE_BASE=33554432 \
 # MAX_BYTES_FOR_LEVEL_BASE=134217728 \
