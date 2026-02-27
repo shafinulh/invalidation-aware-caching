@@ -48,7 +48,7 @@ for value_size in ${VALUE_SIZES}; do
       --wal_dir="${PRELOAD_WAL_DIR}" \
       --report_file="${PRELOAD_RUN_DIR}/load_report.csv" \
       --use_existing_db=0 \
-      --subcompactions=1 \
+      --subcompactions=8 \
       --max_background_compactions=1 \
       "${COMMON_FLAGS[@]}"
     copy_latest_rocksdb_options "${PRELOAD_DB_DIR}" "${PRELOAD_RUN_DIR}" "after_load"
