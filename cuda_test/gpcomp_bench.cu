@@ -191,11 +191,55 @@ struct CudaTimer {
  * ---------------------------------------------------------------------- */
 static void hr() { printf("─────────────────────────────────────────────────────────\n"); }
 
+/* -------------------------------------------------------------------------
+ * RunStats – min / mean / sample-stddev over N repeated timed runs
+ * ---------------------------------------------------------------------- */
+struct RunStats {
+    double min    = 0;
+    double mean   = 0;
+    double stddev = 0;
+    static RunStats from(const std::vector<double>& v) {
+        RunStats s;
+        s.min  = *std::min_element(v.begin(), v.end());
+        double sum = 0; for (double x : v) sum += x;
+        s.mean = sum / (double)v.size();
+        double var = 0;
+        for (double x : v) var += (x - s.mean) * (x - s.mean);
+        s.stddev = (v.size() > 1) ? std::sqrt(var / (double)(v.size() - 1)) : 0.0;
+        return s;
+    }
+};
+
+static void print_stat(const char* label, const RunStats& s, uint64_t keys)
+{
+    printf("  %-36s  min=%7.2f  mean=%7.2f ± %5.2f ms  (%7.1f M keys/s at min)\n",
+           label, s.min, s.mean, s.stddev,
+           (double)keys / s.min / 1e3);
+}
+
+/* -------------------------------------------------------------------------
+ * Result structs – returned by each benchmark for the combined section
+ * ---------------------------------------------------------------------- */
+struct MergeResult {
+    RunStats cpu;        /* std::sort                */
+    RunStats kernel;     /* GPU kernel-only          */
+    RunStats gpu_wall;   /* GPU H2D + kernel + D2H   */
+};
+
+struct BloomResult {
+    RunStats cpu;        /* CPU per-block bloom               */
+    RunStats kernel;     /* GPU kernel-only (pre-transferred) */
+    RunStats serial;     /* GPU per-block H2D+kernel+sync+D2H */
+    RunStats batched;    /* GPU 1×H2D + grid + 1×D2H          */
+};
+
 /* =========================================================================
  * BENCHMARK 1 – Merge kernel
  * ======================================================================= */
-static void bench_merge(const std::vector<std::vector<KVPair>>& ssts,
-                        const DatasetMeta& meta)
+static MergeResult bench_merge(const std::vector<std::vector<KVPair>>& ssts,
+                               const DatasetMeta& meta,
+                               double io_ms,
+                               int runs)
 {
     hr();
     printf("BENCHMARK 1 – Merge kernel (Algorithm 1)\n");
@@ -214,28 +258,79 @@ static void bench_merge(const std::vector<std::vector<KVPair>>& ssts,
 
     std::vector<KVPair> gpu_output(total);
 
-    /* ---- CPU reference (for validation) ---- */
-    printf("  Computing CPU reference ...\n"); fflush(stdout);
-    auto cpu_t0 = std::chrono::steady_clock::now();
-    std::vector<KVPair> cpu_ref = cpu_merge_reference(ssts);
-    double cpu_ms = std::chrono::duration<double, std::milli>(
-                        std::chrono::steady_clock::now() - cpu_t0).count();
-    printf("  CPU merge-sort:   %.1f ms  (%.1f M keys/s)\n",
-           cpu_ms, (double)total / cpu_ms / 1e3);
-
-    /* ---- GPU: total time (H2D + kernel + D2H) ---- */
-    printf("  Running GPU merge (including H2D + D2H) ...\n"); fflush(stdout);
-
-    auto gpu_wall_t0 = std::chrono::steady_clock::now();
-    int rc = launch_merge(const_cast<KVPair* const *>(h_ptrs.data()),
-                          h_sizes.data(), num_sst, gpu_output.data());
-    double gpu_wall_ms = std::chrono::duration<double, std::milli>(
-                             std::chrono::steady_clock::now() - gpu_wall_t0).count();
-
-    if (rc != 0) {
-        fprintf(stderr, "  ERROR: launch_merge returned %d\n", rc);
-        return;
+    /* ---- CPU sort: run `runs` times, collect stats ---- */
+    printf("  Running CPU sort (%d runs) ...\n", runs); fflush(stdout);
+    std::vector<KVPair> cpu_ref;
+    std::vector<double> cpu_s(runs);
+    for (int r = 0; r < runs; ++r) {
+        auto t0 = std::chrono::steady_clock::now();
+        cpu_ref = cpu_merge_reference(ssts);
+        cpu_s[r] = std::chrono::duration<double,std::milli>(
+                       std::chrono::steady_clock::now() - t0).count();
     }
+    RunStats cpu_stats = RunStats::from(cpu_s);
+
+    /* ---- GPU: allocate device buffers once, time `runs` passes ---- */
+    printf("  Running GPU merge (%d runs) ...\n", runs); fflush(stdout);
+
+    /* Build prefix-sum offsets on host */
+    std::vector<int> h_offsets_v(num_sst + 1);
+    h_offsets_v[0] = 0;
+    for (int i = 0; i < num_sst; ++i)
+        h_offsets_v[i + 1] = h_offsets_v[i] + h_sizes[i];
+
+    /* Allocate per-SST device buffers */
+    std::vector<KVPair*> d_sst_v(num_sst);
+    for (int i = 0; i < num_sst; ++i)
+        CUDA_CHECK(cudaMalloc(&d_sst_v[i], (size_t)h_sizes[i] * sizeof(KVPair)));
+
+    KVPair **d_sst_arrays;  int *d_sst_sizes_dev, *d_sst_offsets_dev;  KVPair *d_output;
+    CUDA_CHECK(cudaMalloc(&d_sst_arrays,      (size_t)num_sst       * sizeof(KVPair*)));
+    CUDA_CHECK(cudaMalloc(&d_sst_sizes_dev,   (size_t)num_sst       * sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&d_sst_offsets_dev, (size_t)(num_sst + 1) * sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&d_output,          (size_t)total         * sizeof(KVPair)));
+    CUDA_CHECK(cudaMemcpy(d_sst_arrays,      d_sst_v.data(),       (size_t)num_sst       * sizeof(KVPair*), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_sst_sizes_dev,   h_sizes.data(),       (size_t)num_sst       * sizeof(int),     cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_sst_offsets_dev, h_offsets_v.data(),   (size_t)(num_sst + 1) * sizeof(int),     cudaMemcpyHostToDevice));
+
+    const int MERGE_BLOCK = 256;
+    int merge_grid = ((int)total + MERGE_BLOCK - 1) / MERGE_BLOCK;
+
+    /* Warm-up: H2D + kernel to prime JIT/caches */
+    for (int i = 0; i < num_sst; ++i)
+        CUDA_CHECK(cudaMemcpy(d_sst_v[i], h_ptrs[i],
+                              (size_t)h_sizes[i] * sizeof(KVPair), cudaMemcpyHostToDevice));
+    merge_kernel<<<merge_grid, MERGE_BLOCK>>>(d_sst_arrays, d_sst_sizes_dev,
+                                              d_sst_offsets_dev, num_sst, d_output);
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    /* ---- Multi-run timed passes ---- */
+    std::vector<double> kernel_s(runs), wall_s(runs);
+    for (int r = 0; r < runs; ++r) {
+        auto wall_t0 = std::chrono::steady_clock::now();
+
+        for (int i = 0; i < num_sst; ++i)
+            CUDA_CHECK(cudaMemcpy(d_sst_v[i], h_ptrs[i],
+                                  (size_t)h_sizes[i] * sizeof(KVPair), cudaMemcpyHostToDevice));
+
+        CudaTimer ktimer;
+        ktimer.start();
+        merge_kernel<<<merge_grid, MERGE_BLOCK>>>(d_sst_arrays, d_sst_sizes_dev,
+                                                  d_sst_offsets_dev, num_sst, d_output);
+        kernel_s[r] = (double)ktimer.stop_ms();
+
+        CUDA_CHECK(cudaMemcpy(gpu_output.data(), d_output,
+                              (size_t)total * sizeof(KVPair), cudaMemcpyDeviceToHost));
+        wall_s[r] = std::chrono::duration<double,std::milli>(
+                        std::chrono::steady_clock::now() - wall_t0).count();
+    }
+    RunStats kernel_stats = RunStats::from(kernel_s);
+    RunStats wall_stats   = RunStats::from(wall_s);
+
+    /* Cleanup */
+    for (int i = 0; i < num_sst; ++i) cudaFree(d_sst_v[i]);
+    cudaFree(d_sst_arrays);  cudaFree(d_sst_sizes_dev);
+    cudaFree(d_sst_offsets_dev);  cudaFree(d_output);
 
     /* ---- Validate ---- */
     bool ok = true;
@@ -262,32 +357,42 @@ static void bench_merge(const std::vector<std::vector<KVPair>>& ssts,
     }
 
     /* ---- Print results ---- */
-    double data_gb = (double)total * sizeof(KVPair) / (1 << 30);
+    double data_gb      = (double)total * sizeof(KVPair) / (1 << 30);
+    double cpu_total_min = io_ms + cpu_stats.min;
     printf("\n");
-    printf("  Input:            %d SSTs × %d keys = %llu total keys  (%.1f MB)\n",
+    printf("  Input:   %d SSTs × %d keys = %llu total  (%.1f MB)   runs=%d\n",
            num_sst, (int)ssts[0].size(),
            (unsigned long long)total,
-           (double)total * sizeof(KVPair) / (1 << 20));
-    printf("  GPU total (wall): %.2f ms → %.1f M keys/s  (%.2f GB/s)\n",
-           gpu_wall_ms,
-           (double)total / gpu_wall_ms / 1e3,
-           data_gb / (gpu_wall_ms / 1e3));
-    printf("  CPU reference:    %.2f ms → %.1f M keys/s\n",
-           cpu_ms, (double)total / cpu_ms / 1e3);
-    printf("  Speedup (wall):   %.2f×\n", cpu_ms / gpu_wall_ms);
-    printf("  Validation:       %s\n\n", ok ? "PASS ✓" : "FAIL ✗");
+           (double)total * sizeof(KVPair) / (1 << 20), runs);
+    printf("  CPU I/O (disk read):            %.2f ms\n", io_ms);
+    print_stat("CPU sort",           cpu_stats,    total);
+    print_stat("GPU kernel-only",    kernel_stats, total);
+    print_stat("GPU wall (H2D+k+D2H)",wall_stats,  total);
+    printf("  (GPU kernel BW at min: %.2f GB/s)\n", data_gb / (kernel_stats.min / 1e3));
+    printf("  Speedup kernel vs CPU sort (min):  %.2f×\n",
+           cpu_stats.min / kernel_stats.min);
+    printf("  Speedup wall   vs CPU+I/O  (min):  %.2f×\n",
+           cpu_total_min / wall_stats.min);
+    printf("  Validation:             %s\n\n", ok ? "PASS ✓" : "FAIL ✗");
+
+    MergeResult r;
+    r.cpu     = cpu_stats;
+    r.kernel  = kernel_stats;
+    r.gpu_wall= wall_stats;
+    return r;
 }
 
 /* =========================================================================
  * BENCHMARK 2 – Bloom filter kernel (per-block mode)
  * ======================================================================= */
-static void bench_bloom(const std::vector<KVPair>& merged,
-                         const DatasetMeta& meta,
-                         int block_size_bytes,
-                         int key_size_bytes,
-                         int value_size_bytes,
-                         int overhead_bytes,
-                         int fpr_samples)
+static BloomResult bench_bloom(const std::vector<KVPair>& merged,
+                               const DatasetMeta& meta,
+                               int block_size_bytes,
+                               int key_size_bytes,
+                               int value_size_bytes,
+                               int overhead_bytes,
+                               int fpr_samples,
+                               int runs)
 {
     hr();
     printf("BENCHMARK 2 – Bloom filter kernel (Algorithm 2, per-block mode)\n");
@@ -335,7 +440,7 @@ static void bench_bloom(const std::vector<KVPair>& merged,
                 "  Try --block_size with a smaller value.\n",
                 byte_vector_len, prop.sharedMemPerBlock,
                 block_dim, prop.maxThreadsPerBlock);
-            return;
+            return BloomResult{};
         }
         printf("  Device sharedMem:   %zu KB  (%s)\n",
                prop.sharedMemPerBlock / 1024,
@@ -343,71 +448,143 @@ static void bench_bloom(const std::vector<KVPair>& merged,
     }
     printf("\n");
 
-    /* ---- Allocate device buffers (reused across all blocks) ---- */
-    KVPair  *d_block;
-    uint8_t *d_bitvec;
-    CUDA_CHECK(cudaMalloc(&d_block,  (size_t)keys_per_block * sizeof(KVPair)));
-    CUDA_CHECK(cudaMalloc(&d_bitvec, (size_t)bitvec_len     * sizeof(uint8_t)));
-
     size_t shared_bytes = (size_t)byte_vector_len * sizeof(uint8_t);
 
-    /* We store bit vectors to validate later */
-    std::vector<std::vector<uint8_t>> all_bitvecs(num_blocks,
-                                                   std::vector<uint8_t>(bitvec_len, 0));
-
-    /* ---- Benchmark loop: kernel timing only (no H2D/D2H) ---- */
-    CudaTimer timer;
-
-    /* Warm-up pass (one block) */
+    /* ---- Pre-transfer all keys once; warm-up kernel-only pass ---- */
+    KVPair  *d_all_keys;
+    uint8_t *d_bitvec;
+    CUDA_CHECK(cudaMalloc(&d_all_keys, total_keys * sizeof(KVPair)));
+    CUDA_CHECK(cudaMalloc(&d_bitvec,   (size_t)bitvec_len * sizeof(uint8_t)));
+    CUDA_CHECK(cudaMemcpy(d_all_keys, merged.data(),
+                          total_keys * sizeof(KVPair), cudaMemcpyHostToDevice));
     {
         int block_keys = std::min(keys_per_block, (int)total_keys);
-        CUDA_CHECK(cudaMemcpy(d_block, merged.data(),
-                              block_keys * sizeof(KVPair), cudaMemcpyHostToDevice));
         bloom_filter_kernel<<<1, block_dim, shared_bytes>>>(
-            d_block, block_keys, K, byte_vector_len, d_bitvec);
+            d_all_keys, block_keys, K, byte_vector_len, d_bitvec);
         CUDA_CHECK(cudaDeviceSynchronize());
     }
 
-    /* Timed pass – kernel time only (device-side CUDA events)  */
-    cudaEvent_t ev_start, ev_stop;
-    CUDA_CHECK(cudaEventCreate(&ev_start));
-    CUDA_CHECK(cudaEventCreate(&ev_stop));
-    CUDA_CHECK(cudaEventRecord(ev_start, 0));
-
-    for (int b = 0; b < num_blocks; ++b) {
-        int offset      = b * keys_per_block;
-        int block_keys  = std::min(keys_per_block, (int)(total_keys - offset));
-
-        bloom_filter_kernel<<<1, block_dim, shared_bytes>>>(
-            d_block, block_keys, K, byte_vector_len, d_bitvec);
+    /* ---- Kernel-only: `runs` timed passes (CUDA events, data already on device) ---- */
+    printf("  Running GPU bloom kernel-only (%d runs) ...\n", runs); fflush(stdout);
+    std::vector<double> ko_s(runs);
+    for (int r = 0; r < runs; ++r) {
+        cudaEvent_t ev0, ev1;
+        CUDA_CHECK(cudaEventCreate(&ev0));
+        CUDA_CHECK(cudaEventCreate(&ev1));
+        CUDA_CHECK(cudaEventRecord(ev0, 0));
+        for (int b = 0; b < num_blocks; ++b) {
+            int offset     = b * keys_per_block;
+            int block_keys = std::min(keys_per_block, (int)(total_keys - offset));
+            bloom_filter_kernel<<<1, block_dim, shared_bytes>>>(
+                d_all_keys + offset, block_keys, K, byte_vector_len, d_bitvec);
+        }
+        CUDA_CHECK(cudaEventRecord(ev1, 0));
+        CUDA_CHECK(cudaEventSynchronize(ev1));
+        float ms = 0.f;
+        CUDA_CHECK(cudaEventElapsedTime(&ms, ev0, ev1));
+        ko_s[r] = (double)ms;
+        cudaEventDestroy(ev0); cudaEventDestroy(ev1);
     }
+    RunStats kernel_stats = RunStats::from(ko_s);
+    cudaFree(d_all_keys);
+    cudaFree(d_bitvec);
 
-    CUDA_CHECK(cudaEventRecord(ev_stop, 0));
-    CUDA_CHECK(cudaEventSynchronize(ev_stop));
-    float kernel_ms = 0.f;
-    CUDA_CHECK(cudaEventElapsedTime(&kernel_ms, ev_start, ev_stop));
-
-    /* Full timed pass with H2D + kernel + D2H (wall time) */
-    auto wall_t0 = std::chrono::steady_clock::now();
-    for (int b = 0; b < num_blocks; ++b) {
-        int offset     = b * keys_per_block;
-        int block_keys = std::min(keys_per_block, (int)(total_keys - offset));
-
-        CUDA_CHECK(cudaMemcpy(d_block, merged.data() + offset,
-                              block_keys * sizeof(KVPair), cudaMemcpyHostToDevice));
-        bloom_filter_kernel<<<1, block_dim, shared_bytes>>>(
-            d_block, block_keys, K, byte_vector_len, d_bitvec);
-        CUDA_CHECK(cudaDeviceSynchronize());
-        CUDA_CHECK(cudaMemcpy(all_bitvecs[b].data(), d_bitvec,
-                              bitvec_len * sizeof(uint8_t), cudaMemcpyDeviceToHost));
+    /* ---- CPU bloom: warm-up then `runs` timed passes ---- */
+    printf("  Running CPU bloom (%d runs) ...\n", runs); fflush(stdout);
+    std::vector<uint8_t> cpu_bv_tmp(byte_vector_len);
+    std::vector<uint8_t> cpu_packed_tmp(bitvec_len);
+    {
+        cpu_build_byte_vector(merged.data(), std::min(keys_per_block, (int)total_keys),
+                              K, byte_vector_len, cpu_bv_tmp.data());
+        cpu_pack_bit_vector(cpu_bv_tmp.data(), byte_vector_len, cpu_packed_tmp.data());
     }
-    double wall_ms = std::chrono::duration<double, std::milli>(
-                         std::chrono::steady_clock::now() - wall_t0).count();
+    std::vector<double> cpu_s(runs);
+    for (int r = 0; r < runs; ++r) {
+        auto t0 = std::chrono::steady_clock::now();
+        for (int b = 0; b < num_blocks; ++b) {
+            int offset     = b * keys_per_block;
+            int block_keys = std::min(keys_per_block, (int)(total_keys - offset));
+            cpu_build_byte_vector(merged.data() + offset, block_keys,
+                                  K, byte_vector_len, cpu_bv_tmp.data());
+            cpu_pack_bit_vector(cpu_bv_tmp.data(), byte_vector_len, cpu_packed_tmp.data());
+        }
+        cpu_s[r] = std::chrono::duration<double,std::milli>(
+                       std::chrono::steady_clock::now() - t0).count();
+    }
+    RunStats cpu_stats = RunStats::from(cpu_s);
 
-    cudaEventDestroy(ev_start);
-    cudaEventDestroy(ev_stop);
+    /* ---- Serial wall pass: `runs` timed passes, bitvecs collected each run ---- */
+    printf("  Running GPU bloom serial wall (%d runs) ...\n", runs); fflush(stdout);
+    std::vector<std::vector<uint8_t>> all_bitvecs(num_blocks,
+                                                   std::vector<uint8_t>(bitvec_len, 0));
+    KVPair *d_block;
+    CUDA_CHECK(cudaMalloc(&d_block,  (size_t)keys_per_block * sizeof(KVPair)));
+    CUDA_CHECK(cudaMalloc(&d_bitvec, (size_t)bitvec_len     * sizeof(uint8_t)));
+    std::vector<double> serial_s(runs);
+    for (int r = 0; r < runs; ++r) {
+        auto t0 = std::chrono::steady_clock::now();
+        for (int b = 0; b < num_blocks; ++b) {
+            int offset     = b * keys_per_block;
+            int block_keys = std::min(keys_per_block, (int)(total_keys - offset));
+            CUDA_CHECK(cudaMemcpy(d_block, merged.data() + offset,
+                                  block_keys * sizeof(KVPair), cudaMemcpyHostToDevice));
+            bloom_filter_kernel<<<1, block_dim, shared_bytes>>>(
+                d_block, block_keys, K, byte_vector_len, d_bitvec);
+            CUDA_CHECK(cudaDeviceSynchronize());
+            CUDA_CHECK(cudaMemcpy(all_bitvecs[b].data(), d_bitvec,
+                                  bitvec_len * sizeof(uint8_t), cudaMemcpyDeviceToHost));
+        }
+        serial_s[r] = std::chrono::duration<double,std::milli>(
+                          std::chrono::steady_clock::now() - t0).count();
+    }
+    RunStats serial_stats = RunStats::from(serial_s);
     cudaFree(d_block);
     cudaFree(d_bitvec);
+
+    /* ---- Batched wall pass: `runs` timed passes ---- */
+    printf("  Running GPU bloom batched wall (%d runs) ...\n", runs); fflush(stdout);
+    KVPair  *d_all_keys_b;
+    uint8_t *d_all_bitvecs_b;
+    CUDA_CHECK(cudaMalloc(&d_all_keys_b,    total_keys                      * sizeof(KVPair)));
+    CUDA_CHECK(cudaMalloc(&d_all_bitvecs_b, (size_t)num_blocks * bitvec_len * sizeof(uint8_t)));
+    /* warm-up */
+    CUDA_CHECK(cudaMemcpy(d_all_keys_b, merged.data(),
+                          total_keys * sizeof(KVPair), cudaMemcpyHostToDevice));
+    bloom_filter_kernel_batched<<<num_blocks, block_dim, shared_bytes>>>(
+        d_all_keys_b, keys_per_block, (int)total_keys, K, byte_vector_len, d_all_bitvecs_b);
+    CUDA_CHECK(cudaDeviceSynchronize());
+    std::vector<uint8_t> batched_flat((size_t)num_blocks * bitvec_len);
+    std::vector<double> batched_s(runs);
+    for (int r = 0; r < runs; ++r) {
+        auto t0 = std::chrono::steady_clock::now();
+        CUDA_CHECK(cudaMemcpy(d_all_keys_b, merged.data(),
+                              total_keys * sizeof(KVPair), cudaMemcpyHostToDevice));
+        bloom_filter_kernel_batched<<<num_blocks, block_dim, shared_bytes>>>(
+            d_all_keys_b, keys_per_block, (int)total_keys, K, byte_vector_len, d_all_bitvecs_b);
+        CUDA_CHECK(cudaDeviceSynchronize());
+        CUDA_CHECK(cudaMemcpy(batched_flat.data(), d_all_bitvecs_b,
+                              (size_t)num_blocks * bitvec_len * sizeof(uint8_t),
+                              cudaMemcpyDeviceToHost));
+        batched_s[r] = std::chrono::duration<double,std::milli>(
+                           std::chrono::steady_clock::now() - t0).count();
+    }
+    RunStats batched_stats = RunStats::from(batched_s);
+    cudaFree(d_all_keys_b);
+    cudaFree(d_all_bitvecs_b);
+
+    /* Cross-validate batched vs per-block output */
+    bool batched_ok = true;
+    for (int b = 0; b < num_blocks && batched_ok; ++b) {
+        const uint8_t *batch_bv = batched_flat.data() + (size_t)b * bitvec_len;
+        for (int i = 0; i < bitvec_len && batched_ok; ++i) {
+            if (batch_bv[i] != all_bitvecs[b][i]) {
+                fprintf(stderr,
+                    "  BATCHED MISMATCH: block %d byte %d: batched=0x%02x per-block=0x%02x\n",
+                    b, i, batch_bv[i], all_bitvecs[b][i]);
+                batched_ok = false;
+            }
+        }
+    }
 
     /* ---- Validate: no false negatives ---- */
     printf("  Validating (no false negatives) ...\n"); fflush(stdout);
@@ -480,15 +657,213 @@ static void bench_bloom(const std::vector<KVPair>& merged,
 
     /* ---- Print results ---- */
     printf("\n");
-    printf("  GPU kernel-only:    %.2f ms → %.1f M keys/s\n",
-           kernel_ms, (double)total_keys / kernel_ms / 1e3);
-    printf("  GPU total (wall):   %.2f ms → %.1f M keys/s  (includes H2D+D2H)\n",
-           wall_ms,   (double)total_keys / wall_ms   / 1e3);
-    printf("  No false negatives: %s\n", no_fn ? "PASS ✓" : "FAIL ✗");
-    printf("  FPR (measured):     %.4f%%\n",    fpr * 100.0);
-    printf("  FPR (theoretical):  %.4f%%  "
-           "  [K=%d, bits/key=%d, p=(1-e^{-K/m})^K]\n",
+    printf("  Bloom config: %d blocks / %d keys/block / K=%d / bvlen=%d   runs=%d\n",
+           num_blocks, keys_per_block, K, byte_vector_len, runs);
+    print_stat("CPU bloom (per-block)",      cpu_stats,    total_keys);
+    print_stat("GPU kernel-only (no xfer)",  kernel_stats, total_keys);
+    print_stat("GPU serial wall (per-block)",serial_stats, total_keys);
+    print_stat("GPU batched wall (1×H2D+grid+1×D2H)", batched_stats, total_keys);
+    printf("  Speedup kernel    vs CPU (min): %.2f×\n",
+           cpu_stats.min / kernel_stats.min);
+    printf("  Speedup batched   vs CPU (min): %.2f×\n",
+           cpu_stats.min / batched_stats.min);
+    printf("  Speedup batched   vs serial (min): %.2f×  (sync overhead eliminated)\n",
+           serial_stats.min / batched_stats.min);
+    printf("  No false negatives (serial):  %s\n", no_fn      ? "PASS ✓" : "FAIL ✗");
+    printf("  Batched vs serial match:      %s\n", batched_ok ? "PASS ✓" : "FAIL ✗");
+    printf("  FPR (measured):               %.4f%%\n", fpr * 100.0);
+    printf("  FPR (theoretical):            %.4f%%  "
+           "[K=%d, bits/key=%d, p=(1-e^{-K/m})^K]\n",
            p_theoretical * 100.0, K, bloom_bits);
+
+    BloomResult r;
+    r.cpu     = cpu_stats;
+    r.kernel  = kernel_stats;
+    r.serial  = serial_stats;
+    r.batched = batched_stats;
+    return r;
+}
+
+/* =========================================================================
+ * BENCHMARK 3 – Total compaction job (Alg1 + Alg2 end-to-end)
+ * ======================================================================= */
+static void bench_total_compaction(const MergeResult& mr,
+                                   const BloomResult&  br,
+                                   double              io_ms,
+                                   uint64_t            total_keys,
+                                   int                 runs)
+{
+    hr();
+    printf("BENCHMARK 3 – Total compaction job (Alg1 merge + Alg2 bloom)\n");
+    hr();
+
+    /* ---- GPU paths (all use .min = best hardware performance) ---- */
+    double gpu_kernel_min       = mr.kernel.min    + br.kernel.min;
+    double gpu_wall_serial_min  = mr.gpu_wall.min  + br.serial.min;
+    double gpu_wall_batched_min = mr.gpu_wall.min  + br.batched.min;
+    double gpu_full_serial_min  = io_ms + gpu_wall_serial_min;
+    double gpu_full_batched_min = io_ms + gpu_wall_batched_min;
+
+    /* ---- CPU paths (use .min for fair hardware comparison) ---- */
+    double cpu_compute_min = mr.cpu.min + br.cpu.min;
+    double cpu_total_min   = io_ms + cpu_compute_min;
+
+    auto tput = [&](double ms) { return (double)total_keys / ms / 1e3; };
+
+    printf("\n  All times are best-of-%d runs (min).\n\n", runs);
+    printf("  %-48s  %9s  %12s\n", "Path", "Time (ms)", "M keys/s");
+    printf("  %-48s  %9s  %12s\n",
+           "────────────────────────────────────────────────",
+           "---------", "------------");
+    printf("  %-48s  %9.2f  %12.1f\n",
+           "CPU compute  (sort + bloom)",
+           cpu_compute_min,      tput(cpu_compute_min));
+    printf("  %-48s  %9.2f  %12.1f\n",
+           "CPU total    (I/O + sort + bloom)",
+           cpu_total_min,        tput(cpu_total_min));
+    printf("  %-48s  %9.2f  %12.1f\n",
+           "GPU kernel-only  (no transfers)",
+           gpu_kernel_min,       tput(gpu_kernel_min));
+    printf("  %-48s  %9.2f  %12.1f\n",
+           "GPU wall – serial bloom   (H2D+k+sync+D2H)",
+           gpu_wall_serial_min,  tput(gpu_wall_serial_min));
+    printf("  %-48s  %9.2f  %12.1f\n",
+           "GPU wall – batched bloom  (1×H2D+grid+1×D2H)",
+           gpu_wall_batched_min, tput(gpu_wall_batched_min));
+    printf("  %-48s  %9.2f  %12.1f\n",
+           "GPU full – serial   (I/O + serial wall)",
+           gpu_full_serial_min,  tput(gpu_full_serial_min));
+    printf("  %-48s  %9.2f  %12.1f\n",
+           "GPU full – batched  (I/O + batched wall)",
+           gpu_full_batched_min, tput(gpu_full_batched_min));
+
+    printf("\n");
+    printf("  Breakdown min (ms):  I/O=%.2f  CPU sort=%.2f  CPU bloom=%.2f\n",
+           io_ms, mr.cpu.min, br.cpu.min);
+    printf("                       GPU merge k=%.2f   GPU bloom k=%.2f\n",
+           mr.kernel.min, br.kernel.min);
+    printf("                       GPU merge wall=%.2f GPU serial bloom=%.2f\n",
+           mr.gpu_wall.min, br.serial.min);
+    printf("                       GPU batched bloom=%.2f\n", br.batched.min);
+    printf("\n");
+    printf("  Speedup  kernel-only      vs CPU compute:  %.2f×\n",
+           cpu_compute_min / gpu_kernel_min);
+    printf("  Speedup  GPU serial       vs CPU compute:  %.2f×\n",
+           cpu_compute_min / gpu_wall_serial_min);
+    printf("  Speedup  GPU batched      vs CPU compute:  %.2f×\n",
+           cpu_compute_min / gpu_wall_batched_min);
+    printf("  Speedup  GPU full-batched vs CPU total:    %.2f×  (apples-to-apples incl. I/O)\n",
+           cpu_total_min   / gpu_full_batched_min);
+    printf("  Bloom sync overhead saved: %.2f ms  (serial=%.2f  batched=%.2f)\n",
+           br.serial.min - br.batched.min, br.serial.min, br.batched.min);
+}
+
+/* =========================================================================
+ * bench_fillrandom_simulation
+ *
+ * Simulates the steady-state compaction load during a fillrandom workload.
+ *
+ * RocksDB flow recap:
+ *   write keys → fill MemTable → flush → L0 SST  (×4 SSTs)
+ *                                                  ↓
+ *                                   4 L0 SSTs → compaction trigger
+ *                                   merge (Alg1) + bloom (Alg2) → L1
+ *
+ * Each "compaction round" processes meta.num_sst SSTs (= meta.total_keys keys).
+ * We project N rounds of accumulated CPU and GPU time from the single-round
+ * RunStats already measured, then report aggregate speedup.
+ * ======================================================================= */
+static void bench_fillrandom_simulation(const MergeResult& mr,
+                                        const BloomResult&  br,
+                                        double              io_ms,
+                                        uint64_t            keys_per_round,
+                                        int                 compaction_rounds)
+{
+    printf("\n");
+    hr();
+    printf("BENCHMARK 4 – fillrandom compaction simulation\n");
+    hr();
+
+    uint64_t total_simulated_keys = (uint64_t)compaction_rounds * keys_per_round;
+
+    printf("  Compaction model:\n");
+    printf("    keys/compaction round = %llu  (%d SSTs flushed from MemTable)\n",
+           (unsigned long long)keys_per_round, 4);
+    printf("    compaction rounds     = %d\n", compaction_rounds);
+    printf("    total simulated keys  = %llu  (%.1f M)\n",
+           (unsigned long long)total_simulated_keys,
+           (double)total_simulated_keys / 1e6);
+    printf("\n");
+
+    /* --- Per-round timing (from RunStats of single-round benchmarks) --- */
+    /* Use mean for expected/realistic projection, min for best-case. */
+    double cpu_round_mean  = mr.cpu.mean  + br.cpu.mean;     /* compute only */
+    double cpu_round_min   = mr.cpu.min   + br.cpu.min;
+    double gpu_round_mean  = mr.gpu_wall.mean + br.batched.mean; /* wall, batched */
+    double gpu_round_min   = mr.gpu_wall.min  + br.batched.min;
+
+    /* I/O is disk read of SST files; amortised once per round either way */
+    double io_round        = io_ms;
+
+    /* Total across all rounds */
+    double cpu_total_ms    = (double)compaction_rounds * (io_round + cpu_round_mean);
+    double gpu_total_ms    = (double)compaction_rounds * (io_round + gpu_round_mean);
+    double cpu_total_min   = (double)compaction_rounds * (io_round + cpu_round_min);
+    double gpu_total_min   = (double)compaction_rounds * (io_round + gpu_round_min);
+
+    double time_saved_mean = cpu_total_ms - gpu_total_ms;
+    double time_saved_min  = cpu_total_min - gpu_total_min;
+
+    auto tput_total = [&](double total_ms) {
+        return (double)total_simulated_keys / total_ms / 1e3;
+    };
+
+    /* --- Print per-round breakdown --- */
+    printf("  Per-round timing (from single-round RunStats):\n");
+    printf("  %-40s  %9s  %9s\n", "Path", "mean(ms)", "min(ms)");
+    printf("  %-40s  %9s  %9s\n",
+           "────────────────────────────────────────", "---------", "---------");
+    printf("  %-40s  %9.2f  %9.2f\n",
+           "I/O (disk read, per round)",
+           io_round, io_round);
+    printf("  %-40s  %9.2f  %9.2f\n",
+           "CPU compute/round  (sort+bloom)",
+           cpu_round_mean, cpu_round_min);
+    printf("  %-40s  %9.2f  %9.2f\n",
+           "GPU wall/round     (merge+batched bloom)",
+           gpu_round_mean, gpu_round_min);
+    printf("  %-40s  %9.2f  %9.2f\n",
+           "CPU total/round    (I/O+sort+bloom)",
+           io_round + cpu_round_mean, io_round + cpu_round_min);
+    printf("  %-40s  %9.2f  %9.2f\n",
+           "GPU total/round    (I/O+wall)",
+           io_round + gpu_round_mean, io_round + gpu_round_min);
+    printf("\n");
+
+    /* --- Print aggregate (N rounds) --- */
+    printf("  Aggregate over %d compaction rounds:\n", compaction_rounds);
+    printf("  %-40s  %9s  %9s  %12s\n",
+           "Path", "mean(ms)", "min(ms)", "M keys/s");
+    printf("  %-40s  %9s  %9s  %12s\n",
+           "────────────────────────────────────────",
+           "---------", "---------", "------------");
+    printf("  %-40s  %9.1f  %9.1f  %12.2f\n",
+           "CPU total  (I/O + sort + bloom)",
+           cpu_total_ms, cpu_total_min,
+           tput_total(cpu_total_ms));
+    printf("  %-40s  %9.1f  %9.1f  %12.2f\n",
+           "GPU total  (I/O + merge + batched bloom)",
+           gpu_total_ms, gpu_total_min,
+           tput_total(gpu_total_ms));
+    printf("\n");
+    printf("  Speedup (mean): %.2f×\n",
+           cpu_total_ms / gpu_total_ms);
+    printf("  Speedup (min):  %.2f×\n",
+           cpu_total_min / gpu_total_min);
+    printf("  Time saved (mean): %.1f ms  ( %.2f s )\n",
+           time_saved_mean, time_saved_mean / 1000.0);
+    printf("  Time saved (min):  %.1f ms  ( %.2f s )\n",
+           time_saved_min,  time_saved_min  / 1000.0);
 }
 
 /* =========================================================================
@@ -498,12 +873,15 @@ static void usage(const char* prog)
 {
     fprintf(stderr,
         "Usage: %s [options]\n\n"
-        "  --dataset     DIR    path to dataset directory    [default: ./dataset]\n"
-        "  --block_size  BYTES  SST data block size (bytes)  [default: 32768]\n"
-        "  --key_size    BYTES  key size (bytes)             [default: 16]\n"
-        "  --value_size  BYTES  value size (bytes)           [default: 64]\n"
-        "  --overhead    BYTES  per-entry SST overhead bytes [default: 20]\n"
-        "  --fpr_samples N      non-member samples for FPR   [default: 10000]\n"
+        "  --dataset         DIR    path to dataset directory    [default: ./dataset]\n"
+        "  --block_size      BYTES  SST data block size (bytes)  [default: 32768]\n"
+        "  --key_size        BYTES  key size (bytes)             [default: 16]\n"
+        "  --value_size      BYTES  value size (bytes)           [default: 64]\n"
+        "  --overhead        BYTES  per-entry SST overhead bytes [default: 20]\n"
+        "  --fpr_samples     N      non-member samples for FPR   [default: 10000]\n"
+        "  --runs            N      timed repetitions per section [default: 5]\n"
+        "  --compaction_rounds N    simulate N compaction events (Benchmark 4) [default: 0 = skip]\n"
+        "  --fillrandom_keys M      auto-compute rounds for M total keys (overrides --compaction_rounds)\n"
         "  --help\n",
         prog);
 }
@@ -511,11 +889,14 @@ static void usage(const char* prog)
 int main(int argc, char* argv[])
 {
     std::string dataset_dir  = "dataset";
-    int block_size_bytes     = 32768;   /* BLOCK_SIZE from benchmark_common.sh */
-    int key_size_bytes       = 16;      /* KEY_SIZE from benchmark_common.sh */
-    int value_size_bytes     = 64;      /* middle of VALUE_SIZES range */
-    int overhead_bytes       = 20;      /* typical RocksDB block-based table overhead */
+    int block_size_bytes     = 32768;
+    int key_size_bytes       = 16;
+    int value_size_bytes     = 64;
+    int overhead_bytes       = 20;
     int fpr_samples          = 10000;
+    int runs                 = 5;
+    int compaction_rounds    = 0;   /* 0 = skip Benchmark 4 */
+    int64_t fillrandom_keys  = 0;   /* if >0, overrides compaction_rounds */
 
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
@@ -532,6 +913,9 @@ int main(int argc, char* argv[])
         else if (a == "--value_size")  value_size_bytes  = std::stoi(next());
         else if (a == "--overhead")    overhead_bytes    = std::stoi(next());
         else if (a == "--fpr_samples") fpr_samples       = std::stoi(next());
+        else if (a == "--runs")            runs              = std::stoi(next());
+        else if (a == "--compaction_rounds") compaction_rounds = std::stoi(next());
+        else if (a == "--fillrandom_keys")   fillrandom_keys   = std::stoll(next());
         else if (a == "--help" || a == "-h") { usage(argv[0]); return 0; }
         else { fprintf(stderr, "error: unknown option '%s'\n", a.c_str()); return 1; }
     }
@@ -560,20 +944,23 @@ int main(int argc, char* argv[])
     printf("  key_space=%llu  bloom_bits=%d  K=%d\n\n",
            (unsigned long long)meta.key_space, meta.bloom_bits, meta.bloom_K);
 
-    /* ---- Load SSTs ---- */
+    /* ---- Load SSTs (measure disk I/O time) ---- */
     printf("Loading SST files ...\n");
     std::vector<std::vector<KVPair>> ssts(meta.num_sst);
+    auto io_t0 = std::chrono::steady_clock::now();
     for (int s = 0; s < meta.num_sst; ++s) {
         char fname[64];
         snprintf(fname, sizeof(fname), "sst_%04d.bin", s);
         ssts[s] = load_sst_bin(dataset_dir + "/" + fname, meta.sst_sizes[s]);
     }
-    printf("  Loaded %d SST files\n\n", meta.num_sst);
+    double io_ms = std::chrono::duration<double, std::milli>(
+                       std::chrono::steady_clock::now() - io_t0).count();
+    printf("  Loaded %d SST files in %.1f ms\n\n", meta.num_sst, io_ms);
 
     /* ================================================================
      * Benchmark 1: Merge
      * ================================================================ */
-    bench_merge(ssts, meta);
+    MergeResult mr = bench_merge(ssts, meta, io_ms, runs);
 
     /* ================================================================
      * Compute merged output (CPU) – input for bloom benchmark
@@ -585,9 +972,29 @@ int main(int argc, char* argv[])
     /* ================================================================
      * Benchmark 2: Bloom filter
      * ================================================================ */
-    bench_bloom(merged, meta,
-                block_size_bytes, key_size_bytes, value_size_bytes,
-                overhead_bytes, fpr_samples);
+    BloomResult br = bench_bloom(merged, meta,
+                                 block_size_bytes, key_size_bytes, value_size_bytes,
+                                 overhead_bytes, fpr_samples, runs);
+
+    /* ================================================================
+     * Benchmark 3: Total compaction job
+     * ================================================================ */
+    bench_total_compaction(mr, br, io_ms, meta.total_keys, runs);
+
+    /* ================================================================
+     * Benchmark 4: fillrandom simulation (optional)
+     * ================================================================ */
+    if (fillrandom_keys > 0) {
+        compaction_rounds = (int)(((int64_t)fillrandom_keys + (int64_t)meta.total_keys - 1)
+                                  / (int64_t)meta.total_keys);
+        printf("  (--fillrandom_keys %lld → %d compaction rounds of %llu keys each)\n",
+               (long long)fillrandom_keys,
+               compaction_rounds,
+               (unsigned long long)meta.total_keys);
+    }
+    if (compaction_rounds > 0) {
+        bench_fillrandom_simulation(mr, br, io_ms, meta.total_keys, compaction_rounds);
+    }
 
     hr();
     printf("Done.\n");

@@ -94,6 +94,76 @@ __global__ void bloom_filter_kernel(const KVPair * __restrict__ array,
 }
 
 /* -------------------------------------------------------------------------
+ * Kernel 2b – Batched Bloom Filter  (all SST data blocks in one grid launch)
+ *
+ * Each CUDA block (blockIdx.x) independently builds the Bloom filter for
+ * one SST data block.  All blocks run concurrently on the GPU, eliminating
+ * the 1003× cudaDeviceSynchronize loop of the per-block approach.
+ *
+ * Launch:  <<<num_sst_blocks, block_dim, byte_vector_len>>>
+ *   block_dim       = max(keys_per_block, bitvec_len) rounded up to warp
+ *   byte_vector_len = keys_per_block × bloom_bits  (shared mem per block)
+ *
+ * Parameters:
+ *   all_keys        – full merged KVPair array on device (total_keys entries)
+ *   keys_per_block  – keys in a full SST data block
+ *   total_keys      – total keys (last block may be smaller)
+ *   K               – number of hash functions
+ *   byte_vector_len – Bloom filter width in bits per block
+ *   all_bitvecs     – packed output: num_blocks × bitvec_len bytes
+ * ---------------------------------------------------------------------- */
+__global__ void bloom_filter_kernel_batched(
+        const KVPair * __restrict__ all_keys,
+        int                         keys_per_block,
+        int                         total_keys,
+        int                         K,
+        int                         byte_vector_len,
+        uint8_t      * __restrict__ all_bitvecs)
+{
+    extern __shared__ uint8_t ByteVector[];
+
+    int block_id   = (int)blockIdx.x;
+    int tid        = (int)threadIdx.x;
+    int bdim       = (int)blockDim.x;
+
+    int offset     = block_id * keys_per_block;
+    int block_keys = total_keys - offset;
+    if (block_keys > keys_per_block) block_keys = keys_per_block;
+    if (block_keys <= 0) return;
+
+    int bitvec_len = (byte_vector_len + 7) / 8;
+
+    /* Zero shared ByteVector cooperatively. */
+    for (int s = tid; s < byte_vector_len; s += bdim)
+        ByteVector[s] = 0;
+    __syncthreads();
+
+    /* Phase 1: each thread hashes its key into the shared ByteVector. */
+    if (tid < block_keys) {
+        uint64_t key = all_keys[offset + tid].key;
+        for (int i = 1; i <= K; ++i) {
+            uint32_t h    = bloom_hash(key, i);
+            int bytepos   = (int)(h % (uint32_t)byte_vector_len);
+            ByteVector[bytepos] = 1;   /* benign race */
+        }
+    }
+    __syncthreads();
+
+    /* Phase 2: pack ByteVector → BitVector into global output. */
+    uint8_t *my_bitvec = all_bitvecs + (size_t)block_id * bitvec_len;
+    if (tid < bitvec_len) {
+        int     base   = tid * 8;
+        uint8_t packed = 0;
+        for (int j = 0; j < 8; ++j) {
+            int bytepos = base + j;
+            if (bytepos < byte_vector_len && ByteVector[bytepos])
+                packed |= (uint8_t)(1 << j);
+        }
+        my_bitvec[tid] = packed;
+    }
+}
+
+/* -------------------------------------------------------------------------
  * Host launch function for Kernel 2
  *
  * Manages device memory, validates shared-memory requirements, launches
