@@ -68,8 +68,8 @@ This produces `dataset/sst_0000.bin … sst_000N.bin` and `dataset/dataset.meta`
 | `--overhead BYTES` | `20` | Per-entry SST overhead bytes |
 | `--fpr_samples N` | `10000` | Non-member samples used to measure false positive rate |
 | `--runs N` | `5` | Number of timed repetitions per section (reports min/mean/stddev) |
-| `--fillrandom_keys M` | `0` | Simulate a fillrandom workload of M total keys (Benchmark 4). Auto-computes number of compaction rounds. `0` = skip. |
-| `--compaction_rounds N` | `0` | Manually set number of compaction rounds for Benchmark 4. Overridden by `--fillrandom_keys`. |
+| `--fillrandom_keys N` | `0` | Simulate a fillrandom workload of N total keys. Auto-computes number of compaction rounds. Accepts K/M/B suffixes (e.g. `10M`, `200M`, `1B`). `0` = skip. |
+| `--compaction_rounds N` | `0` | Manually set number of compaction rounds. Overridden by `--fillrandom_keys`. |
 | `--help` | — | Print usage |
 
 **Examples:**
@@ -77,10 +77,13 @@ This produces `dataset/sst_0000.bin … sst_000N.bin` and `dataset/dataset.meta`
 ./gpcomp_bench --dataset dataset --value_size 128 --runs 10
 
 # simulate 10M key fillrandom workload (auto-computes ~31 compaction rounds)
-./gpcomp_bench --dataset dataset --fillrandom_keys 10000000
+./gpcomp_bench --dataset dataset --fillrandom_keys 10M
 
-# simulate 100M key fillrandom workload
-./gpcomp_bench --dataset dataset --fillrandom_keys 100000000
+# simulate 200M key fillrandom workload
+./gpcomp_bench --dataset dataset --fillrandom_keys 200M
+
+# simulate 1 billion keys
+./gpcomp_bench --dataset dataset --fillrandom_keys 1B
 
 # manually set compaction rounds
 ./gpcomp_bench --dataset dataset --compaction_rounds 50
@@ -101,7 +104,7 @@ bash test.sh [options]
 |---|---|---|
 | `--dataset DIR` | `./dataset` | Dataset directory |
 | `--values LIST` | `32,64,128` | Comma-separated list of value sizes to sweep (bytes) |
-| `--fillrandom_keys LIST` | `0` | Comma-separated total key counts to simulate (Benchmark 4). `0` = skip. |
+| `--fillrandom_keys LIST` | `0` | Comma-separated total key counts to simulate. Accepts K/M/B suffixes. `0` = skip. |
 | `--key_size BYTES` | `16` | Key size in bytes |
 | `--overhead BYTES` | `20` | Per-entry SST overhead bytes |
 | `--runs N` | `5` | Timed repetitions per section inside each benchmark run |
@@ -116,10 +119,10 @@ The sweep is **2D**: every combination of `--values` × `--fillrandom_keys` gets
 bash test.sh --dataset dataset
 
 # sweep value sizes + simulate 10M key fillrandom workload
-bash test.sh --dataset dataset --values 32,64,128 --fillrandom_keys 10000000
+bash test.sh --dataset dataset --values 32,64,128 --fillrandom_keys 10M
 
 # full 2D sweep: 3 value sizes x 3 key counts
-bash test.sh --dataset dataset --values 32,64,128 --fillrandom_keys 1000000,10000000,100000000
+bash test.sh --dataset dataset --values 32,64,128 --fillrandom_keys 1M,10M,200M
 
 # wider value sweep with more repetitions
 bash test.sh --dataset dataset --values 32,64,128,256 --runs 10
@@ -245,7 +248,7 @@ to find each key's source SST, so it scales with key count, not SST count.
 The batched kernel eliminates the `cudaDeviceSynchronize` overhead between blocks,
 which is the dominant cost in serial mode (~11 ms saved for 64B values).
 
-### Benchmark 3 – Total Compaction
+### Benchmark 3 – Total Compaction (+ fillrandom simulation)
 
 Shows 7 end-to-end paths combining both algorithms.
 All times use the minimum from the N-repetition run (best hardware performance).
@@ -261,3 +264,7 @@ All times use the minimum from the N-repetition run (best hardware performance).
 | GPU full – batched | I/O + GPU merge wall + GPU batched bloom wall |
 
 **Apples-to-apples speedup** is `GPU full-batched vs CPU total` — both include disk I/O.
+
+If `--fillrandom_keys` or `--compaction_rounds` is provided, Benchmark 3 also
+appends a **fillrandom simulation** section that projects the single-round timings
+across N compaction rounds, reporting aggregate CPU vs GPU time saved.

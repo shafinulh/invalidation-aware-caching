@@ -187,6 +187,22 @@ struct CudaTimer {
 };
 
 /* -------------------------------------------------------------------------
+ * parse_count – accept human-readable counts: 10M, 200M, 1B, 500K, etc.
+ *
+ * Strips optional trailing suffix (K/M/B, case-insensitive) and returns
+ * the corresponding integer.  Plain integers ("10000000") still work.
+ * ---------------------------------------------------------------------- */
+static int64_t parse_count(const char* s)
+{
+    char* end = nullptr;
+    double val = strtod(s, &end);
+    if (end && (*end == 'k' || *end == 'K'))      val *= 1e3;
+    else if (end && (*end == 'm' || *end == 'M')) val *= 1e6;
+    else if (end && (*end == 'b' || *end == 'B')) val *= 1e9;
+    return (int64_t)val;
+}
+
+/* -------------------------------------------------------------------------
  * Print a horizontal rule
  * ---------------------------------------------------------------------- */
 static void hr() { printf("─────────────────────────────────────────────────────────\n"); }
@@ -691,7 +707,8 @@ static void bench_total_compaction(const MergeResult& mr,
                                    const BloomResult&  br,
                                    double              io_ms,
                                    uint64_t            total_keys,
-                                   int                 runs)
+                                   int                 runs,
+                                   int                 compaction_rounds)
 {
     hr();
     printf("BENCHMARK 3 – Total compaction job (Alg1 merge + Alg2 bloom)\n");
@@ -756,114 +773,88 @@ static void bench_total_compaction(const MergeResult& mr,
            cpu_total_min   / gpu_full_batched_min);
     printf("  Bloom sync overhead saved: %.2f ms  (serial=%.2f  batched=%.2f)\n",
            br.serial.min - br.batched.min, br.serial.min, br.batched.min);
-}
 
-/* =========================================================================
- * bench_fillrandom_simulation
- *
- * Simulates the steady-state compaction load during a fillrandom workload.
- *
- * RocksDB flow recap:
- *   write keys → fill MemTable → flush → L0 SST  (×4 SSTs)
- *                                                  ↓
- *                                   4 L0 SSTs → compaction trigger
- *                                   merge (Alg1) + bloom (Alg2) → L1
- *
- * Each "compaction round" processes meta.num_sst SSTs (= meta.total_keys keys).
- * We project N rounds of accumulated CPU and GPU time from the single-round
- * RunStats already measured, then report aggregate speedup.
- * ======================================================================= */
-static void bench_fillrandom_simulation(const MergeResult& mr,
-                                        const BloomResult&  br,
-                                        double              io_ms,
-                                        uint64_t            keys_per_round,
-                                        int                 compaction_rounds)
-{
-    printf("\n");
-    hr();
-    printf("BENCHMARK 4 – fillrandom compaction simulation\n");
-    hr();
+    /* ---- fillrandom simulation (if compaction_rounds > 0) ---- */
+    if (compaction_rounds > 0) {
+        printf("\n");
+        hr();
+        printf("  fillrandom compaction simulation\n");
+        hr();
 
-    uint64_t total_simulated_keys = (uint64_t)compaction_rounds * keys_per_round;
+        uint64_t total_simulated_keys = (uint64_t)compaction_rounds * total_keys;
 
-    printf("  Compaction model:\n");
-    printf("    keys/compaction round = %llu  (%d SSTs flushed from MemTable)\n",
-           (unsigned long long)keys_per_round, 4);
-    printf("    compaction rounds     = %d\n", compaction_rounds);
-    printf("    total simulated keys  = %llu  (%.1f M)\n",
-           (unsigned long long)total_simulated_keys,
-           (double)total_simulated_keys / 1e6);
-    printf("\n");
+        printf("  Compaction model:\n");
+        printf("    keys/compaction round = %llu  (%d SSTs flushed from MemTable)\n",
+               (unsigned long long)total_keys, 4);
+        printf("    compaction rounds     = %d\n", compaction_rounds);
+        printf("    total simulated keys  = %llu  (%.1f M)\n",
+               (unsigned long long)total_simulated_keys,
+               (double)total_simulated_keys / 1e6);
+        printf("\n");
 
-    /* --- Per-round timing (from RunStats of single-round benchmarks) --- */
-    /* Use mean for expected/realistic projection, min for best-case. */
-    double cpu_round_mean  = mr.cpu.mean  + br.cpu.mean;     /* compute only */
-    double cpu_round_min   = mr.cpu.min   + br.cpu.min;
-    double gpu_round_mean  = mr.gpu_wall.mean + br.batched.mean; /* wall, batched */
-    double gpu_round_min   = mr.gpu_wall.min  + br.batched.min;
+        double cpu_round_mean  = mr.cpu.mean  + br.cpu.mean;
+        double cpu_round_min   = mr.cpu.min   + br.cpu.min;
+        double gpu_round_mean  = mr.gpu_wall.mean + br.batched.mean;
+        double gpu_round_min   = mr.gpu_wall.min  + br.batched.min;
+        double io_round        = io_ms;
 
-    /* I/O is disk read of SST files; amortised once per round either way */
-    double io_round        = io_ms;
+        double cpu_total_ms    = (double)compaction_rounds * (io_round + cpu_round_mean);
+        double gpu_total_ms    = (double)compaction_rounds * (io_round + gpu_round_mean);
+        double cpu_total_min_a = (double)compaction_rounds * (io_round + cpu_round_min);
+        double gpu_total_min_a = (double)compaction_rounds * (io_round + gpu_round_min);
 
-    /* Total across all rounds */
-    double cpu_total_ms    = (double)compaction_rounds * (io_round + cpu_round_mean);
-    double gpu_total_ms    = (double)compaction_rounds * (io_round + gpu_round_mean);
-    double cpu_total_min   = (double)compaction_rounds * (io_round + cpu_round_min);
-    double gpu_total_min   = (double)compaction_rounds * (io_round + gpu_round_min);
+        double time_saved_mean = cpu_total_ms - gpu_total_ms;
+        double time_saved_min  = cpu_total_min_a - gpu_total_min_a;
 
-    double time_saved_mean = cpu_total_ms - gpu_total_ms;
-    double time_saved_min  = cpu_total_min - gpu_total_min;
+        auto tput_total = [&](double total_ms) {
+            return (double)total_simulated_keys / total_ms / 1e3;
+        };
 
-    auto tput_total = [&](double total_ms) {
-        return (double)total_simulated_keys / total_ms / 1e3;
-    };
+        printf("  Per-round timing (from single-round RunStats):\n");
+        printf("  %-40s  %9s  %9s\n", "Path", "mean(ms)", "min(ms)");
+        printf("  %-40s  %9s  %9s\n",
+               "────────────────────────────────────────", "---------", "---------");
+        printf("  %-40s  %9.2f  %9.2f\n",
+               "I/O (disk read, per round)",
+               io_round, io_round);
+        printf("  %-40s  %9.2f  %9.2f\n",
+               "CPU compute/round  (sort+bloom)",
+               cpu_round_mean, cpu_round_min);
+        printf("  %-40s  %9.2f  %9.2f\n",
+               "GPU wall/round     (merge+batched bloom)",
+               gpu_round_mean, gpu_round_min);
+        printf("  %-40s  %9.2f  %9.2f\n",
+               "CPU total/round    (I/O+sort+bloom)",
+               io_round + cpu_round_mean, io_round + cpu_round_min);
+        printf("  %-40s  %9.2f  %9.2f\n",
+               "GPU total/round    (I/O+wall)",
+               io_round + gpu_round_mean, io_round + gpu_round_min);
+        printf("\n");
 
-    /* --- Print per-round breakdown --- */
-    printf("  Per-round timing (from single-round RunStats):\n");
-    printf("  %-40s  %9s  %9s\n", "Path", "mean(ms)", "min(ms)");
-    printf("  %-40s  %9s  %9s\n",
-           "────────────────────────────────────────", "---------", "---------");
-    printf("  %-40s  %9.2f  %9.2f\n",
-           "I/O (disk read, per round)",
-           io_round, io_round);
-    printf("  %-40s  %9.2f  %9.2f\n",
-           "CPU compute/round  (sort+bloom)",
-           cpu_round_mean, cpu_round_min);
-    printf("  %-40s  %9.2f  %9.2f\n",
-           "GPU wall/round     (merge+batched bloom)",
-           gpu_round_mean, gpu_round_min);
-    printf("  %-40s  %9.2f  %9.2f\n",
-           "CPU total/round    (I/O+sort+bloom)",
-           io_round + cpu_round_mean, io_round + cpu_round_min);
-    printf("  %-40s  %9.2f  %9.2f\n",
-           "GPU total/round    (I/O+wall)",
-           io_round + gpu_round_mean, io_round + gpu_round_min);
-    printf("\n");
-
-    /* --- Print aggregate (N rounds) --- */
-    printf("  Aggregate over %d compaction rounds:\n", compaction_rounds);
-    printf("  %-40s  %9s  %9s  %12s\n",
-           "Path", "mean(ms)", "min(ms)", "M keys/s");
-    printf("  %-40s  %9s  %9s  %12s\n",
-           "────────────────────────────────────────",
-           "---------", "---------", "------------");
-    printf("  %-40s  %9.1f  %9.1f  %12.2f\n",
-           "CPU total  (I/O + sort + bloom)",
-           cpu_total_ms, cpu_total_min,
-           tput_total(cpu_total_ms));
-    printf("  %-40s  %9.1f  %9.1f  %12.2f\n",
-           "GPU total  (I/O + merge + batched bloom)",
-           gpu_total_ms, gpu_total_min,
-           tput_total(gpu_total_ms));
-    printf("\n");
-    printf("  Speedup (mean): %.2f×\n",
-           cpu_total_ms / gpu_total_ms);
-    printf("  Speedup (min):  %.2f×\n",
-           cpu_total_min / gpu_total_min);
-    printf("  Time saved (mean): %.1f ms  ( %.2f s )\n",
-           time_saved_mean, time_saved_mean / 1000.0);
-    printf("  Time saved (min):  %.1f ms  ( %.2f s )\n",
-           time_saved_min,  time_saved_min  / 1000.0);
+        printf("  Aggregate over %d compaction rounds:\n", compaction_rounds);
+        printf("  %-40s  %9s  %9s  %12s\n",
+               "Path", "mean(ms)", "min(ms)", "M keys/s");
+        printf("  %-40s  %9s  %9s  %12s\n",
+               "────────────────────────────────────────",
+               "---------", "---------", "------------");
+        printf("  %-40s  %9.1f  %9.1f  %12.2f\n",
+               "CPU total  (I/O + sort + bloom)",
+               cpu_total_ms, cpu_total_min_a,
+               tput_total(cpu_total_ms));
+        printf("  %-40s  %9.1f  %9.1f  %12.2f\n",
+               "GPU total  (I/O + merge + batched bloom)",
+               gpu_total_ms, gpu_total_min_a,
+               tput_total(gpu_total_ms));
+        printf("\n");
+        printf("  Speedup (mean): %.2f×\n",
+               cpu_total_ms / gpu_total_ms);
+        printf("  Speedup (min):  %.2f×\n",
+               cpu_total_min_a / gpu_total_min_a);
+        printf("  Time saved (mean): %.1f ms  ( %.2f s )\n",
+               time_saved_mean, time_saved_mean / 1000.0);
+        printf("  Time saved (min):  %.1f ms  ( %.2f s )\n",
+               time_saved_min,  time_saved_min  / 1000.0);
+    }
 }
 
 /* =========================================================================
@@ -880,8 +871,9 @@ static void usage(const char* prog)
         "  --overhead        BYTES  per-entry SST overhead bytes [default: 20]\n"
         "  --fpr_samples     N      non-member samples for FPR   [default: 10000]\n"
         "  --runs            N      timed repetitions per section [default: 5]\n"
-        "  --compaction_rounds N    simulate N compaction events (Benchmark 4) [default: 0 = skip]\n"
-        "  --fillrandom_keys M      auto-compute rounds for M total keys (overrides --compaction_rounds)\n"
+        "  --compaction_rounds N    simulate N compaction rounds in Benchmark 3 [default: 0 = skip]\n"
+        "  --fillrandom_keys N      auto-compute rounds for N total keys (overrides --compaction_rounds)\n"
+        "                           Accepts K/M/B suffixes: 10M = 10,000,000  200M  1B  500K\n"
         "  --help\n",
         prog);
 }
@@ -915,7 +907,7 @@ int main(int argc, char* argv[])
         else if (a == "--fpr_samples") fpr_samples       = std::stoi(next());
         else if (a == "--runs")            runs              = std::stoi(next());
         else if (a == "--compaction_rounds") compaction_rounds = std::stoi(next());
-        else if (a == "--fillrandom_keys")   fillrandom_keys   = std::stoll(next());
+        else if (a == "--fillrandom_keys")   fillrandom_keys   = parse_count(next());
         else if (a == "--help" || a == "-h") { usage(argv[0]); return 0; }
         else { fprintf(stderr, "error: unknown option '%s'\n", a.c_str()); return 1; }
     }
@@ -977,12 +969,7 @@ int main(int argc, char* argv[])
                                  overhead_bytes, fpr_samples, runs);
 
     /* ================================================================
-     * Benchmark 3: Total compaction job
-     * ================================================================ */
-    bench_total_compaction(mr, br, io_ms, meta.total_keys, runs);
-
-    /* ================================================================
-     * Benchmark 4: fillrandom simulation (optional)
+     * Benchmark 3: Total compaction job + fillrandom simulation
      * ================================================================ */
     if (fillrandom_keys > 0) {
         compaction_rounds = (int)(((int64_t)fillrandom_keys + (int64_t)meta.total_keys - 1)
@@ -992,9 +979,7 @@ int main(int argc, char* argv[])
                compaction_rounds,
                (unsigned long long)meta.total_keys);
     }
-    if (compaction_rounds > 0) {
-        bench_fillrandom_simulation(mr, br, io_ms, meta.total_keys, compaction_rounds);
-    }
+    bench_total_compaction(mr, br, io_ms, meta.total_keys, runs, compaction_rounds);
 
     hr();
     printf("Done.\n");

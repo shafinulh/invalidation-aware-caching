@@ -15,8 +15,9 @@
 #   --overhead         BYTES  per-entry SST overhead          [default: 20]
 #   --outdir           DIR    parent results directory        [default: ./results]
 #   --values           LIST   comma-separated value sizes (B) [default: 32,64,128]
-#   --fillrandom_keys  LIST   comma-separated total key counts to simulate
-#                             via Benchmark 4.  0 = skip.    [default: 0]
+#   --fillrandom_keys  LIST   comma-separated total key counts to simulate.
+#                             Accepts K/M/B suffixes (10M, 200M, 1B).
+#                             0 = skip.                  [default: 0]
 #   --help / -h
 #
 # Each invocation saves into: <outdir>/run_YYYY-MM-DD_HH-MM-SS/
@@ -25,9 +26,9 @@
 #
 # Examples:
 #   bash test.sh --dataset dataset
-#   bash test.sh --dataset dataset --values 32,64,128 --fillrandom_keys 1000000,10000000
-#   bash test.sh --dataset dataset --runs 10 --fillrandom_keys 10000000
-#   bash test.sh --dataset dataset --values 32,64,128 --fillrandom_keys 1000000,10000000,100000000
+#   bash test.sh --dataset dataset --values 32,64,128 --fillrandom_keys 1M,10M
+#   bash test.sh --dataset dataset --runs 10 --fillrandom_keys 10M
+#   bash test.sh --dataset dataset --values 32,64,128 --fillrandom_keys 1M,10M,200M
 # ---------------------------------------------------------------------------
 set -euo pipefail
 
@@ -80,6 +81,22 @@ mkdir -p "$RUN_DIR"
 # -- convert comma lists to arrays -------------------------------------------
 IFS=',' read -ra VAL_ARR  <<< "$VALUE_SIZES"
 IFS=',' read -ra KEYS_ARR <<< "$FILLRANDOM_KEYS"
+
+# -- helper: parse K/M/B suffixes to plain integer: 10M -> 10000000 ----------
+parse_count() {
+    local s="$1"
+    case "${s: -1}" in
+        k|K) echo "$(echo "${s%?} * 1000"         | bc | cut -d. -f1)" ;;
+        m|M) echo "$(echo "${s%?} * 1000000"       | bc | cut -d. -f1)" ;;
+        b|B) echo "$(echo "${s%?} * 1000000000"    | bc | cut -d. -f1)" ;;
+        *)   echo "$s" ;;
+    esac
+}
+
+# Normalise KEYS_ARR entries to plain integers (so arithmetic comparisons work)
+for i in "${!KEYS_ARR[@]}"; do
+    KEYS_ARR[$i]=$(parse_count "${KEYS_ARR[$i]}")
+done
 
 # -- helper: human-readable key count: 1000000 -> "1M", 500000 -> "500K" ----
 human_keys() {
