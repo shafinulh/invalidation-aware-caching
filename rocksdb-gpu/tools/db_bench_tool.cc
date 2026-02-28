@@ -428,6 +428,17 @@ DEFINE_double(read_random_exp_range, 0.0,
               "The larger the number is, the more skewed the reads are. "
               "Only used in readrandom and multireadrandom benchmarks.");
 
+DEFINE_string(key_dist, "uniform",
+              "Key distribution for random read/write operations. "
+              "'uniform' (default) gives no locality. "
+              "'zipfian' uses a Zipfian (power-law) distribution controlled by "
+              "--zipf_alpha, giving YCSB-style hot/cold key locality.");
+
+DEFINE_double(zipf_alpha, 0.99,
+              "Zipfian shape parameter (s). Higher values concentrate more "
+              "accesses on fewer hot keys. 0.99 is the YCSB default. "
+              "Only used when --key_dist=zipfian.");
+
 DEFINE_bool(histogram, false, "Print histogram of operation timings");
 
 DEFINE_bool(confidence_interval_only, false,
@@ -2258,6 +2269,80 @@ class ReporterAgent {
 };
 
 // ---------------------------------------------------------------------------
+// ZipfianGenerator – YCSB-compatible Zipfian distribution.
+//
+// Generates integers in [0, n) following a Zipf(alpha) power-law.
+// Uses the "scrambled Zipfian" approach: compute a Zipfian rank, then
+// FNV-hash it so that hot keys are spread across the keyspace rather
+// than concentrated at rank 0.
+//
+// The core sampling method is the rejection-inversion algorithm from
+// "Non-Uniform Random Variate Generation" (Hormann & Derflinger),
+// which is the same algorithm used by the YCSB benchmark suite.
+//
+// NOTE: The Zeta() pre-computation is O(n) and is performed once at
+// construction.  For num_items > ~100M this takes a few seconds.
+// ---------------------------------------------------------------------------
+class ZipfianGenerator {
+ public:
+  ZipfianGenerator(uint64_t num_items, double alpha)
+      : num_items_(num_items), theta_(alpha) {
+    zeta2_ = Zeta(2);
+    zetan_ = Zeta(num_items_);
+    eta_ = (1.0 - std::pow(2.0 / static_cast<double>(num_items_),
+                           1.0 - theta_)) /
+           (1.0 - zeta2_ / zetan_);
+    alpha_recip_ = 1.0 / (1.0 - theta_);
+  }
+
+  // Return the next Zipfian-distributed value in [0, num_items_).
+  uint64_t Next(Random64* rng) {
+    double u = static_cast<double>(rng->Next()) /
+               static_cast<double>(std::numeric_limits<uint64_t>::max());
+    double uz = u * zetan_;
+    uint64_t val;
+    if (uz < 1.0) {
+      val = 0;
+    } else if (uz < 1.0 + std::pow(0.5, theta_)) {
+      val = 1;
+    } else {
+      val = static_cast<uint64_t>(
+          static_cast<double>(num_items_) *
+          std::pow(eta_ * u - eta_ + 1.0, alpha_recip_));
+    }
+    return ScrambleWithFNV(val) % num_items_;
+  }
+
+ private:
+  double Zeta(uint64_t n) const {
+    double sum = 0.0;
+    for (uint64_t i = 1; i <= n; ++i) {
+      sum += 1.0 / std::pow(static_cast<double>(i), theta_);
+    }
+    return sum;
+  }
+
+  static uint64_t ScrambleWithFNV(uint64_t val) {
+    constexpr uint64_t kFNVOffsetBasis = 14695981039346656037ULL;
+    constexpr uint64_t kFNVPrime = 1099511628211ULL;
+    uint64_t hash = kFNVOffsetBasis;
+    for (int i = 0; i < 8; ++i) {
+      hash ^= (val & 0xFF);
+      hash *= kFNVPrime;
+      val >>= 8;
+    }
+    return hash;
+  }
+
+  uint64_t num_items_;
+  double theta_;
+  double zeta2_;
+  double zetan_;
+  double eta_;
+  double alpha_recip_;
+};
+
+// ---------------------------------------------------------------------------
 // MetricsCollectorAgent – periodic block-cache / latency / compaction CSV.
 // ---------------------------------------------------------------------------
 class MetricsCollectorAgent {
@@ -3070,6 +3155,7 @@ class Benchmark {
   int64_t reads_;
   int64_t deletes_;
   double read_random_exp_range_;
+  std::unique_ptr<ZipfianGenerator> zipfian_generator_;
   int64_t writes_;
   int64_t readwrites_;
   int64_t merge_keys_;
@@ -3791,6 +3877,18 @@ class Benchmark {
       max_num_range_tombstones_ = FLAGS_max_num_range_tombstones;
       write_options_ = WriteOptions();
       read_random_exp_range_ = FLAGS_read_random_exp_range;
+      if (FLAGS_key_dist == "zipfian") {
+        fprintf(stdout,
+                "Using Zipfian key distribution (alpha=%.2f, n=%" PRId64 ")\n",
+                FLAGS_zipf_alpha, FLAGS_num);
+        zipfian_generator_.reset(new ZipfianGenerator(
+            static_cast<uint64_t>(FLAGS_num), FLAGS_zipf_alpha));
+      } else if (FLAGS_key_dist != "uniform") {
+        fprintf(stderr,
+                "Unknown --key_dist '%s'; use 'uniform' or 'zipfian'\n",
+                FLAGS_key_dist.c_str());
+        db_bench_exit(1);
+      }
       if (FLAGS_sync) {
         write_options_.sync = true;
       }
@@ -6644,11 +6742,13 @@ class Benchmark {
   }
 
   int64_t GetRandomKey(Random64* rand) {
-    uint64_t rand_int = rand->Next();
     int64_t key_rand;
-    if (read_random_exp_range_ == 0) {
-      key_rand = rand_int % FLAGS_num;
+    if (zipfian_generator_) {
+      key_rand = static_cast<int64_t>(zipfian_generator_->Next(rand));
+    } else if (read_random_exp_range_ == 0) {
+      key_rand = rand->Next() % FLAGS_num;
     } else {
+      uint64_t rand_int = rand->Next();
       const uint64_t kBigInt = static_cast<uint64_t>(1U) << 62;
       long double order = -static_cast<long double>(rand_int % kBigInt) /
                           static_cast<long double>(kBigInt) *
@@ -7509,7 +7609,7 @@ class Benchmark {
       options.snapshot = nullptr;
     }
     while (!duration.Done(1)) {
-      int64_t seek_pos = thread->rand.Next() % FLAGS_num;
+      int64_t seek_pos = GetRandomKey(&thread->rand);
       GenerateKeyFromIntForSeek(static_cast<uint64_t>(seek_pos), FLAGS_num,
                                 &key);
       if (FLAGS_max_scan_distance != 0) {
@@ -8082,7 +8182,7 @@ class Benchmark {
     // the number of iterations is the larger of read_ or write_
     while (!duration.Done(1)) {
       DB* db = SelectDB(thread);
-      GenerateKeyFromInt(thread->rand.Next() % FLAGS_num, FLAGS_num, &key);
+      GenerateKeyFromInt(GetRandomKey(&thread->rand), FLAGS_num, &key);
       if (get_weight == 0 && put_weight == 0) {
         // one batch completed, reinitialize for next batch
         get_weight = FLAGS_readwritepercent;
@@ -8153,7 +8253,7 @@ class Benchmark {
     // the number of iterations is the larger of read_ or write_
     while (!duration.Done(1)) {
       DB* db = SelectDB(thread);
-      GenerateKeyFromInt(thread->rand.Next() % FLAGS_num, FLAGS_num, &key);
+      GenerateKeyFromInt(GetRandomKey(&thread->rand), FLAGS_num, &key);
       Slice ts;
       if (user_timestamp_size_ > 0) {
         // Read with newest timestamp because we are doing rmw.
@@ -8221,7 +8321,7 @@ class Benchmark {
     // the number of iterations is the larger of read_ or write_
     while (!duration.Done(1)) {
       DB* db = SelectDB(thread);
-      GenerateKeyFromInt(thread->rand.Next() % FLAGS_num, FLAGS_num, &key);
+      GenerateKeyFromInt(GetRandomKey(&thread->rand), FLAGS_num, &key);
       Slice ts;
       if (user_timestamp_size_ > 0) {
         ts = mock_app_clock_->Allocate(ts_guard.get());
@@ -8287,7 +8387,7 @@ class Benchmark {
     Duration duration(FLAGS_duration, readwrites_);
     while (!duration.Done(1)) {
       DB* db = SelectDB(thread);
-      GenerateKeyFromInt(thread->rand.Next() % FLAGS_num, FLAGS_num, &key);
+      GenerateKeyFromInt(GetRandomKey(&thread->rand), FLAGS_num, &key);
       Slice ts;
       if (user_timestamp_size_ > 0) {
         ts = mock_app_clock_->Allocate(ts_guard.get());

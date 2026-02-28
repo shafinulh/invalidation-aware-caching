@@ -64,6 +64,13 @@ CONFIG_KEYS=(
   LOAD_BENCH
   MIX_BENCH
 
+  # Key distribution knobs
+  KEY_DIST
+  ZIPF_ALPHA
+
+  # Block cache knobs
+  CACHE_SIZE
+
   # Metrics collection knobs
   METRICS_INTERVAL_MS
 )
@@ -145,6 +152,13 @@ OPEN_FILES="${OPEN_FILES:--1}"
 SUBCOMP_THREADS_LIST="${SUBCOMP_THREADS_LIST:-1 2 4 8}"
 BG_COMP_THREADS_LIST="${BG_COMP_THREADS_LIST:-}"
 
+# Key distribution (uniform = default, zipfian = YCSB-like)
+KEY_DIST="${KEY_DIST:-uniform}"
+ZIPF_ALPHA="${ZIPF_ALPHA:-0.99}"
+
+# Block cache size (default 128 MB; db_bench built-in default is 32 MB)
+CACHE_SIZE="${CACHE_SIZE:-134217728}"
+
 # Metrics collection (0 = disabled, value in milliseconds)
 METRICS_INTERVAL_MS="${METRICS_INTERVAL_MS:-0}"
 
@@ -153,6 +167,7 @@ LSM_TREE_ADDITIONAL_FLAGS=(
   --max_background_flushes="${MAX_BACKGROUND_FLUSHES}"
   --max_write_buffer_number="${MAX_WRITE_BUFFER_NUMBER}"
   --disable_wal="${DISABLE_WAL}"
+  --cache_size="${CACHE_SIZE}"
 )
 
 LSM_TREE_PAPER_FLAGS=(
@@ -171,6 +186,8 @@ WORKLOAD_FLAGS=(
   --key_size="${KEY_SIZE}"
   --threads="${THREADS}"
   --seed="${SEED}"
+  --key_dist="${KEY_DIST}"
+  --zipf_alpha="${ZIPF_ALPHA}"
 )
 
 OS_FLAGS=(
@@ -236,6 +253,13 @@ RUN_METADATA_KEYS=(
   LEVEL0_FILE_NUM_COMPACTION_TRIGGER
   LEVEL0_SLOWDOWN_WRITES_TRIGGER
   LEVEL0_STOP_WRITES_TRIGGER
+
+  # Key distribution
+  KEY_DIST
+  ZIPF_ALPHA
+
+  # Block cache
+  CACHE_SIZE
 
   # Workload-specific settings
   NUM_KEYS

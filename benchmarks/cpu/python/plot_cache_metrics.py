@@ -11,6 +11,7 @@ Reads metrics.csv files produced by the MetricsCollectorAgent in db_bench
 
 Usage:
     python3 plot_cache_metrics.py --metrics-csv /path/to/metrics.csv
+    python3 plot_cache_metrics.py --metrics-csv /path/to/metrics.csv --compaction-source csv
     python3 plot_cache_metrics.py --metrics-dir /path/to/run_dir   # finds metrics.csv recursively
     python3 plot_cache_metrics.py --metrics-dir /path/to/base --compare  # overlay multiple runs
 
@@ -21,9 +22,12 @@ Output:
 from __future__ import annotations
 
 import argparse
+import json
+import re
 import sys
+from datetime import datetime
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 try:
     import pandas as pd
@@ -57,11 +61,31 @@ def load_metrics(path: Path) -> pd.DataFrame:
     # Derive convenience columns.
     df["cache_total"] = df["cache_hit"] + df["cache_miss"]
     df["hit_rate_pct"] = df["cache_hit_rate"] * 100.0
-    # Detect intervals where compaction was active.
-    df["compaction_active"] = (
-        (df["compact_read_bytes"] > 0) | (df["compact_write_bytes"] > 0)
-    )
     return df
+
+
+def compaction_events_from_csv(df: pd.DataFrame) -> List[Tuple[float, float]]:
+    """Derive (start_secs, end_secs) compaction intervals from the metrics CSV.
+
+    A compaction is considered active for any interval where
+    compact_read_bytes > 0 or compact_write_bytes > 0.  Contiguous
+    active intervals are merged into a single (start, end) span.
+    """
+    active = ((df["compact_read_bytes"] > 0) | (df["compact_write_bytes"] > 0)).values
+    secs = df["secs_elapsed"].values
+    events: List[Tuple[float, float]] = []
+    in_span = False
+    start = 0.0
+    for i, a in enumerate(active):
+        if a and not in_span:
+            start = float(secs[i])
+            in_span = True
+        elif not a and in_span:
+            events.append((start, float(secs[i])))
+            in_span = False
+    if in_span:
+        events.append((start, float(secs[-1])))
+    return events
 
 
 def _label_from_path(csv_path: Path) -> str:
@@ -81,10 +105,18 @@ def _label_from_path(csv_path: Path) -> str:
 # Plotting functions
 # ---------------------------------------------------------------------------
 
-def plot_single_run(df: pd.DataFrame, label: str, out_dir: Path) -> None:
+def plot_single_run(
+    df: pd.DataFrame,
+    label: str,
+    out_dir: Path,
+    compaction_events: Optional[List[Tuple[float, float]]] = None,
+    compaction_source: str = "log",
+) -> None:
     """Generate per-run plots for one metrics.csv."""
     out_dir.mkdir(parents=True, exist_ok=True)
     secs = df["secs_elapsed"]
+    if compaction_events is None:
+        compaction_events = []
 
     # --- 1. Hit-rate + compaction shading ---
     fig, ax1 = plt.subplots(figsize=(14, 5))
@@ -95,7 +127,7 @@ def plot_single_run(df: pd.DataFrame, label: str, out_dir: Path) -> None:
     ax1.yaxis.set_major_formatter(mticker.PercentFormatter(100))
 
     # Shade compaction intervals.
-    _shade_compaction(ax1, df)
+    _shade_compaction(ax1, compaction_events)
 
     # Overlay compaction bytes on secondary axis.
     ax2 = ax1.twinx()
@@ -116,7 +148,7 @@ def plot_single_run(df: pd.DataFrame, label: str, out_dir: Path) -> None:
     fig, ax = plt.subplots(figsize=(14, 5))
     ax.plot(secs, df["get_p95_us"], linewidth=0.8, color="tab:red", label="Get P95")
     ax.plot(secs, df["get_p50_us"], linewidth=0.6, color="tab:pink", alpha=0.6, label="Get P50")
-    _shade_compaction(ax, df)
+    _shade_compaction(ax, compaction_events)
     ax.set_xlabel("Elapsed time (s)")
     ax.set_ylabel("Latency (µs)")
     ax.legend(fontsize=8)
@@ -128,7 +160,7 @@ def plot_single_run(df: pd.DataFrame, label: str, out_dir: Path) -> None:
     # --- 3. Interval throughput (ops/interval) ---
     fig, ax = plt.subplots(figsize=(14, 5))
     ax.plot(secs, df["get_count"], linewidth=0.8, color="tab:green", label="Get ops/interval")
-    _shade_compaction(ax, df)
+    _shade_compaction(ax, compaction_events)
     ax.set_xlabel("Elapsed time (s)")
     ax.set_ylabel("Operations")
     ax.legend(fontsize=8)
@@ -141,7 +173,7 @@ def plot_single_run(df: pd.DataFrame, label: str, out_dir: Path) -> None:
     fig, ax = plt.subplots(figsize=(14, 5))
     ax.plot(secs, df["cache_hit"], linewidth=0.8, color="tab:blue", label="Total hit")
     ax.plot(secs, df["cache_miss"], linewidth=0.8, color="tab:red", label="Total miss")
-    _shade_compaction(ax, df)
+    _shade_compaction(ax, compaction_events)
     ax.set_xlabel("Elapsed time (s)")
     ax.set_ylabel("Count / interval")
     ax.legend(fontsize=8, loc="upper left")
@@ -155,7 +187,7 @@ def plot_single_run(df: pd.DataFrame, label: str, out_dir: Path) -> None:
     ax.plot(secs, df["data_hit"], linewidth=0.8, color="tab:blue", label="Data hit")
     ax.plot(secs, df["index_hit"], linewidth=0.8, color="tab:cyan", label="Index hit")
     ax.plot(secs, df["filter_hit"], linewidth=0.8, color="tab:green", label="Filter hit")
-    _shade_compaction(ax, df)
+    _shade_compaction(ax, compaction_events)
     ax.set_xlabel("Elapsed time (s)")
     ax.set_ylabel("Hits / interval")
     ax.legend(fontsize=8, loc="upper left")
@@ -169,7 +201,7 @@ def plot_single_run(df: pd.DataFrame, label: str, out_dir: Path) -> None:
     ax.plot(secs, df["data_miss"], linewidth=0.8, color="tab:red", label="Data miss")
     ax.plot(secs, df["index_miss"], linewidth=0.8, color="tab:orange", label="Index miss")
     ax.plot(secs, df["filter_miss"], linewidth=0.8, color="tab:brown", label="Filter miss")
-    _shade_compaction(ax, df)
+    _shade_compaction(ax, compaction_events)
     ax.set_xlabel("Elapsed time (s)")
     ax.set_ylabel("Misses / interval")
     ax.legend(fontsize=8, loc="upper left")
@@ -188,6 +220,66 @@ def plot_single_run(df: pd.DataFrame, label: str, out_dir: Path) -> None:
         fig.tight_layout()
         fig.savefig(out_dir / "write_stalls.png", dpi=150)
         plt.close(fig)
+
+    # --- 8. Compaction detection: CSV bytes vs LOG events ---
+    fig, (ax_top, ax_bot) = plt.subplots(
+        2, 1, figsize=(14, 7), sharex=True,
+        gridspec_kw={"height_ratios": [2, 1], "hspace": 0.08},
+    )
+
+    # Top panel: compact_read_bytes and compact_write_bytes from metrics CSV.
+    compact_read_mb  = df["compact_read_bytes"]  / (1024 * 1024)
+    compact_write_mb = df["compact_write_bytes"] / (1024 * 1024)
+    ax_top.fill_between(secs, 0, compact_read_mb,  alpha=0.55, color="tab:blue",
+                        label="compact_read_bytes (MB/interval)")
+    ax_top.fill_between(secs, 0, compact_write_mb, alpha=0.45, color="tab:orange",
+                        label="compact_write_bytes (MB/interval)")
+    ax_top.set_ylabel("Compaction I/O (MB / interval)")
+    ax_top.legend(fontsize=8, loc="upper left")
+    source_label = "LOG events" if compaction_source == "log" else "CSV bytes > 0"
+    ax_top.set_title(
+        f"Compaction Detection ({source_label}) vs CSV bytes – {label}"
+    )
+
+    # Overlay active-source start (red) / end (blue) lines on top panel.
+    for start, end in compaction_events:
+        ax_top.axvline(start, color="red",  linewidth=0.7, alpha=0.6)
+        ax_top.axvline(end,   color="blue", linewidth=0.7, alpha=0.6)
+
+    # Bottom panel: binary active/inactive.
+    # Grey fill = CSV bytes > 0 (always shown for reference).
+    csv_active = ((df["compact_read_bytes"] > 0) | (df["compact_write_bytes"] > 0)).astype(float)
+    ax_bot.fill_between(secs, 0, csv_active, step="post", alpha=0.5,
+                        color="tab:gray", label="CSV: bytes > 0")
+
+    # Active-source spans drawn as a band.
+    for start, end in compaction_events:
+        ax_bot.axvspan(start, end, ymin=0.55, ymax=0.95, alpha=0.55,
+                       color="tab:orange", label="_nolegend_")
+        ax_bot.axvline(start, color="red",  linewidth=0.7, alpha=0.7)
+        ax_bot.axvline(end,   color="blue", linewidth=0.7, alpha=0.7)
+
+    # Custom legend entries for the bottom panel.
+    from matplotlib.patches import Patch
+    from matplotlib.lines import Line2D
+    span_label = "LOG: compaction span" if compaction_source == "log" else "CSV: compaction span"
+    start_label = "LOG: compaction_started" if compaction_source == "log" else "CSV: first byte > 0"
+    end_label   = "LOG: compaction_finished" if compaction_source == "log" else "CSV: last byte > 0"
+    legend_handles = [
+        Patch(facecolor="tab:gray",   alpha=0.5,  label="CSV: compact bytes > 0"),
+        Patch(facecolor="tab:orange", alpha=0.55, label=span_label),
+        Line2D([0], [0], color="red",  linewidth=1, label=start_label),
+        Line2D([0], [0], color="blue", linewidth=1, label=end_label),
+    ]
+    ax_bot.legend(handles=legend_handles, fontsize=8, loc="upper left")
+    ax_bot.set_yticks([0, 1])
+    ax_bot.set_yticklabels(["idle", "active"])
+    ax_bot.set_ylim(-0.05, 1.25)
+    ax_bot.set_xlabel("Elapsed time (s)")
+    ax_bot.set_ylabel("Active")
+
+    fig.savefig(out_dir / "compaction_detection_comparison.png", dpi=150, bbox_inches="tight")
+    plt.close(fig)
 
     print(f"  Saved plots → {out_dir}/")
 
@@ -225,21 +317,89 @@ def plot_comparison(runs: List[tuple[str, pd.DataFrame]], out_dir: Path) -> None
     print(f"  Saved comparison plots → {out_dir}/")
 
 
-def _shade_compaction(ax, df: pd.DataFrame) -> None:
-    """Add light orange vertical spans where compaction was active."""
-    active = df["compaction_active"].values
-    secs = df["secs_elapsed"].values
-    in_span = False
-    start = 0.0
-    for i, a in enumerate(active):
-        if a and not in_span:
-            start = secs[i]
-            in_span = True
-        elif not a and in_span:
-            ax.axvspan(start, secs[i], alpha=0.10, color="tab:orange")
-            in_span = False
-    if in_span:
-        ax.axvspan(start, secs[-1], alpha=0.10, color="tab:orange")
+# ---------------------------------------------------------------------------
+# RocksDB LOG parsing – compaction events
+# ---------------------------------------------------------------------------
+
+_TS_RE = re.compile(r"^(\d{4}/\d{2}/\d{2}-\d{2}:\d{2}:\d{2}\.\d+)")
+_EVENT_LOG_RE = re.compile(r"EVENT_LOG_v1\s+(\{.*\})\s*$")
+_TS_FMT = "%Y/%m/%d-%H:%M:%S.%f"
+
+
+def _parse_ts(ts_str: str) -> datetime:
+    return datetime.strptime(ts_str, _TS_FMT)
+
+
+def parse_compaction_events(log_path: Path) -> List[Tuple[float, float]]:
+    """Parse compaction start/finish times from a RocksDB LOG file.
+
+    Returns a list of (start_secs, end_secs) tuples relative to the
+    first timestamp in the LOG file.
+    """
+    base_ts: Optional[datetime] = None
+    # job_id -> start_secs
+    pending: dict[int, float] = {}
+    events: List[Tuple[float, float]] = []
+
+    with open(log_path) as f:
+        for line in f:
+            ts_match = _TS_RE.match(line)
+            if not ts_match:
+                continue
+            ts = _parse_ts(ts_match.group(1))
+            if base_ts is None:
+                base_ts = ts
+
+            ev_match = _EVENT_LOG_RE.search(line)
+            if not ev_match:
+                continue
+            try:
+                payload = json.loads(ev_match.group(1))
+            except json.JSONDecodeError:
+                continue
+
+            event = payload.get("event", "")
+            job = payload.get("job")
+            if job is None:
+                continue
+
+            elapsed = (ts - base_ts).total_seconds()
+
+            if event == "compaction_started":
+                pending[job] = elapsed
+            elif event == "compaction_finished":
+                start = pending.pop(job, None)
+                if start is not None:
+                    events.append((start, elapsed))
+
+    return events
+
+
+def _find_rocksdb_log(csv_path: Path, explicit: Optional[Path] = None) -> Optional[Path]:
+    """Locate rocksdb_LOG_after_mix.txt next to a metrics.csv."""
+    if explicit and explicit.is_file():
+        return explicit
+    metadata = csv_path.parent / "metadata"
+    # Try common naming conventions.
+    for name in ("rocksdb_LOG_after_mix.txt", "rocksdb_LOG_after_load.txt"):
+        candidate = metadata / name
+        if candidate.is_file():
+            return candidate
+    # Fallback: any rocksdb_LOG_*.txt.
+    for candidate in sorted(metadata.glob("rocksdb_LOG_*.txt")):
+        return candidate
+    return None
+
+
+def _shade_compaction(
+    ax,
+    compaction_events: List[Tuple[float, float]],
+) -> None:
+    """Draw compaction spans: red line at start, blue line at end, orange fill."""
+    for start, end in compaction_events:
+        ax.axvline(start, color="red", linewidth=0.5, alpha=0.5)
+        ax.axvline(end, color="blue", linewidth=0.5, alpha=0.5)
+        ax.axvspan(start, end, alpha=0.10, color="tab:orange")
 
 
 # ---------------------------------------------------------------------------
@@ -255,6 +415,12 @@ def parse_args() -> argparse.Namespace:
                    help="Output directory for plots.  Default: alongside each metrics.csv.")
     p.add_argument("--compare", action="store_true",
                    help="When using --metrics-dir, overlay all found runs in comparison plots.")
+    p.add_argument("--rocksdb-log", type=Path, default=None,
+                   help="Path to rocksdb LOG file.  Auto-detected from metadata/ if omitted.")
+    p.add_argument("--compaction-source", choices=["csv", "log"], default="log",
+                   help="How to determine compaction intervals: "
+                        "'log' (default) parses compaction_started/finished from the RocksDB LOG; "
+                        "'csv' uses compact_read_bytes > 0 from the metrics CSV.")
     return p.parse_args()
 
 
@@ -278,8 +444,23 @@ def main() -> None:
         df = load_metrics(csv_path)
         runs.append((label, df))
 
+        # Resolve compaction events from the chosen source.
+        compaction_events: List[Tuple[float, float]] = []
+        if args.compaction_source == "log":
+            log_path = _find_rocksdb_log(csv_path, args.rocksdb_log)
+            if log_path:
+                compaction_events = parse_compaction_events(log_path)
+                print(f"  [log]  Parsed {len(compaction_events)} compaction events from {log_path.name}")
+            else:
+                print(f"  Warning: no RocksDB LOG found for {csv_path}; falling back to CSV source.")
+                compaction_events = compaction_events_from_csv(df)
+                print(f"  [csv]  Derived {len(compaction_events)} compaction spans from compact bytes")
+        else:
+            compaction_events = compaction_events_from_csv(df)
+            print(f"  [csv]  Derived {len(compaction_events)} compaction spans from compact bytes")
+
         out = args.output_dir if args.output_dir else csv_path.parent / "plots"
-        plot_single_run(df, label, out)
+        plot_single_run(df, label, out, compaction_events, args.compaction_source)
 
     if args.compare and len(runs) > 1:
         comp_out = args.output_dir if args.output_dir else csv_paths[0].parent.parent / "comparison_plots"
