@@ -189,38 +189,49 @@ echo ""
 echo "================================================================"
 
 if [[ "$FILLRANDOM_KEYS" == "0" ]]; then
-    echo "  SUMMARY  (best-of-${RUNS}, min latency, single compaction round)"
+    # No fillrandom → show single-round Bench 1+2 stats
+    echo "  SUMMARY  (best-of-${RUNS}, min latency, single round)"
     echo "================================================================"
-    printf "  %-12s  %-10s  %-14s  %-15s  %-18s\n" \
-           "value_size" "keys/block" "CPU total(ms)" "GPU batched(ms)" "speedup(1-round)"
-    printf "  %-12s  %-10s  %-14s  %-15s  %-18s\n" \
-           "----------" "----------" "-------------" "---------------" "----------------"
+    printf "  %-12s  %-10s  %-14s  %-14s  %-14s  %-10s\n" \
+           "value_size" "keys/block" "CPU sort(ms)" "CPU bloom(ms)" "GPU batch(ms)" "speedup"
+    printf "  %-12s  %-10s  %-14s  %-14s  %-14s  %-10s\n" \
+           "----------" "----------" "------------" "------------" "------------" "-------"
     for i in "${!ALL_LOGS[@]}"; do
         L="${ALL_LOGS[$i]}"; V="${ALL_VALS[$i]}"
-        kpb=$(grep -E "Keys/block:"                         "$L" | head -1 | awk '{print $2}' || echo "?")
-        cpu=$(grep -E "CPU total.*I/O"                      "$L" | head -1 | awk '{print $8}' || echo "?")
-        gpu=$(grep -E "GPU wall.*batched bloom"              "$L" | head -1 | awk '{print $7}' || echo "?")
-        spd=$(grep -E "Speedup.*GPU full-batched.*CPU total" "$L" | head -1 | awk '{print $7}' || echo "?")
-        printf "  %-12s  %-10s  %-14s  %-15s  %-18s\n" "${V}B" "$kpb" "$cpu" "$gpu" "$spd"
+        kpb=$(grep -oP  'Keys/block:\s+\K[0-9]+'                     "$L" | head -1 || echo "?")
+        cpusort=$(grep -P 'CPU sort'                                   "$L" | grep -oP 'min=\s*\K[0-9.]+' | head -1 || echo "?")
+        cpubloom=$(grep -P 'CPU bloom'                                 "$L" | grep -oP 'min=\s*\K[0-9.]+' | head -1 || echo "?")
+        gpubatch=$(grep -P 'GPU batched wall'                          "$L" | grep -oP 'min=\s*\K[0-9.]+' | head -1 || echo "?")
+        # compute combined speedup: (cpu_sort + cpu_bloom) / (gpu_merge_wall + gpu_batched)
+        gpuwall=$(grep -P 'GPU wall \(H2D'                             "$L" | grep -oP 'min=\s*\K[0-9.]+' | head -1 || echo "?")
+        if [[ "$cpusort" != "?" && "$cpubloom" != "?" && "$gpuwall" != "?" && "$gpubatch" != "?" ]]; then
+            spd=$(echo "scale=2; ($cpusort + $cpubloom) / ($gpuwall + $gpubatch)" | bc)x
+        else
+            spd="?"
+        fi
+        printf "  %-12s  %-10s  %-14s  %-14s  %-14s  %-10s\n" \
+               "${V}B" "$kpb" "$cpusort" "$cpubloom" "$gpubatch" "$spd"
     done
 else
-    echo "  SUMMARY  (best-of-${RUNS} single-round + fillrandom aggregate mean)"
+    # fillrandom mode → show per-round and aggregate speedup from Benchmark 3
+    echo "  SUMMARY  (best-of-${RUNS}, fillrandom aggregate)"
     echo "================================================================"
-    printf "  %-12s  %-10s  %-10s  %-14s  %-15s  %-18s  %-16s\n" \
-           "value_size" "fr_keys" "keys/block" "CPU/round(ms)" "GPU/round(ms)" "speedup(1-round)" "speedup(fr-agg)"
-    printf "  %-12s  %-10s  %-10s  %-14s  %-15s  %-18s  %-16s\n" \
-           "----------" "-------" "----------" "-------------" "-------------" "----------------" "---------------"
+    printf "  %-12s  %-10s  %-10s  %-16s  %-16s  %-16s  %-16s\n" \
+           "value_size" "fr_keys" "keys/block" "CPU/round(ms)" "GPU/round(ms)" "speedup(mean)" "time saved"
+    printf "  %-12s  %-10s  %-10s  %-16s  %-16s  %-16s  %-16s\n" \
+           "----------" "-------" "----------" "--------------" "--------------" "--------------" "--------------"
     for i in "${!ALL_LOGS[@]}"; do
         L="${ALL_LOGS[$i]}"; V="${ALL_VALS[$i]}"; K="${ALL_KEYS[$i]}"
-        kpb=$(grep -E "Keys/block:"                          "$L" | head -1 | awk '{print $2}'  || echo "?")
-        cpu=$(grep -E "CPU total.*I/O"                       "$L" | head -1 | awk '{print $8}'  || echo "?")
-        gpu=$(grep -E "GPU wall.*batched bloom"               "$L" | head -1 | awk '{print $7}'  || echo "?")
-        spd=$(grep -E "Speedup.*GPU full-batched.*CPU total"  "$L" | head -1 | awk '{print $7}'  || echo "?")
-        frspd=$(grep -E "Speedup .mean.:"                     "$L" | head -1 | awk '{print $3}'  || echo "?")
-        [[ "$K" == "0" ]] && frspd="N/A"
-        HK="$K"; [[ "$K" != "0" ]] && HK=$(human_keys "$K")
-        printf "  %-12s  %-10s  %-10s  %-14s  %-15s  %-18s  %-16s\n" \
-               "${V}B" "$HK" "$kpb" "$cpu" "$gpu" "$spd" "$frspd"
+        kpb=$(grep -oP  'Keys/block:\s+\K[0-9]+'                      "$L" | head -1 || echo "?")
+        # per-round min from Benchmark 3 table
+        cpu_round=$(grep -P 'CPU total/round'                          "$L" | head -1 | awk '{print $NF}' || echo "?")
+        gpu_round=$(grep -P 'GPU total/round'                          "$L" | head -1 | awk '{print $NF}' || echo "?")
+        # aggregate speedup and time saved from Benchmark 3
+        frspd=$(grep -P 'Speedup \(mean\):'                            "$L" | head -1 | awk '{print $3}' || echo "?")
+        tsaved=$(grep -P 'Time saved \(mean\):'                        "$L" | head -1 | awk '{print $4 " " $5}' || echo "?")
+        HK=$(human_keys "$K")
+        printf "  %-12s  %-10s  %-10s  %-16s  %-16s  %-16s  %-16s\n" \
+               "${V}B" "$HK" "$kpb" "$cpu_round" "$gpu_round" "$frspd" "$tsaved"
     done
 fi
 
