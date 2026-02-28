@@ -245,7 +245,6 @@ struct MergeResult {
 struct BloomResult {
     RunStats cpu;        /* CPU per-block bloom               */
     RunStats kernel;     /* GPU kernel-only (pre-transferred) */
-    RunStats serial;     /* GPU per-block H2D+kernel+sync+D2H */
     RunStats batched;    /* GPU 1×H2D + grid + 1×D2H          */
 };
 
@@ -529,16 +528,14 @@ static BloomResult bench_bloom(const std::vector<KVPair>& merged,
     }
     RunStats cpu_stats = RunStats::from(cpu_s);
 
-    /* ---- Serial wall pass: `runs` timed passes, bitvecs collected each run ---- */
-    printf("  Running GPU bloom serial wall (%d runs) ...\n", runs); fflush(stdout);
+    /* ---- Single serial pass to collect per-block bitvecs for validation ---- */
+    printf("  Building per-block bitvecs for validation ...\n"); fflush(stdout);
     std::vector<std::vector<uint8_t>> all_bitvecs(num_blocks,
                                                    std::vector<uint8_t>(bitvec_len, 0));
-    KVPair *d_block;
-    CUDA_CHECK(cudaMalloc(&d_block,  (size_t)keys_per_block * sizeof(KVPair)));
-    CUDA_CHECK(cudaMalloc(&d_bitvec, (size_t)bitvec_len     * sizeof(uint8_t)));
-    std::vector<double> serial_s(runs);
-    for (int r = 0; r < runs; ++r) {
-        auto t0 = std::chrono::steady_clock::now();
+    {
+        KVPair *d_block;
+        CUDA_CHECK(cudaMalloc(&d_block,  (size_t)keys_per_block * sizeof(KVPair)));
+        CUDA_CHECK(cudaMalloc(&d_bitvec, (size_t)bitvec_len     * sizeof(uint8_t)));
         for (int b = 0; b < num_blocks; ++b) {
             int offset     = b * keys_per_block;
             int block_keys = std::min(keys_per_block, (int)(total_keys - offset));
@@ -550,12 +547,9 @@ static BloomResult bench_bloom(const std::vector<KVPair>& merged,
             CUDA_CHECK(cudaMemcpy(all_bitvecs[b].data(), d_bitvec,
                                   bitvec_len * sizeof(uint8_t), cudaMemcpyDeviceToHost));
         }
-        serial_s[r] = std::chrono::duration<double,std::milli>(
-                          std::chrono::steady_clock::now() - t0).count();
+        cudaFree(d_block);
+        cudaFree(d_bitvec);
     }
-    RunStats serial_stats = RunStats::from(serial_s);
-    cudaFree(d_block);
-    cudaFree(d_bitvec);
 
     /* ---- Batched wall pass: `runs` timed passes ---- */
     printf("  Running GPU bloom batched wall (%d runs) ...\n", runs); fflush(stdout);
@@ -677,16 +671,13 @@ static BloomResult bench_bloom(const std::vector<KVPair>& merged,
            num_blocks, keys_per_block, K, byte_vector_len, runs);
     print_stat("CPU bloom (per-block)",      cpu_stats,    total_keys);
     print_stat("GPU kernel-only (no xfer)",  kernel_stats, total_keys);
-    print_stat("GPU serial wall (per-block)",serial_stats, total_keys);
     print_stat("GPU batched wall (1×H2D+grid+1×D2H)", batched_stats, total_keys);
     printf("  Speedup kernel    vs CPU (min): %.2f×\n",
            cpu_stats.min / kernel_stats.min);
     printf("  Speedup batched   vs CPU (min): %.2f×\n",
            cpu_stats.min / batched_stats.min);
-    printf("  Speedup batched   vs serial (min): %.2f×  (sync overhead eliminated)\n",
-           serial_stats.min / batched_stats.min);
-    printf("  No false negatives (serial):  %s\n", no_fn      ? "PASS ✓" : "FAIL ✗");
-    printf("  Batched vs serial match:      %s\n", batched_ok ? "PASS ✓" : "FAIL ✗");
+    printf("  No false negatives:  %s\n", no_fn      ? "PASS ✓" : "FAIL ✗");
+    printf("  Batched vs serial match:  %s\n", batched_ok ? "PASS ✓" : "FAIL ✗");
     printf("  FPR (measured):               %.4f%%\n", fpr * 100.0);
     printf("  FPR (theoretical):            %.4f%%  "
            "[K=%d, bits/key=%d, p=(1-e^{-K/m})^K]\n",
@@ -695,7 +686,6 @@ static BloomResult bench_bloom(const std::vector<KVPair>& merged,
     BloomResult r;
     r.cpu     = cpu_stats;
     r.kernel  = kernel_stats;
-    r.serial  = serial_stats;
     r.batched = batched_stats;
     return r;
 }
@@ -710,151 +700,86 @@ static void bench_total_compaction(const MergeResult& mr,
                                    int                 runs,
                                    int                 compaction_rounds)
 {
+    if (compaction_rounds <= 0) return;
+
     hr();
-    printf("BENCHMARK 3 – Total compaction job (Alg1 merge + Alg2 bloom)\n");
+    printf("BENCHMARK 3 – fillrandom compaction simulation (Merge + Bloom)\n");
     hr();
 
-    /* ---- GPU paths (all use .min = best hardware performance) ---- */
-    double gpu_kernel_min       = mr.kernel.min    + br.kernel.min;
-    double gpu_wall_serial_min  = mr.gpu_wall.min  + br.serial.min;
-    double gpu_wall_batched_min = mr.gpu_wall.min  + br.batched.min;
-    double gpu_full_serial_min  = io_ms + gpu_wall_serial_min;
-    double gpu_full_batched_min = io_ms + gpu_wall_batched_min;
+    uint64_t total_simulated_keys = (uint64_t)compaction_rounds * total_keys;
 
-    /* ---- CPU paths (use .min for fair hardware comparison) ---- */
-    double cpu_compute_min = mr.cpu.min + br.cpu.min;
-    double cpu_total_min   = io_ms + cpu_compute_min;
-
-    auto tput = [&](double ms) { return (double)total_keys / ms / 1e3; };
-
-    printf("\n  All times are best-of-%d runs (min).\n\n", runs);
-    printf("  %-48s  %9s  %12s\n", "Path", "Time (ms)", "M keys/s");
-    printf("  %-48s  %9s  %12s\n",
-           "────────────────────────────────────────────────",
-           "---------", "------------");
-    printf("  %-48s  %9.2f  %12.1f\n",
-           "CPU compute  (sort + bloom)",
-           cpu_compute_min,      tput(cpu_compute_min));
-    printf("  %-48s  %9.2f  %12.1f\n",
-           "CPU total    (I/O + sort + bloom)",
-           cpu_total_min,        tput(cpu_total_min));
-    printf("  %-48s  %9.2f  %12.1f\n",
-           "GPU kernel-only  (no transfers)",
-           gpu_kernel_min,       tput(gpu_kernel_min));
-    printf("  %-48s  %9.2f  %12.1f\n",
-           "GPU wall – serial bloom   (H2D+k+sync+D2H)",
-           gpu_wall_serial_min,  tput(gpu_wall_serial_min));
-    printf("  %-48s  %9.2f  %12.1f\n",
-           "GPU wall – batched bloom  (1×H2D+grid+1×D2H)",
-           gpu_wall_batched_min, tput(gpu_wall_batched_min));
-    printf("  %-48s  %9.2f  %12.1f\n",
-           "GPU full – serial   (I/O + serial wall)",
-           gpu_full_serial_min,  tput(gpu_full_serial_min));
-    printf("  %-48s  %9.2f  %12.1f\n",
-           "GPU full – batched  (I/O + batched wall)",
-           gpu_full_batched_min, tput(gpu_full_batched_min));
-
+    printf("  Compaction model:\n");
+    printf("    keys/compaction round = %llu  (%d SSTs flushed from MemTable)\n",
+           (unsigned long long)total_keys, 4);
+    printf("    compaction rounds     = %d\n", compaction_rounds);
+    printf("    total simulated keys  = %llu  (%.1f M)\n",
+           (unsigned long long)total_simulated_keys,
+           (double)total_simulated_keys / 1e6);
     printf("\n");
-    printf("  Breakdown min (ms):  I/O=%.2f  CPU sort=%.2f  CPU bloom=%.2f\n",
-           io_ms, mr.cpu.min, br.cpu.min);
-    printf("                       GPU merge k=%.2f   GPU bloom k=%.2f\n",
-           mr.kernel.min, br.kernel.min);
-    printf("                       GPU merge wall=%.2f GPU serial bloom=%.2f\n",
-           mr.gpu_wall.min, br.serial.min);
-    printf("                       GPU batched bloom=%.2f\n", br.batched.min);
+
+    /* Per-round timing from Benchmarks 1 & 2 */
+    double cpu_round_mean  = mr.cpu.mean  + br.cpu.mean;
+    double cpu_round_min   = mr.cpu.min   + br.cpu.min;
+    double gpu_round_mean  = mr.gpu_wall.mean + br.batched.mean;
+    double gpu_round_min   = mr.gpu_wall.min  + br.batched.min;
+    double io_round        = io_ms;
+
+    double cpu_total_ms    = (double)compaction_rounds * (io_round + cpu_round_mean);
+    double gpu_total_ms    = (double)compaction_rounds * (io_round + gpu_round_mean);
+    double cpu_total_min   = (double)compaction_rounds * (io_round + cpu_round_min);
+    double gpu_total_min   = (double)compaction_rounds * (io_round + gpu_round_min);
+
+    double time_saved_mean = cpu_total_ms - gpu_total_ms;
+    double time_saved_min  = cpu_total_min - gpu_total_min;
+
+    auto tput_total = [&](double total_ms) {
+        return (double)total_simulated_keys / total_ms / 1e3;
+    };
+
+    printf("  Per-round timing (best-of-%d):\n", runs);
+    printf("  %-40s  %9s  %9s\n", "Path", "mean(ms)", "min(ms)");
+    printf("  %-40s  %9s  %9s\n",
+           "────────────────────────────────────────", "---------", "---------");
+    printf("  %-40s  %9.2f  %9.2f\n",
+           "I/O (disk read, per round)",
+           io_round, io_round);
+    printf("  %-40s  %9.2f  %9.2f\n",
+           "CPU compute/round  (sort+bloom)",
+           cpu_round_mean, cpu_round_min);
+    printf("  %-40s  %9.2f  %9.2f\n",
+           "GPU wall/round     (H2D+merge+bloom+D2H)",
+           gpu_round_mean, gpu_round_min);
+    printf("  %-40s  %9.2f  %9.2f\n",
+           "CPU total/round    (I/O+compute)",
+           io_round + cpu_round_mean, io_round + cpu_round_min);
+    printf("  %-40s  %9.2f  %9.2f\n",
+           "GPU total/round    (I/O+wall)",
+           io_round + gpu_round_mean, io_round + gpu_round_min);
     printf("\n");
-    printf("  Speedup  kernel-only      vs CPU compute:  %.2f×\n",
-           cpu_compute_min / gpu_kernel_min);
-    printf("  Speedup  GPU serial       vs CPU compute:  %.2f×\n",
-           cpu_compute_min / gpu_wall_serial_min);
-    printf("  Speedup  GPU batched      vs CPU compute:  %.2f×\n",
-           cpu_compute_min / gpu_wall_batched_min);
-    printf("  Speedup  GPU full-batched vs CPU total:    %.2f×  (apples-to-apples incl. I/O)\n",
-           cpu_total_min   / gpu_full_batched_min);
-    printf("  Bloom sync overhead saved: %.2f ms  (serial=%.2f  batched=%.2f)\n",
-           br.serial.min - br.batched.min, br.serial.min, br.batched.min);
 
-    /* ---- fillrandom simulation (if compaction_rounds > 0) ---- */
-    if (compaction_rounds > 0) {
-        printf("\n");
-        hr();
-        printf("  fillrandom compaction simulation\n");
-        hr();
-
-        uint64_t total_simulated_keys = (uint64_t)compaction_rounds * total_keys;
-
-        printf("  Compaction model:\n");
-        printf("    keys/compaction round = %llu  (%d SSTs flushed from MemTable)\n",
-               (unsigned long long)total_keys, 4);
-        printf("    compaction rounds     = %d\n", compaction_rounds);
-        printf("    total simulated keys  = %llu  (%.1f M)\n",
-               (unsigned long long)total_simulated_keys,
-               (double)total_simulated_keys / 1e6);
-        printf("\n");
-
-        double cpu_round_mean  = mr.cpu.mean  + br.cpu.mean;
-        double cpu_round_min   = mr.cpu.min   + br.cpu.min;
-        double gpu_round_mean  = mr.gpu_wall.mean + br.batched.mean;
-        double gpu_round_min   = mr.gpu_wall.min  + br.batched.min;
-        double io_round        = io_ms;
-
-        double cpu_total_ms    = (double)compaction_rounds * (io_round + cpu_round_mean);
-        double gpu_total_ms    = (double)compaction_rounds * (io_round + gpu_round_mean);
-        double cpu_total_min_a = (double)compaction_rounds * (io_round + cpu_round_min);
-        double gpu_total_min_a = (double)compaction_rounds * (io_round + gpu_round_min);
-
-        double time_saved_mean = cpu_total_ms - gpu_total_ms;
-        double time_saved_min  = cpu_total_min_a - gpu_total_min_a;
-
-        auto tput_total = [&](double total_ms) {
-            return (double)total_simulated_keys / total_ms / 1e3;
-        };
-
-        printf("  Per-round timing (from single-round RunStats):\n");
-        printf("  %-40s  %9s  %9s\n", "Path", "mean(ms)", "min(ms)");
-        printf("  %-40s  %9s  %9s\n",
-               "────────────────────────────────────────", "---------", "---------");
-        printf("  %-40s  %9.2f  %9.2f\n",
-               "I/O (disk read, per round)",
-               io_round, io_round);
-        printf("  %-40s  %9.2f  %9.2f\n",
-               "CPU compute/round  (sort+bloom)",
-               cpu_round_mean, cpu_round_min);
-        printf("  %-40s  %9.2f  %9.2f\n",
-               "GPU wall/round     (merge+batched bloom)",
-               gpu_round_mean, gpu_round_min);
-        printf("  %-40s  %9.2f  %9.2f\n",
-               "CPU total/round    (I/O+sort+bloom)",
-               io_round + cpu_round_mean, io_round + cpu_round_min);
-        printf("  %-40s  %9.2f  %9.2f\n",
-               "GPU total/round    (I/O+wall)",
-               io_round + gpu_round_mean, io_round + gpu_round_min);
-        printf("\n");
-
-        printf("  Aggregate over %d compaction rounds:\n", compaction_rounds);
-        printf("  %-40s  %9s  %9s  %12s\n",
-               "Path", "mean(ms)", "min(ms)", "M keys/s");
-        printf("  %-40s  %9s  %9s  %12s\n",
-               "────────────────────────────────────────",
-               "---------", "---------", "------------");
-        printf("  %-40s  %9.1f  %9.1f  %12.2f\n",
-               "CPU total  (I/O + sort + bloom)",
-               cpu_total_ms, cpu_total_min_a,
-               tput_total(cpu_total_ms));
-        printf("  %-40s  %9.1f  %9.1f  %12.2f\n",
-               "GPU total  (I/O + merge + batched bloom)",
-               gpu_total_ms, gpu_total_min_a,
-               tput_total(gpu_total_ms));
-        printf("\n");
-        printf("  Speedup (mean): %.2f×\n",
-               cpu_total_ms / gpu_total_ms);
-        printf("  Speedup (min):  %.2f×\n",
-               cpu_total_min_a / gpu_total_min_a);
-        printf("  Time saved (mean): %.1f ms  ( %.2f s )\n",
-               time_saved_mean, time_saved_mean / 1000.0);
-        printf("  Time saved (min):  %.1f ms  ( %.2f s )\n",
-               time_saved_min,  time_saved_min  / 1000.0);
-    }
+    printf("  Aggregate over %d compaction rounds:\n", compaction_rounds);
+    printf("  %-40s  %9s  %9s  %12s\n",
+           "Path", "mean(ms)", "min(ms)", "M keys/s");
+    printf("  %-40s  %9s  %9s  %12s\n",
+           "────────────────────────────────────────",
+           "---------", "---------", "------------");
+    printf("  %-40s  %9.1f  %9.1f  %12.2f\n",
+           "CPU total  (I/O + sort + bloom)",
+           cpu_total_ms, cpu_total_min,
+           tput_total(cpu_total_ms));
+    printf("  %-40s  %9.1f  %9.1f  %12.2f\n",
+           "GPU total  (I/O + merge + batched bloom)",
+           gpu_total_ms, gpu_total_min,
+           tput_total(gpu_total_ms));
+    printf("\n");
+    printf("  Speedup (mean): %.2f×\n",
+           cpu_total_ms / gpu_total_ms);
+    printf("  Speedup (min):  %.2f×\n",
+           cpu_total_min / gpu_total_min);
+    printf("  Time saved (mean): %.1f ms  ( %.2f s )\n",
+           time_saved_mean, time_saved_mean / 1000.0);
+    printf("  Time saved (min):  %.1f ms  ( %.2f s )\n",
+           time_saved_min,  time_saved_min  / 1000.0);
 }
 
 /* =========================================================================

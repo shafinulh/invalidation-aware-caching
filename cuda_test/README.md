@@ -13,7 +13,7 @@ Measures and compares CPU vs GPU performance for the two compaction algorithms:
 cuda_test/
 ├── gpcomp_bench.cu          # main benchmark program
 ├── gpcomp_merge.cuh         # merge kernel + launcher
-├── gpcomp_bloom.cuh         # bloom filter kernels (serial + batched)
+├── gpcomp_bloom.cuh         # bloom filter kernels (batched)
 ├── gpcomp_common.cuh        # shared types (KVPair), CPU helpers
 ├── gpcomp_datagen.cpp       # dataset generator
 ├── gpcomp_tests.cu          # unit tests
@@ -166,23 +166,27 @@ BENCHMARK 2 – Bloom filter kernel (Algorithm 2)
   ...
   CPU bloom (per-block)                min= 14.99 ms
   GPU kernel-only (no xfer)            min=  2.94 ms
-  GPU serial wall (per-block)          min= 11.91 ms
   GPU batched wall (1×H2D+grid+1×D2H) min=  0.90 ms
+  Speedup kernel  vs CPU (min): 5.11×
   Speedup batched vs CPU (min): 16.62×
-  Speedup batched vs serial (min): 13.20×
   No false negatives: PASS ✓
   FPR measured: 0.8189%  vs theoretical: 0.8194%
 
-BENCHMARK 3 – Total compaction job (Merge + Bloom)
-  Path                                      Time (ms)   M keys/s
-  CPU compute  (sort + bloom)                  23.12       14.2
-  CPU total    (I/O + sort + bloom)            26.69       12.3
-  GPU kernel-only  (no transfers)               3.06      107.0
-  GPU wall – serial bloom                      13.77       23.8
-  GPU wall – batched bloom                      2.76      118.8
-  GPU full – serial   (I/O + serial wall)      17.34       18.9
-  GPU full – batched  (I/O + batched wall)      6.33       51.7
-  Speedup GPU full-batched vs CPU total: 4.22×
+BENCHMARK 3 – fillrandom compaction simulation (Merge + Bloom)
+  Compaction model:
+    keys/compaction round = 327680  (4 SSTs flushed from MemTable)
+    compaction rounds     = 4
+    total simulated keys  = 1310720  (1.3 M)
+
+  Per-round timing (best-of-5):
+    I/O (disk read, per round)                   53.32 ms
+    CPU compute/round  (sort+bloom)              25.01 ms
+    GPU wall/round     (H2D+merge+bloom+D2H)      2.90 ms
+
+  Aggregate over 4 compaction rounds:
+    CPU total  (I/O + sort + bloom)              313.4 ms   4.18 M keys/s
+    GPU total  (I/O + merge + batched bloom)     224.9 ms   5.83 M keys/s
+    Speedup (min): 1.39×   Time saved: 88.5 ms
 
 # Run finished: 2026-02-28 17:07:14
 ```
@@ -242,28 +246,26 @@ to find each key's source SST, so it scales with key count, not SST count.
 |---|---|
 | **CPU bloom** | Pure CPU: `cpu_build_byte_vector` + `cpu_pack_bit_vector` for every block |
 | **GPU kernel-only** | CUDA events around kernel only; data pre-transferred once before loop |
-| **GPU serial wall** | Per-block: H2D → `bloom_filter_kernel<<<1,T>>>` → sync → D2H (1003 round-trips for 64B values) |
 | **GPU batched wall** | 1× H2D for all blocks → `bloom_filter_kernel_batched<<<N,T>>>` → 1× D2H |
 
-The batched kernel eliminates the `cudaDeviceSynchronize` overhead between blocks,
-which is the dominant cost in serial mode (~11 ms saved for 64B values).
+The batched kernel processes all data blocks in a single grid launch,
+avoiding any per-block `cudaDeviceSynchronize` overhead.
 
-### Benchmark 3 – Total Compaction (+ fillrandom simulation)
+### Benchmark 3 – fillrandom compaction simulation
 
-Shows 7 end-to-end paths combining both algorithms.
-All times use the minimum from the N-repetition run (best hardware performance).
+Simulates an entire `db_bench fillrandom` workload spanning multiple compaction
+rounds. Per-round timings (I/O + CPU compute or GPU wall) from Benchmarks 1 & 2
+are scaled by the number of compaction rounds to produce aggregate CPU vs GPU
+totals, speedup, and time saved.
 
-| Path | Includes |
+Requires `--fillrandom_keys N` (or `--compaction_rounds N`) to be set.
+
+| Column | Meaning |
 |---|---|
-| CPU compute | sort + bloom (no I/O) |
-| CPU total | I/O + sort + bloom |
-| GPU kernel-only | merge kernel + bloom kernel (no transfers, no I/O) |
-| GPU wall – serial bloom | GPU merge wall + GPU serial bloom wall |
-| GPU wall – batched bloom | GPU merge wall + GPU batched bloom wall |
-| GPU full – serial | I/O + GPU merge wall + GPU serial bloom wall |
-| GPU full – batched | I/O + GPU merge wall + GPU batched bloom wall |
-
-**Apples-to-apples speedup** is `GPU full-batched vs CPU total` — both include disk I/O.
+| CPU total | `rounds × (I/O + sort + bloom)` |
+| GPU total | `rounds × (I/O + merge wall + batched bloom wall)` |
+| Speedup | `CPU total / GPU total` |
+| Time saved | `CPU total − GPU total` |
 
 If `--fillrandom_keys` or `--compaction_rounds` is provided, Benchmark 3 also
 appends a **fillrandom simulation** section that projects the single-round timings
