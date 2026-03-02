@@ -2,7 +2,12 @@
 project_notes/
 
 # Local benchmark env overrides
-benchmarks/cpu/config/.env.local
+benchmarks/*/config/.env.local
+
+# GPU benchmark build artifacts and local logs
+benchmarks/gpu/build/
+benchmarks/gpu/gpu_io_bench
+cufile.log
 
 # Python bytecode cache
 __pycache__/
