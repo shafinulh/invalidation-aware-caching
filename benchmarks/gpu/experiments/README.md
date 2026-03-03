@@ -1,4 +1,4 @@
-# GPU IO Benchmark Experiments
+# GPU Benchmark Experiments
 
 Pre-configured experiments for comparing GPU vs CPU IO paths
 in a simulated LSM-tree compaction.
@@ -24,4 +24,20 @@ From the repository root:
 
 ```bash
 ./benchmarks/gpu/experiments/io_bench/io_sweep.sh
+```
+
+### `rocksdb_hook/`
+
+| Script             | Description                                    |
+| ------------------ | ---------------------------------------------- |
+| `hook_replay.sh`   | Dummy GPU compaction hook benchmark for RocksDB |
+
+This experiment drives a RocksDB manual compaction through the
+`CompactionService` hook, stages a ground-truth compaction output, then
+replays that output through the cuFile-backed GPU replay helper.
+
+Run it from the repository root:
+
+```bash
+./benchmarks/gpu/experiments/rocksdb_hook/hook_replay.sh
 ```

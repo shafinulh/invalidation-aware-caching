@@ -5,8 +5,10 @@
 #   - GPU with CUDA support (GDS kernel driver optional; bounce-buffer fallback)
 #
 # Usage:
-#   make            # build gpu_io_bench
-#   make clean      # remove build artifacts
+#   make                     # build gpu_io_bench
+#   make gpu_file_replay_bench
+#   make tools              # build both GPU benchmark binaries
+#   make clean              # remove build artifacts
 
 CUDA_HOME   ?= /usr/local/cuda
 NVCC        := $(CUDA_HOME)/bin/nvcc
@@ -28,14 +30,17 @@ LDFLAGS     := -L$(CUFILE_LIB) -lcufile -lcuda -lcudart
 
 SRC_DIR     := src
 BUILD_DIR   := build
-TARGET      := gpu_io_bench
+IO_TARGET   := gpu_io_bench
+REPLAY_TARGET := gpu_file_replay_bench
 
-SOURCES     := $(SRC_DIR)/gpu_io_bench.cu
-OBJECTS     := $(BUILD_DIR)/gpu_io_bench.o
+IO_OBJECT   := $(BUILD_DIR)/gpu_io_bench.o
+REPLAY_OBJECT := $(BUILD_DIR)/gpu_file_replay_bench.o
 
-.PHONY: all clean
+.PHONY: all clean tools
 
-all: $(TARGET)
+all: $(IO_TARGET)
+
+tools: $(IO_TARGET) $(REPLAY_TARGET)
 
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
@@ -43,8 +48,11 @@ $(BUILD_DIR):
 $(BUILD_DIR)/%.o: $(SRC_DIR)/%.cu | $(BUILD_DIR)
 	$(NVCC) $(NVCC_FLAGS) $(INCLUDES) -c $< -o $@
 
-$(TARGET): $(OBJECTS)
-	$(NVCC) $(NVCC_FLAGS) $(OBJECTS) $(LDFLAGS) -o $@
+$(IO_TARGET): $(IO_OBJECT)
+	$(NVCC) $(NVCC_FLAGS) $(IO_OBJECT) $(LDFLAGS) -o $@
+
+$(REPLAY_TARGET): $(REPLAY_OBJECT)
+	$(NVCC) $(NVCC_FLAGS) $(REPLAY_OBJECT) $(LDFLAGS) -o $@
 
 clean:
-	rm -rf $(BUILD_DIR) $(TARGET)
+	rm -rf $(BUILD_DIR) $(IO_TARGET) $(REPLAY_TARGET)

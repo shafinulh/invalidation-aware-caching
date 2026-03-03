@@ -482,6 +482,7 @@ TEST_MAIN_SOURCES =                                                     \
   db/compaction/compaction_job_stats_test.cc                            \
   db/compaction/compaction_picker_test.cc                               \
   db/compaction/compaction_service_test.cc                              \
+  db/compaction/gpu_compaction_hook_benchmark_test.cc                   \
   db/compaction/tiered_compaction_test.cc                               \
   db/comparator_db_test.cc                                              \
   db/corruption_test.cc                                                 \
