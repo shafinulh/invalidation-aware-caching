@@ -163,12 +163,16 @@ ReadWriteMix-only settings (`scripts/run_readwritemix.sh`):
 - `NUM_LOADS` (default: `50000000`, number of preload writes)
 - `MIX_BENCH` (default: `readrandomwriterandom`)
 - `MIX_READS` (default: `20000000`, total mixed operations)
+- `PRELOAD_DIR_NAME` (default: `readwritemix_preload`, preload directory name under `DB_BASE_DIR`, `WAL_BASE_DIR`, and `OUTPUT_DIR`)
+- `COMPACT_PRELOAD_ON_CREATE` (default: `0`, runs a one-time `compactall,stats` after a fresh preload is built)
 
 ReadWriteMix load/cleanup behavior:
-- Preload DB is created once per `value_size` at `DB_BASE_DIR/readwritemix_preload/...` and reused across all `comp_threads`.
+- Preload DB is created once per `value_size` at `DB_BASE_DIR/$PRELOAD_DIR_NAME/...` and reused across all `comp_threads`.
 - If the preload DB already exists, the load phase is skipped automatically.
 - Preload reuse is guarded by a `.preload_ready` marker created only after a successful load.
+- Setting `PRELOAD_DIR_NAME` changes the preload namespace; the load phase still runs if its `.preload_ready` marker is missing.
+- `COMPACT_PRELOAD_ON_CREATE=1` compacts the preload once immediately after it is created, before the ready marker is written.
 - Each mixed run uses a copy under `DB_BASE_DIR/readwritemix/...` and `WAL_BASE_DIR/readwritemix/...`.
-- Mixed phase forces `--disable_auto_compactions=0`.
+- Mixed phase always runs with auto-compactions enabled.
 - Mixed DB/WAL directories are deleted after each run, and RocksDB `LOG` is copied to run metadata before deletion.
-- To force a fresh load, remove the corresponding `readwritemix_preload` directories.
+- To force a fresh load, remove the corresponding preload directories for the selected `PRELOAD_DIR_NAME`.

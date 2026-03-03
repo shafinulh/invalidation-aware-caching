@@ -19,42 +19,111 @@ WRITE_RATIOS="${WRITE_RATIOS:-"25"}"
 MIX_READS="${MIX_READS:-20000000}"
 MIX_BENCH="${MIX_BENCH:-readrandomwriterandom}"
 bg_comp_threads_list="${BG_COMP_THREADS_LIST:-1}"
+PRELOAD_DIR_NAME="${PRELOAD_DIR_NAME:-readwritemix_preload}"
+COMPACT_PRELOAD_ON_CREATE="${COMPACT_PRELOAD_ON_CREATE:-0}"
 
-load_disable_auto_compactions=0
-case "${LOAD_BENCH}" in
-  fillseqdeterministic|filluniquerandomdeterministic)
-    load_disable_auto_compactions=1
+case "${COMPACT_PRELOAD_ON_CREATE}" in
+  0|1)
+    ;;
+  *)
+    echo "error: COMPACT_PRELOAD_ON_CREATE must be 0 or 1 (got: ${COMPACT_PRELOAD_ON_CREATE})" >&2
+    exit 1
     ;;
 esac
 
+if [[ -z "${PRELOAD_DIR_NAME}" || "${PRELOAD_DIR_NAME}" == "." || "${PRELOAD_DIR_NAME}" == ".." || "${PRELOAD_DIR_NAME}" == */* ]]; then
+  echo "error: PRELOAD_DIR_NAME must be a directory name without path separators (got: ${PRELOAD_DIR_NAME})" >&2
+  exit 1
+fi
+
+load_disable_auto_compactions=0
+load_threads="${THREADS}"
+case "${LOAD_BENCH}" in
+  fillseqdeterministic|filluniquerandomdeterministic)
+    load_disable_auto_compactions=1
+    load_threads=1
+    ;;
+esac
+
+load_common_flags=()
+for flag in "${COMMON_FLAGS[@]}"; do
+  case "${flag}" in
+    --threads=*)
+      load_common_flags+=("--threads=${load_threads}")
+      ;;
+    *)
+      load_common_flags+=("${flag}")
+      ;;
+  esac
+done
+
 for value_size in ${VALUE_SIZES}; do
-  PRELOAD_RUN_DIR="${OUTPUT_DIR}/readwritemix_preload/value_${value_size}/${RUN_ID}"
-  PRELOAD_DB_DIR="${DB_BASE_DIR}/readwritemix_preload/value_${value_size}"
-  PRELOAD_WAL_DIR="${WAL_BASE_DIR}/readwritemix_preload/value_${value_size}"
-  PRELOAD_READY_FILE="${PRELOAD_DB_DIR}/${PRELOAD_READY_FILENAME}"
+  preload_run_dir="${OUTPUT_DIR}/${PRELOAD_DIR_NAME}/value_${value_size}/${RUN_ID}"
+  preload_db_dir="${DB_BASE_DIR}/${PRELOAD_DIR_NAME}/value_${value_size}"
+  preload_wal_dir="${WAL_BASE_DIR}/${PRELOAD_DIR_NAME}/value_${value_size}"
+  preload_ready_file="${preload_db_dir}/${PRELOAD_READY_FILENAME}"
 
-  if [[ ! -f "${PRELOAD_READY_FILE}" ]]; then
-    cleanup_db_wal_dirs "${PRELOAD_DB_DIR}" "${PRELOAD_WAL_DIR}"
-    mkdir -p "${PRELOAD_RUN_DIR}" "${PRELOAD_DB_DIR}" "${PRELOAD_WAL_DIR}"
-    write_run_config "${PRELOAD_RUN_DIR}" "run_readwritemix.sh"
+  if [[ ! -f "${preload_ready_file}" ]]; then
+    cleanup_db_wal_dirs "${preload_db_dir}" "${preload_wal_dir}"
+    mkdir -p "${preload_run_dir}" "${preload_db_dir}" "${preload_wal_dir}"
+    write_run_config "${preload_run_dir}" "run_readwritemix.sh"
 
-    run_db_bench "${PRELOAD_RUN_DIR}/load.log" \
+    load_status=0
+    set +e
+    run_db_bench "${preload_run_dir}/load.log" \
       --benchmarks="${LOAD_BENCH}" \
       --disable_auto_compactions="${load_disable_auto_compactions}" \
       --num="${NUM_KEYS}" \
       --writes="${NUM_LOADS}" \
       --value_size="${value_size}" \
-      --db="${PRELOAD_DB_DIR}" \
-      --wal_dir="${PRELOAD_WAL_DIR}" \
-      --report_file="${PRELOAD_RUN_DIR}/load_report.csv" \
-      --metrics_file="${PRELOAD_RUN_DIR}/load_metrics.csv" \
+      --db="${preload_db_dir}" \
+      --wal_dir="${preload_wal_dir}" \
+      --report_file="${preload_run_dir}/load_report.csv" \
+      --metrics_file="${preload_run_dir}/load_metrics.csv" \
       --use_existing_db=0 \
       --subcompactions=8 \
       --max_background_compactions=1 \
-      "${COMMON_FLAGS[@]}"
-    copy_latest_rocksdb_options "${PRELOAD_DB_DIR}" "${PRELOAD_RUN_DIR}" "after_load"
-    copy_rocksdb_log_file "${PRELOAD_DB_DIR}" "${PRELOAD_RUN_DIR}" "after_load"
-    touch "${PRELOAD_READY_FILE}"
+      "${load_common_flags[@]}"
+    load_status=$?
+    set -e
+
+    if (( load_status != 0 )); then
+      case "${LOAD_BENCH}" in
+        fillseqdeterministic|filluniquerandomdeterministic)
+          if compgen -G "${preload_db_dir}/*.sst" > /dev/null; then
+            echo "warning: ${LOAD_BENCH} exited with status ${load_status}; continuing because preload SSTs were created" >&2
+          else
+            exit "${load_status}"
+          fi
+          ;;
+        *)
+          exit "${load_status}"
+          ;;
+      esac
+    fi
+
+    copy_latest_rocksdb_options "${preload_db_dir}" "${preload_run_dir}" "after_load"
+    copy_rocksdb_log_file "${preload_db_dir}" "${preload_run_dir}" "after_load"
+
+    if [[ "${COMPACT_PRELOAD_ON_CREATE}" == "1" ]]; then
+      run_db_bench "${preload_run_dir}/compact.log" \
+        --benchmarks=compactall,stats \
+        --disable_auto_compactions=0 \
+        --num="${NUM_KEYS}" \
+        --value_size="${value_size}" \
+        --db="${preload_db_dir}" \
+        --wal_dir="${preload_wal_dir}" \
+        --report_file="${preload_run_dir}/compact_report.csv" \
+        --metrics_file="${preload_run_dir}/compact_metrics.csv" \
+        --use_existing_db=1 \
+        --subcompactions=1 \
+        --max_background_compactions=1 \
+        "${COMMON_FLAGS[@]}"
+      copy_latest_rocksdb_options "${preload_db_dir}" "${preload_run_dir}" "after_preload_compact"
+      copy_rocksdb_log_file "${preload_db_dir}" "${preload_run_dir}" "after_preload_compact"
+    fi
+
+    touch "${preload_ready_file}"
   fi
 
   for bg_comp_threads in ${bg_comp_threads_list}; do
@@ -80,9 +149,9 @@ for value_size in ${VALUE_SIZES}; do
         mkdir -p "${RUN_DIR}" "${DB_DIR}" "${WAL_DIR}"
         write_run_config "${RUN_DIR}" "run_readwritemix.sh"
 
-        cp -a "${PRELOAD_DB_DIR}/." "${DB_DIR}/"
-        if [[ -d "${PRELOAD_WAL_DIR}" ]]; then
-          cp -a "${PRELOAD_WAL_DIR}/." "${WAL_DIR}/"
+        cp -a "${preload_db_dir}/." "${DB_DIR}/"
+        if [[ -d "${preload_wal_dir}" ]]; then
+          cp -a "${preload_wal_dir}/." "${WAL_DIR}/"
         fi
 
         run_db_bench "${RUN_DIR}/mix.log" \
@@ -102,6 +171,7 @@ for value_size in ${VALUE_SIZES}; do
           "${COMMON_FLAGS[@]}"
         copy_latest_rocksdb_options "${DB_DIR}" "${RUN_DIR}" "after_mix"
         copy_rocksdb_log_file "${DB_DIR}" "${RUN_DIR}" "after_mix"
+
         cleanup_db_wal_dirs "${DB_DIR}" "${WAL_DIR}"
       done
     done

@@ -22,22 +22,27 @@ set -euo pipefail
 
 ### Setup ###
 # Same as bounded_l0_cache_impact.sh but with Zipfian key distribution.
-# Bounded L0 (GPComp-style) so compactions are frequent under write
-# pressure.  50ms metrics polling to catch transient dips.
-# 50% write ratio so both reads and writes are active.
+# Preload a full 20M-key table deterministically, compact that preload
+# once, then run the mixed phase with normal background compactions.
+# 50ms metrics polling to catch transient dips.  25% writes keeps both
+# reads and writes active without burying cache effects in write stalls.
 
-RUN_ID=cache-obs-zipfian-0.6-2048mb \
+RUN_ID=cache-obs-zipfian-0.6-1024mb-test \
 THREADS=4 \
 OPEN_FILES=512 \
 DIRECT_IO=true \
 VALUE_SIZES=32 \
 SUBCOMP_THREADS_LIST="1" \
 WRITE_RATIOS="25" \
+NUM_KEYS=20000000 \
 NUM_LOADS=20000000 \
+LOAD_BENCH=fillseqdeterministic \
+PRELOAD_DIR_NAME=zipfian_readwritemix_preload \
+COMPACT_PRELOAD_ON_CREATE=1 \
 MIX_READS=10000000 \
 MAX_BACKGROUND_FLUSHES=4 \
 METRICS_INTERVAL_MS=50 \
 KEY_DIST=zipfian \
 ZIPF_ALPHA=0.6 \
-CACHE_SIZE=2147483648 \
+CACHE_SIZE=1073741824 \
 ./benchmarks/cpu/scripts/run_readwritemix.sh
