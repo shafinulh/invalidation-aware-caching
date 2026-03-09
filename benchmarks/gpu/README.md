@@ -2,11 +2,15 @@
 
 Benchmark suite for GPU-related storage experiments. It currently includes:
 
-- **`io_bench`**: GPU IO (cuFile) vs CPU direct IO for an LSM-tree compaction
-  IO pattern
-- **`rocksdb_hook`**: a RocksDB dummy GPU compaction hook benchmark that
-  replays ground-truth SST outputs through a cuFile-backed GPU pass-through
-  helper before installing them back into RocksDB
+- **`io_bench`**: GPU IO (cuFile) vs CPU direct IO for a simulated LSM-tree
+  compaction IO pattern
+- **`rocksdb_hook`**: RocksDB dummy GPU compaction hook benchmark — drives a
+  real compaction through RocksDB's `CompactionService` hook, invokes the GPU
+  merge worker on the actual input SSTs, then validates and installs the merged
+  output back into RocksDB
+- **`gpu_compaction_worker`**: standalone real GPU merge worker that reads
+  actual RocksDB SST files, merges/deduplicates keys on the GPU, and writes a
+  merged output SST file
 
 ## Motivation
 
@@ -47,75 +51,155 @@ This matches the typical RocksDB compaction trigger of
 - Fast NVMe SSD
 
 ### Software
-- CUDA Toolkit ≥ 11.4 with cuFile headers & libraries
-- `g++-12` or compatible host compiler
-- Python 3.8+ with `pandas` (for analysis)
+- CUDA Toolkit ≥ 11.4 with cuFile headers & libraries (`nvcc` must be on `PATH`)
+- `g++-12` or compatible C++20 host compiler
+- Pre-built `librocksdb.a` in `rocksdb-gpu/` (required for `gpu_compaction_worker`
+  and `rocksdb_hook`; build once with
+  `make -C rocksdb-gpu USE_RTTI=1 LIB_MODE=static -j$(nproc) static_lib`)
+- Python 3.8+ with `pandas` (for analysis scripts)
 - Optional: `matplotlib` (for plots), `tabulate` (for tables)
 
 ## Quick Start
 
-### 1. Build
+### 1. Configure
 
 ```bash
-cd /path/to/invalidation-aware-caching/benchmarks/gpu
-make                      # builds gpu_io_bench
-make gpu_file_replay_bench # builds the RocksDB hook replay helper
+cp benchmarks/gpu/config/.env.example benchmarks/gpu/config/.env.local
 ```
 
-### 2. Configure
+Edit `.env.local` and set at minimum:
 
 ```bash
-cp config/.env.example config/.env.local
-# Edit config/.env.local — set DATA_DIR, OUTPUT_DIR, and any machine-specific GPU settings
+DATA_DIR=/tmp/gpu_io_bench_data   # fast NVMe scratch space
+OUTPUT_DIR=/path/to/results/gpu   # where CSVs and logs land
+GPU_DEVICE=0                      # CUDA device ordinal
+COMPAT_MODE=true                  # set false only if GDS kernel driver is installed
+```
+
+### 2. Build
+
+All binaries are built automatically when you run the experiment scripts. To
+build manually (from `benchmarks/gpu/`):
+
+```bash
+make                        # gpu_io_bench only
+make gpu_file_replay_bench  # cuFile IO replay helper
+make gpu_compaction_worker  # real GPU merge worker (requires librocksdb.a)
+make tools                  # all three at once
 ```
 
 ### 3. Run `io_bench`
 
+From the repository root, just run the experiment script — all parameters are
+set inside it:
+
 ```bash
-# From repository root:
-./benchmarks/gpu/experiments/io_bench/io_sweep.sh    # both 8 MB and 64 MB
-./benchmarks/gpu/experiments/io_bench/io_8mb.sh       # just 8 MB
-./benchmarks/gpu/experiments/io_bench/io_64mb.sh      # just 64 MB
+./benchmarks/gpu/experiments/io_bench/io_sweep.sh   # 8 MB and 64 MB sweep
+./benchmarks/gpu/experiments/io_bench/io_8mb.sh     # 8 MB only
+./benchmarks/gpu/experiments/io_bench/io_64mb.sh    # 64 MB only
 ```
 
-Or run the script directly with overrides:
+To override a parameter inline:
 
 ```bash
-L0_SIZES="8388608" NUM_REPS=5 ./benchmarks/gpu/scripts/run_io_bench.sh
+NUM_REPS=5 ./benchmarks/gpu/experiments/io_bench/io_8mb.sh
 ```
 
-Or invoke the binary directly:
+### 4. Run `rocksdb_hook` (real GPU compaction)
+
+From the repository root:
 
 ```bash
-./gpu_io_bench --l0_size 8388608 --reps 10 --csv results.csv
-```
-
-### 4. Analyse `io_bench`
-
-```bash
-python3 benchmarks/gpu/python/plot_io_bench.py <RUN_DIR> --plot
-```
-
-### 5. Run `rocksdb_hook`
-
-```bash
-# From repository root:
 ./benchmarks/gpu/experiments/rocksdb_hook/hook_replay.sh
 ```
 
-This script incrementally rebuilds the CUDA replay helper and the RocksDB
-benchmark target, then runs the dummy GPU compaction hook
-benchmark and writes per-repetition CSV output.
+This script:
+1. Auto-builds `gpu_file_replay_bench`, `gpu_compaction_worker`, and the
+   RocksDB benchmark binary if they are out of date
+2. Drives a real RocksDB compaction through the `CompactionService` hook
+3. For each compaction job, invokes `gpu_compaction_worker` on the actual input
+   SSTs — the worker reads them, merges and deduplicates keys on the GPU, and
+   writes a merged output SST
+4. Validates the output SST keys against the RocksDB ground-truth result
+5. Prints per-repetition timing (SST read, GPU merge kernel, SST write) and
+   `validated=PASS/FAIL`
 
-### 6. Analyse `rocksdb_hook`
+Default parameters in `hook_replay.sh`:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `NUM_REPS` | `1` | Number of benchmark repetitions |
+| `INPUT_SST_MB` | `8` | Approximate size of each input SST |
+| `ALIGNMENT` | `4096` | O_DIRECT alignment (bytes) |
+| `RUN_ID` | `rocksdb-hook-replay` | Label for the output directory |
+
+To override inline:
 
 ```bash
+NUM_REPS=5 INPUT_SST_MB=64 ./benchmarks/gpu/experiments/rocksdb_hook/hook_replay.sh
+```
+
+### 5. Analyse results
+
+```bash
+# io_bench
+python3 benchmarks/gpu/python/plot_io_bench.py <RUN_DIR> --plot
+
+# rocksdb_hook
 python3 benchmarks/gpu/python/plot_gpu_compaction_hook_bench.py <RUN_DIR> --plot
 ```
 
+---
+
+## CPU Comparison Baseline
+
+The CPU benchmarks live in `benchmarks/cpu/`. To run the equivalent RocksDB
+`fillrandom` workload (which triggers background compactions) and collect
+compaction timing:
+
+```bash
+# From the repository root:
+bash benchmarks/cpu/scripts/run_fillrandom.sh
+```
+
+All parameters (`NUM_KEYS`, `VALUE_SIZES`, `SUBCOMP_THREADS_LIST`, etc.) are
+set inside the script and read from `benchmarks/cpu/config/.env.local`.
+See `benchmarks/cpu/config/.env.example` for the full list.
+
+For an isolated compaction profile (load first, then force a full compaction
+and record per-job IO stats):
+
+```bash
+bash benchmarks/cpu/scripts/run_compaction_profile.sh
+```
+
+### Measured Results (RTX 3070, i7-11700, NVMe SSD)
+
+**GPU compaction worker** (`rocksdb_hook`, 5 input SSTs, ~128 merged keys):
+
+| Phase | Time |
+|-------|------|
+| SST read (`sst_read_us`) | ~24 ms |
+| GPU merge kernel (`merge_kernel_us`) | ~190 ms |
+| SST write (`sst_write_us`) | ~26 ms |
+| **Total per compaction job** | **~240 ms** |
+
+**CPU compaction** (`fillrandom`, 1 M keys, 400 B values, 1 subcompaction thread):
+
+| Metric | Value |
+|--------|-------|
+| Write throughput | 34,312 ops/sec |
+| Compaction wall time P50 | ~2,275 ms |
+| Compaction wall time P99 | ~4,252 ms |
+| Compactions triggered | 13 |
+
+**GPU speedup on compaction: ~9–10×** (P50 CPU wall time vs GPU total time).
+
+---
+
 ## Output Format
 
-Each run produces CSV files with columns:
+### `io_bench` CSV columns
 
 | Column | Description |
 |--------|-------------|
@@ -125,10 +209,25 @@ Each run produces CSV files with columns:
 | `num_l0_read` | Number of files read |
 | `num_l1_write` | Number of files written |
 | `rep` | Repetition index |
-| `read_us` | Read phase time (microseconds) |
-| `write_us` | Write phase time (microseconds) |
-| `total_us` | Total IO time (microseconds) |
+| `read_us` | Read phase time (µs) |
+| `write_us` | Write phase time (µs) |
+| `total_us` | Total IO time (µs) |
 | `direct_io` | Whether O_DIRECT was used |
+
+### `rocksdb_hook` benchmark output lines
+
+Each repetition prints a line like:
+
+```
+GPU_COMPACTION_WORKER_BENCH rep=0 sst_read_us=24123 merge_kernel_us=189754 sst_write_us=25891 validated=PASS
+```
+
+| Field | Description |
+|-------|-------------|
+| `sst_read_us` | Time to read all input SSTs (µs) |
+| `merge_kernel_us` | GPU merge + dedup kernel time (µs) |
+| `sst_write_us` | Time to write the merged output SST (µs) |
+| `validated` | `PASS` if output keys match RocksDB ground truth |
 
 ## Results Directory Structure
 
@@ -136,8 +235,8 @@ Each run produces CSV files with columns:
 bench_results/gpu/
   io_bench/
     <run_id>/
-      io_bench_8mb.csv          # raw data (8 MB L0 files)
-      io_bench_64mb.csv         # raw data (64 MB L0 files)
+      io_bench_8mb.csv          # raw per-rep data (8 MB L0 files)
+      io_bench_64mb.csv         # raw per-rep data (64 MB L0 files)
       io_bench_8mb.log          # full console output
       io_bench_64mb.log
       io_bench_summary.csv      # mean ± std per path/size
@@ -145,7 +244,7 @@ bench_results/gpu/
       io_bench_comparison.png   # bar chart (if --plot)
       io_bench_boxplot.png      # box plot (if --plot)
       metadata/
-        run_config.env           # full configuration snapshot
+        run_config.env
   rocksdb_hook/
     <run_id>/
       gpu_compaction_hook.csv        # per-repetition timing data
@@ -164,25 +263,12 @@ On an RTX 3070 (no GDS, bounce-buffer fallback):
 - **GPU reads** are ~1.5–2× slower than CPU direct reads due to the extra
   `memcpy` from host RAM to GPU device memory.
 - **GPU writes** are similarly ~1.2–1.5× slower.
-- **Total overhead** is typically 1.3–1.8× depending on file size and SSD speed.
-
-This overhead is the "IO tax" that GPU-accelerated compaction must recoup
-through faster merge/sort computation.
+- **Total IO overhead** is typically 1.3–1.8× depending on file size and SSD speed.
+- **GPU merge kernel** is ~9–10× faster than CPU compaction wall time, meaning
+  the compute speedup more than covers the IO tax.
 
 ## Configuration Reference
 
-See [config/.env.example](config/.env.example) for machine-local settings.
-Workload parameters are set in the experiment scripts under
-`benchmarks/gpu/experiments/`.
-
-Default experiment parameters:
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `L0_SIZES` | `8388608 67108864` | L0 file sizes (bytes, space-separated) |
-| `NUM_L0_READ` | `4` | Input files per compaction |
-| `NUM_L1_WRITE` | `3` | Output files per compaction |
-| `NUM_REPS` | `10` | Repetitions for `io_bench` (the default `rocksdb_hook` wrapper uses `5`) |
-| `ALIGNMENT` | `4096` | O_DIRECT alignment |
-| `DIRECT_IO` | `true` | Use O_DIRECT for the CPU baseline in `io_bench` |
-| `GPU_DEVICE` | `0` | CUDA device ordinal |
+See [config/.env.example](config/.env.example) for all machine-local settings.
+Workload parameters are set directly in the experiment scripts under
+`benchmarks/gpu/experiments/` — you do not need to edit `.env.local` for them.
