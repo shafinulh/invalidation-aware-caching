@@ -71,6 +71,49 @@ def _extract_mb_per_sec_from_log(log_file, benchmark_name):
     return None
 
 
+def _load_gpu_fillrandom(results_base):
+    """Load GPU hook-bench CSVs and return per-value-size throughput data.
+
+    Returns:
+        gpu_avg  : {value_size: median MB/s}  (output_bytes / compact_range_us)
+        gpu_reps : {value_size: DataFrame with columns [rep, time_s, throughput_mb_s]}
+    """
+    gpu_avg = {}
+    gpu_reps = {}
+    script_dir = Path(__file__).resolve().parent
+    gpu_results_base = script_dir.parent.parent / "gpu" / "results" / "fillrandom_gpu"
+
+    for vs_dir in sorted(gpu_results_base.glob("value_*")):
+        try:
+            vs = int(vs_dir.name.split("_")[1])
+        except (IndexError, ValueError):
+            continue
+        hook_base = vs_dir / "rocksdb_hook"
+        if not hook_base.is_dir():
+            continue
+        run_dirs = sorted([d for d in hook_base.iterdir() if d.is_dir()])
+        if not run_dirs:
+            continue
+        csv_path = run_dirs[-1] / "gpu_compaction_hook.csv"
+        if not csv_path.is_file():
+            continue
+        try:
+            df = pd.read_csv(str(csv_path))
+        except Exception:
+            continue
+        if "compact_range_us" not in df.columns or "output_bytes" not in df.columns:
+            continue
+        tput = (df["output_bytes"] / (1024 * 1024)) / (df["compact_range_us"] / 1e6)
+        # Skip warm-up rep 0 for the average
+        stable = tput[df["rep"] > 0] if len(df) > 1 else tput
+        gpu_avg[vs] = float(stable.median())
+        cum_time = df["compact_range_us"].cumsum() / 1e6
+        gpu_reps[vs] = pd.DataFrame({"rep": df["rep"].values,
+                                      "time_s": cum_time.values,
+                                      "throughput_mb_s": tput.values})
+    return gpu_avg, gpu_reps
+
+
 def _plot_fillrandom(results_base, out_dir):
     pattern = os.path.join(results_base, "fillrandom", "value_*", "subcomp_*", "*", "report.csv")
     files = glob.glob(pattern)
@@ -91,14 +134,14 @@ def _plot_fillrandom(results_base, out_dir):
 
             df = pd.read_csv(report_file)
             if throughput_mb is None and "interval_qps" in df.columns:
-                throughput_mb = df["interval_qps"].mean()
+                throughput_mb = df["interval_qps"].mean() * value_size / (1024 * 1024)
 
             if throughput_mb is not None:
                 all_data.append(
                     {
                         "Value Size": value_size,
                         "Threads": label,
-                        "Throughput": throughput_mb,
+                        "Throughput (MB/s)": throughput_mb,
                     }
                 )
 
@@ -106,17 +149,28 @@ def _plot_fillrandom(results_base, out_dir):
         except (IndexError, ValueError, pd.errors.EmptyDataError):
             continue
 
+    # Load GPU results and add a "GPU" bar for each value size
+    gpu_avg, gpu_reps = _load_gpu_fillrandom(results_base)
+    for vs, tput in sorted(gpu_avg.items()):
+        all_data.append({"Value Size": vs, "Threads": "GPU", "Throughput (MB/s)": tput})
+
     if not all_data:
         print(f"No valid fillrandom report files found in {results_base}")
         return
 
     df_plot = pd.DataFrame(all_data).sort_values(["Value Size", "Threads"])
-    pivot_df = df_plot.pivot(index="Value Size", columns="Threads", values="Throughput")
+    pivot_df = df_plot.pivot_table(
+        index="Value Size", columns="Threads", values="Throughput (MB/s)", aggfunc="mean"
+    )
+    # Reorder columns so CPU-* appear before GPU
+    cpu_cols = sorted([c for c in pivot_df.columns if c.startswith("CPU")])
+    gpu_cols = [c for c in pivot_df.columns if not c.startswith("CPU")]
+    pivot_df = pivot_df[cpu_cols + gpu_cols]
 
     pivot_df.plot(kind="bar", figsize=(10, 6), width=0.8)
-    plt.title("RocksDB Throughput: FillRandom CPU Compaction Scaling")
+    plt.title("RocksDB Throughput: FillRandom CPU vs GPU Compaction")
     plt.xlabel("Value Size (Bytes)")
-    plt.ylabel("Throughput")
+    plt.ylabel("Throughput (MB/s)")
     plt.legend(title="Configuration")
     plt.xticks(rotation=0)
     plt.grid(axis="y", linestyle="--", alpha=0.7)
@@ -135,11 +189,30 @@ def _plot_fillrandom(results_base, out_dir):
         ax = axes[i]
         for label, df in sorted(realtime_data[value_size].items()):
             if "secs_elapsed" in df.columns and "interval_qps" in df.columns:
-                ax.plot(df["secs_elapsed"], df["interval_qps"], label=label, alpha=0.8, linewidth=1)
+                # Convert ops/s → MB/s for a unified y-axis
+                mb_s = df["interval_qps"] * value_size / (1024 * 1024)
+                ax.plot(df["secs_elapsed"], mb_s, label=label, alpha=0.8, linewidth=1)
+
+        # GPU: per-rep throughput as a dashed line with markers;
+        # cumulative time is only a few seconds so we also draw a horizontal
+        # median reference that spans the full chart.
+        if value_size in gpu_reps:
+            grdf = gpu_reps[value_size]
+            ax.plot(
+                grdf["time_s"], grdf["throughput_mb_s"],
+                label="GPU (per-rep)", color="purple",
+                linewidth=1.5, marker="o", markersize=5, linestyle="-",
+            )
+        if value_size in gpu_avg:
+            ax.axhline(
+                gpu_avg[value_size], color="purple", linestyle="--",
+                linewidth=1.0, alpha=0.6,
+                label=f"GPU median ({gpu_avg[value_size]:.1f} MB/s)",
+            )
 
         ax.set_title(f"FillRandom Value Size: {value_size} Bytes")
         ax.set_xlabel("Time (s)")
-        ax.set_ylabel("Throughput (Ops/s)")
+        ax.set_ylabel("Throughput (MB/s)")
         ax.legend(loc="upper right", fontsize="small")
         ax.grid(True, linestyle=":", alpha=0.6)
 
@@ -253,47 +326,6 @@ def _plot_readwritemix(results_base, out_dir):
     plt.close()
     print(f"ReadWriteMix real-time throughput graph saved to: {realtime_png}")
 
-def _plot_gpu_comparison(results_base, out_dir):
-    """Load GPU fillrandom results and append CPU-vs-GPU comparison plots."""
-    script_dir = Path(__file__).resolve().parent
-    gpu_py_dir = str(script_dir.parent.parent / "gpu" / "python")
-    if gpu_py_dir not in sys.path:
-        sys.path.insert(0, gpu_py_dir)
-
-    try:
-        from compare_cpu_gpu_fillrandom import (
-            load_cpu_run,
-            load_gpu_run,
-            plot_comparison,
-            print_comparison_table,
-            VALUE_SIZES,
-        )
-    except ImportError as e:
-        print(f"warning: could not import GPU comparison module: {e}")
-        return
-
-    gpu_results_base = str(
-        script_dir.parent.parent / "gpu" / "results" / "fillrandom_gpu"
-    )
-
-    cpu_data = {}
-    gpu_data = {}
-    for vs in VALUE_SIZES:
-        c = load_cpu_run(results_base, vs, None)
-        if c:
-            cpu_data[vs] = c
-        g = load_gpu_run(gpu_results_base, vs, None)
-        if g:
-            gpu_data[vs] = g
-
-    if not cpu_data and not gpu_data:
-        print("No CPU or GPU data available for comparison plots.")
-        return
-
-    print_comparison_table(cpu_data, gpu_data)
-    plot_comparison(cpu_data, gpu_data, out_dir)
-
-
 def _resolve_results_paths():
     script_dir = Path(__file__).resolve().parent
     env_file = script_dir.parent / "config" / ".env.local"
@@ -318,7 +350,6 @@ def plot_results():
     print(f"Saving plots to: {out_dir}")
     _plot_fillrandom(results_base, out_dir)
     _plot_readwritemix(results_base, out_dir)
-    _plot_gpu_comparison(results_base, out_dir)
 
 
 if __name__ == "__main__":
