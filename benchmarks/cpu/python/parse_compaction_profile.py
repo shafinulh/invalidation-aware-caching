@@ -30,10 +30,12 @@ Usage:
 """
 
 import argparse
+import io
 import json
 import os
 import re
 import sys
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
 import pandas as pd
@@ -299,6 +301,81 @@ def parse_strace_log(strace_path: str) -> dict:
     return totals
 
 
+def infer_value_size_from_run_dir(run_dir: str) -> int | None:
+    """Infer value size from a path segment like value_32."""
+    for part in Path(run_dir).parts:
+        match = re.fullmatch(r"value_(\d+)", part)
+        if match:
+            return int(match.group(1))
+    return None
+
+
+def resolve_multi_value_runs(base_path: str) -> tuple[Path, dict[int, Path]]:
+    """Resolve sibling run directories that match the same suffix under value_*/."""
+    base = Path(base_path).resolve()
+    if not base.exists():
+        raise FileNotFoundError(f"No such path: {base}")
+
+    direct_value_dirs = sorted(p for p in base.iterdir() if p.is_dir() and re.fullmatch(r"value_\d+", p.name)) if base.is_dir() else []
+    if direct_value_dirs and find_log_file(str(base)) is None:
+        root = base
+        runs: dict[int, Path] = {}
+        for value_dir in direct_value_dirs:
+            match = re.fullmatch(r"value_(\d+)", value_dir.name)
+            if not match:
+                continue
+            candidates = sorted(p for p in value_dir.rglob("*") if p.is_dir() and find_log_file(str(p)))
+            if candidates:
+                runs[int(match.group(1))] = candidates[-1]
+        return root, runs
+
+    parts = list(base.parts)
+    value_index = next((i for i, part in enumerate(parts) if re.fullmatch(r"value_\d+", part)), None)
+    if value_index is None:
+        return base, {}
+
+    suffix = Path(*parts[value_index + 1 :])
+    root = Path(*parts[:value_index])
+    runs = {}
+    for sibling in sorted(root.glob("value_*")):
+        if not sibling.is_dir():
+            continue
+        match = re.fullmatch(r"value_(\d+)", sibling.name)
+        if not match:
+            continue
+        candidate = sibling / suffix
+        if candidate.is_dir() and find_log_file(str(candidate)):
+            runs[int(match.group(1))] = candidate
+    return root, runs
+
+
+def resolve_multi_value_output_dir(base_path: str, root_dir: Path) -> Path:
+    """Choose a shared output directory for multi-value artifacts."""
+    base = Path(base_path).resolve()
+    parts = list(base.parts)
+    value_index = next((i for i, part in enumerate(parts) if re.fullmatch(r"value_\d+", part)), None)
+    if value_index is None:
+        return root_dir
+
+    relative_suffix = Path(*parts[value_index + 1 :])
+    output_dir = root_dir / relative_suffix.parent
+    output_dir.mkdir(parents=True, exist_ok=True)
+    return output_dir
+
+
+def resolve_experiment_tag(base_path: str) -> str | None:
+    """Infer a stable experiment tag from the run path suffix after value_*/."""
+    base = Path(base_path).resolve()
+    parts = list(base.parts)
+    value_index = next((i for i, part in enumerate(parts) if re.fullmatch(r"value_\d+", part)), None)
+    if value_index is None:
+        return None
+
+    relative_suffix = Path(*parts[value_index + 1 :])
+    tag = relative_suffix.name.strip()
+    return tag or None
+
+
 # =====================================================================
 # 4.  Reporting
 # =====================================================================
@@ -483,6 +560,8 @@ def plot_breakdown(df: pd.DataFrame, output_path: str) -> None:
     read_pct = total_read / total_wall * 100
     write_pct = total_write / total_wall * 100
     cpu_pct = total_cpu / total_wall * 100
+    value_size = infer_value_size_from_run_dir(output_path)
+    xtick_label = f"{value_size}B" if value_size is not None else "Run"
 
     fig, ax = plt.subplots(figsize=(4, 5))
 
@@ -517,7 +596,7 @@ def plot_breakdown(df: pd.DataFrame, output_path: str) -> None:
 
     ax.set_ylabel("Normalized Execution Time")
     ax.set_xticks(x)
-    ax.set_xticklabels(["32B"])
+    ax.set_xticklabels([xtick_label])
     ax.set_xlabel("Value Size")
     ax.set_ylim(0, 110)
     ax.legend(loc="upper center", ncol=3, bbox_to_anchor=(0.5, 1.15))
@@ -665,90 +744,133 @@ def process_single_run(run_dir: str, do_plot: bool, csv_path: str | None) -> pd.
     return df
 
 
+def process_single_run_with_capture(
+    run_dir: str,
+    do_plot: bool,
+    csv_path: str | None,
+    summary_path: str | None,
+) -> pd.DataFrame | None:
+    """Run single-run processing while also persisting terminal output."""
+    buffer = io.StringIO()
+    with redirect_stdout(buffer), redirect_stderr(buffer):
+        df = process_single_run(run_dir, do_plot=do_plot, csv_path=csv_path)
+    text = buffer.getvalue()
+    print(text, end="")
+    if summary_path:
+        Path(summary_path).write_text(text, encoding="utf-8")
+        print(f"  Summary saved to: {summary_path}")
+    return df
+
+
+def print_multi_value_summary(all_results: dict[int, pd.DataFrame]) -> None:
+    print(f"\n{'═' * 60}")
+    print("Multi-Value-Size Summary (GPComp Fig. 2 style)")
+    print(f"{'═' * 60}")
+    print(f"  {'Value Size':>12} {'Read%':>8} {'Write%':>8} {'Compute%':>10}")
+    print(f"  {'─' * 42}")
+    for vs in sorted(all_results.keys()):
+        df = all_results[vs]
+        tw = df["wall_us"].sum()
+        if tw > 0:
+            rp = df["read_io_us"].sum() / tw * 100
+            wp = df["write_io_us"].sum() / tw * 100
+            cp = df["cpu_us"].sum() / tw * 100
+        else:
+            rp = wp = cp = 0
+        print(f"  {vs:>10}B {rp:>7.2f}% {wp:>7.2f}% {cp:>9.2f}%")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Parse RocksDB compaction profile for IO/CPU breakdown."
     )
     parser.add_argument(
         "run_dir",
-        help="Path to a single run directory, or a parent containing value_*/ subdirs.",
+        help="Path to a single run directory, a base run under value_*/, or a parent containing value_*/ subdirs.",
     )
     parser.add_argument("--plot", action="store_true", help="Generate bar chart(s).")
     parser.add_argument("--csv", default=None, help="Export per-compaction CSV.")
+    parser.add_argument(
+        "--all-value-sizes",
+        action="store_true",
+        help="Starting from one run directory, discover sibling value_*/ runs with the same relative suffix and generate a combined figure.",
+    )
     args = parser.parse_args()
 
     run_dir = args.run_dir
+    run_path = Path(run_dir).resolve()
+    multi_requested = args.all_value_sizes
+    if not multi_requested and run_path.is_dir() and find_log_file(str(run_path)) is None:
+        multi_requested = any(p.is_dir() and re.fullmatch(r"value_\d+", p.name) for p in run_path.iterdir())
 
-    # Check if this is a multi-value-size parent directory
-    value_dirs = sorted(Path(run_dir).glob("value_*/"))
-    if value_dirs and find_log_file(run_dir) is None:
-        # Multi-value-size mode: scan value_*/ subdirectories
-        print(f"Scanning multi-value directory: {run_dir}")
-        print(f"Found value dirs: {[d.name for d in value_dirs]}")
+    if multi_requested:
+        summary_capture = io.StringIO()
+        with redirect_stdout(summary_capture), redirect_stderr(summary_capture):
+            root_dir, discovered_runs = resolve_multi_value_runs(run_dir)
+            shared_output_dir = resolve_multi_value_output_dir(run_dir, root_dir)
+            print(f"Scanning multi-value inputs from: {run_path}")
+            if root_dir != run_path:
+                print(f"Resolved multi-value root: {root_dir}")
+            print(f"Shared output directory: {shared_output_dir}")
 
-        all_results: dict[int, pd.DataFrame] = {}
-        for vd in value_dirs:
-            vs_match = re.match(r"value_(\d+)", vd.name)
-            if not vs_match:
-                continue
-            value_size = int(vs_match.group(1))
+            if not discovered_runs:
+                print("No matching sibling value_* run directories were found.", file=sys.stderr)
+            else:
+                print(f"Found value sizes: {[f'{vs}B' for vs in sorted(discovered_runs)]}")
 
-            # Find the latest run dir inside value_*/
-            # Could be value_32/<run_id>/ or value_32/fillrandom_inline/<run_id>/
-            candidates = []
-            for child in sorted(vd.iterdir()):
-                if child.is_dir():
-                    if find_log_file(str(child)):
-                        candidates.append(child)
+            all_results: dict[int, pd.DataFrame] = {}
+            for value_size, candidate in sorted(discovered_runs.items()):
+                print(f"\n{'─' * 60}")
+                print(f"Value size: {value_size}B  →  {candidate}")
+                per_run_csv = None
+                if args.csv:
+                    csv_target = Path(args.csv)
+                    if len(discovered_runs) > 1 and csv_target.suffix:
+                        per_run_csv = str(csv_target.with_name(f"{csv_target.stem}_{value_size}B{csv_target.suffix}"))
                     else:
-                        # Check one level deeper
-                        for grandchild in sorted(child.iterdir()):
-                            if grandchild.is_dir() and find_log_file(str(grandchild)):
-                                candidates.append(grandchild)
-
-            if not candidates:
-                print(f"\n  No run directories with LOG found under {vd}")
-                continue
-
-            latest = candidates[-1]  # last alphabetically = latest timestamp
-            print(f"\n{'─' * 60}")
-            print(f"Value size: {value_size}B  →  {latest}")
-            df = process_single_run(str(latest), do_plot=args.plot, csv_path=None)
-            if df is not None:
-                all_results[value_size] = df
-
-        # Multi-value summary table
-        if all_results:
-            print(f"\n{'═' * 60}")
-            print("Multi-Value-Size Summary (GPComp Fig. 2 style)")
-            print(f"{'═' * 60}")
-            print(f"  {'Value Size':>12} {'Read%':>8} {'Write%':>8} {'Compute%':>10}")
-            print(f"  {'─' * 42}")
-            for vs in sorted(all_results.keys()):
-                df = all_results[vs]
-                tw = df["wall_us"].sum()
-                if tw > 0:
-                    rp = df["read_io_us"].sum() / tw * 100
-                    wp = df["write_io_us"].sum() / tw * 100
-                    cp = df["cpu_us"].sum() / tw * 100
-                else:
-                    rp = wp = cp = 0
-                print(f"  {vs:>10}B {rp:>7.2f}% {wp:>7.2f}% {cp:>9.2f}%")
-
-            if args.plot:
-                plot_path = os.path.join(run_dir, "compaction_breakdown_all.png")
-                plot_multi_value_breakdown(all_results, plot_path)
-
-            if args.csv:
-                combined = pd.concat(
-                    [df.assign(value_size=vs) for vs, df in all_results.items()],
-                    ignore_index=True,
+                        per_run_csv = args.csv
+                summary_path = candidate / "compaction_breakdown_summary.txt"
+                df = process_single_run_with_capture(
+                    str(candidate),
+                    do_plot=args.plot,
+                    csv_path=per_run_csv,
+                    summary_path=str(summary_path),
                 )
-                combined.to_csv(args.csv, index=False)
-                print(f"\n  Combined CSV saved to: {args.csv}")
+                if df is not None:
+                    all_results[value_size] = df
+
+            if all_results:
+                print_multi_value_summary(all_results)
+                experiment_tag = resolve_experiment_tag(run_dir)
+                tag_suffix = f"_{experiment_tag}" if experiment_tag else ""
+                combined_plot_path = shared_output_dir / f"compaction_breakdown_all{tag_suffix}.png"
+                if args.plot:
+                    plot_multi_value_breakdown(all_results, str(combined_plot_path))
+
+                combined_summary_path = shared_output_dir / f"compaction_breakdown_all_summary{tag_suffix}.txt"
+                combined_summary_path.write_text(summary_capture.getvalue(), encoding="utf-8")
+
+                if args.csv:
+                    csv_target = Path(args.csv)
+                    if len(discovered_runs) > 1 and csv_target.suffix:
+                        combined_csv_path = csv_target.with_name(f"{csv_target.stem}_all{csv_target.suffix}")
+                    else:
+                        combined_csv_path = csv_target
+                    combined = pd.concat(
+                        [df.assign(value_size=vs) for vs, df in all_results.items()],
+                        ignore_index=True,
+                    )
+                    combined.to_csv(combined_csv_path, index=False)
+                    print(f"\n  Combined CSV saved to: {combined_csv_path}")
+
+        captured_text = summary_capture.getvalue()
+        print(captured_text, end="")
+        if 'combined_summary_path' in locals() and all_results:
+            combined_summary_path.write_text(captured_text, encoding="utf-8")
+            print(f"  Multi-value summary saved to: {combined_summary_path}")
     else:
-        # Single run directory mode
-        process_single_run(run_dir, do_plot=args.plot, csv_path=args.csv)
+        summary_path = str(run_path / "compaction_breakdown_summary.txt") if run_path.is_dir() else None
+        process_single_run_with_capture(run_dir, do_plot=args.plot, csv_path=args.csv, summary_path=summary_path)
 
 
 if __name__ == "__main__":
