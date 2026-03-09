@@ -28,6 +28,9 @@
 #include <utility>
 #include <vector>
 
+/* For SstFileReader-based validation in RunRealGpuCompaction. */
+#include "rocksdb/sst_file_reader.h"
+
 namespace ROCKSDB_NAMESPACE {
 
 namespace {
@@ -231,6 +234,122 @@ void AppendBenchmarkCsv(const std::string& csv_path, int rep,
       << metrics.replay.bytes << '\n';
 }
 
+/* ---- Real GPU compaction worker metrics --------------------------------- */
+
+struct GpuWorkerMetrics {
+  double total_us      = 0.0;
+  double sst_read_us   = 0.0;
+  double h2d_us        = 0.0;
+  double kernel_us     = 0.0;
+  double d2h_us        = 0.0;
+  double sst_write_us  = 0.0;
+  size_t input_files   = 0;
+  size_t input_keys    = 0;
+  size_t output_keys   = 0;
+  std::string output_file;
+  bool parsed = false;
+};
+
+bool ParseGpuWorkerMetrics(const std::string& output,
+                           GpuWorkerMetrics* m) {
+  std::istringstream lines(output);
+  std::string line;
+  while (std::getline(lines, line)) {
+    static const std::string kPrefix = "GPU_COMPACTION_WORKER_METRICS ";
+    if (line.rfind(kPrefix, 0) != 0) continue;
+
+    std::istringstream ts(line.substr(kPrefix.size()));
+    std::string token;
+    while (ts >> token) {
+      const auto eq = token.find('=');
+      if (eq == std::string::npos) continue;
+      const std::string k = token.substr(0, eq);
+      const std::string v = token.substr(eq + 1);
+      if      (k == "total_us")      m->total_us      = std::strtod(v.c_str(), nullptr);
+      else if (k == "sst_read_us")   m->sst_read_us   = std::strtod(v.c_str(), nullptr);
+      else if (k == "h2d_us")        m->h2d_us        = std::strtod(v.c_str(), nullptr);
+      else if (k == "merge_kernel_us") m->kernel_us   = std::strtod(v.c_str(), nullptr);
+      else if (k == "d2h_us")        m->d2h_us        = std::strtod(v.c_str(), nullptr);
+      else if (k == "sst_write_us")  m->sst_write_us  = std::strtod(v.c_str(), nullptr);
+      else if (k == "input_files")   m->input_files   = std::strtoull(v.c_str(), nullptr, 10);
+      else if (k == "input_keys")    m->input_keys    = std::strtoull(v.c_str(), nullptr, 10);
+      else if (k == "output_keys")   m->output_keys   = std::strtoull(v.c_str(), nullptr, 10);
+      else if (k == "output_file")   m->output_file   = v;
+    }
+    m->parsed = true;
+    return true;
+  }
+  return false;
+}
+
+/*
+ * ValidateGpuOutput — compare all KV pairs in gpu_sst_path against the
+ * ground-truth directory.  Returns true when the key sets match exactly.
+ */
+bool ValidateGpuOutput(const std::string& gpu_sst_path,
+                       const std::string& ground_truth_dir,
+                       const Options& options,
+                       std::string* mismatch_reason) {
+  /* Collect ground-truth KV pairs from all .sst files in that dir. */
+  std::vector<std::string> gt_files;
+  {
+    std::vector<std::string> children;
+    Status s = options.env->GetChildren(ground_truth_dir, &children);
+    if (!s.ok()) {
+      *mismatch_reason = "GetChildren(" + ground_truth_dir + "): " + s.ToString();
+      return false;
+    }
+    for (const auto& c : children) {
+      if (c.size() > 4 && c.substr(c.size() - 4) == ".sst") {
+        gt_files.push_back(ground_truth_dir + "/" + c);
+      }
+    }
+    std::sort(gt_files.begin(), gt_files.end());
+  }
+
+  /* Iterate ground-truth files and collect all keys (sorted order). */
+  std::vector<std::string> gt_keys;
+  for (const auto& f : gt_files) {
+    SstFileReader reader(options);
+    Status s = reader.Open(f);
+    if (!s.ok()) { *mismatch_reason = "GT Open: " + s.ToString(); return false; }
+    ReadOptions ro; ro.total_order_seek = true;
+    std::unique_ptr<Iterator> it(reader.NewIterator(ro));
+    for (it->SeekToFirst(); it->Valid(); it->Next()) {
+      gt_keys.push_back(it->key().ToString());
+    }
+  }
+
+  /* Iterate GPU output file and collect keys. */
+  std::vector<std::string> gpu_keys;
+  {
+    SstFileReader reader(options);
+    Status s = reader.Open(gpu_sst_path);
+    if (!s.ok()) { *mismatch_reason = "GPU Open: " + s.ToString(); return false; }
+    ReadOptions ro; ro.total_order_seek = true;
+    std::unique_ptr<Iterator> it(reader.NewIterator(ro));
+    for (it->SeekToFirst(); it->Valid(); it->Next()) {
+      gpu_keys.push_back(it->key().ToString());
+    }
+  }
+
+  /* Compare. */
+  if (gpu_keys.size() != gt_keys.size()) {
+    *mismatch_reason = "key count mismatch: GPU=" +
+                       std::to_string(gpu_keys.size()) + " GT=" +
+                       std::to_string(gt_keys.size());
+    return false;
+  }
+  for (size_t i = 0; i < gt_keys.size(); ++i) {
+    if (gpu_keys[i] != gt_keys[i]) {
+      *mismatch_reason = "key mismatch at position " + std::to_string(i) +
+                         ": GPU=" + gpu_keys[i] + " GT=" + gt_keys[i];
+      return false;
+    }
+  }
+  return true;
+}
+
 }  // namespace
 
 class GroundTruthReplayCompactionService : public CompactionService {
@@ -241,11 +360,14 @@ class GroundTruthReplayCompactionService : public CompactionService {
         scratch_id_(std::to_string(NextScratchRootId())),
         ground_truth_root_(db_path_ + "_gpu_compaction_ground_truth_" +
                            scratch_id_),
-        replay_root_(db_path_ + "_gpu_compaction_replay_" + scratch_id_) {
+        replay_root_(db_path_ + "_gpu_compaction_replay_" + scratch_id_),
+        gpu_worker_root_(db_path_ + "_gpu_compaction_worker_" + scratch_id_) {
     CleanupPath(ground_truth_root_);
     CleanupPath(replay_root_);
+    CleanupPath(gpu_worker_root_);
     options_.env->CreateDirIfMissing(ground_truth_root_).PermitUncheckedError();
     options_.env->CreateDirIfMissing(replay_root_).PermitUncheckedError();
+    options_.env->CreateDirIfMissing(gpu_worker_root_).PermitUncheckedError();
   }
 
   ~GroundTruthReplayCompactionService() override = default;
@@ -306,6 +428,15 @@ class GroundTruthReplayCompactionService : public CompactionService {
       return CompactionServiceJobStatus::kFailure;
     }
 
+    /* Run the REAL GPU compaction worker (for timing + validation).
+     * The result written above (ground truth) is still returned to
+     * keep the DB consistent.  Worker failures are non-fatal. */
+    Status ws = RunRealGpuCompaction(scheduled_job_id, job_state);
+    if (!ws.ok()) {
+      fprintf(stderr, "RunRealGpuCompaction warning: %s\n",
+              ws.ToString().c_str());
+    }
+
     {
       std::lock_guard<std::mutex> lock(mu_);
       last_metrics_.wait_total_us = NowMicros() - wait_start;
@@ -339,6 +470,17 @@ class GroundTruthReplayCompactionService : public CompactionService {
   HookBenchmarkRunMetrics GetLastRunMetrics() const {
     std::lock_guard<std::mutex> lock(mu_);
     return last_metrics_;
+  }
+
+  GpuWorkerMetrics GetLastWorkerMetrics() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    return last_worker_metrics_;
+  }
+
+  bool LastWorkerValidated() const { return last_worker_validated_.load(); }
+  std::string LastWorkerValidationMsg() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    return last_worker_validation_msg_;
   }
 
  private:
@@ -504,15 +646,116 @@ class GroundTruthReplayCompactionService : public CompactionService {
     return replay_result.Write(result);
   }
 
+  /*
+   * RunRealGpuCompaction — invoke the gpu_compaction_worker subprocess.
+   *
+   * The worker reads the input SSTs, runs the GPU merge kernel, writes one
+   * merged output SST, and prints timing metrics.  We then optionally compare
+   * that output against the ground-truth SSTs produced by StageGroundTruthOutput.
+   *
+   * On success, last_worker_metrics_ and last_worker_validated_ are updated.
+   * We do NOT alter *result — the caller continues to return the ground-truth
+   * CompactionServiceResult to keep RocksDB consistent.
+   */
+  Status RunRealGpuCompaction(const std::string& scheduled_job_id,
+                              const JobState& job_state) {
+    const std::string worker_out_dir =
+        gpu_worker_root_ + "/" + scheduled_job_id;
+    Status s = options_.env->CreateDirIfMissing(worker_out_dir);
+    if (!s.ok()) return s;
+
+    /* Resolve the gpu_compaction_worker binary path. */
+    const std::string worker_path = GetEnvString(
+        "GPU_COMPACTION_WORKER",
+        "../benchmarks/gpu/gpu_compaction_worker");
+
+    if (access(worker_path.c_str(), X_OK) != 0) {
+      /* Worker binary not found — skip silently (not a hard failure). */
+      fprintf(stdout,
+              "GPU_COMPACTION_WORKER_SKIP reason=binary_not_found path=%s\n",
+              worker_path.c_str());
+      return Status::OK();
+    }
+
+    /* Build the command line: --input_sst p1 p2 ... --output_dir dir */
+    std::ostringstream cmd;
+    cmd << ShellEscape(worker_path);
+    cmd << " --output_dir " << ShellEscape(worker_out_dir);
+    cmd << " --key_prefix 3";  /* "key%06d" keys: skip 3-byte "key" prefix */
+
+    const int gpu_device = GetEnvInt("GPU_DEVICE", 0);
+    cmd << " --device " << gpu_device;
+    cmd << " --no_compression";  /* match test Options (kNoCompression) */
+
+    cmd << " --input_sst";
+    for (const auto& input_file : job_state.compaction_input.input_files) {
+      cmd << " " << ShellEscape(db_path_ + "/" + input_file);
+    }
+
+    /* Run it. */
+    FILE* pipe = popen(cmd.str().c_str(), "r");
+    if (pipe == nullptr) {
+      return Status::IOError("popen() failed for gpu_compaction_worker");
+    }
+
+    std::string output;
+    char buf[512];
+    while (fgets(buf, sizeof(buf), pipe) != nullptr) {
+      output += buf;
+    }
+
+    const int wstatus = pclose(pipe);
+    if (wstatus == -1) {
+      return Status::IOError("pclose() failed for gpu_compaction_worker");
+    }
+    if (!WIFEXITED(wstatus) || WEXITSTATUS(wstatus) != 0) {
+      return Status::IOError("gpu_compaction_worker failed: " + output);
+    }
+
+    GpuWorkerMetrics wm;
+    if (!ParseGpuWorkerMetrics(output, &wm)) {
+      return Status::Corruption("Unable to parse gpu_compaction_worker metrics");
+    }
+
+    /* Validate: compare GPU output keys against ground-truth keys. */
+    bool validated = false;
+    std::string validation_msg;
+    if (!wm.output_file.empty() && !job_state.ground_truth_result.output_path.empty()) {
+      validated = ValidateGpuOutput(
+          wm.output_file,
+          job_state.ground_truth_result.output_path,
+          options_,
+          &validation_msg);
+      if (!validated) {
+        fprintf(stderr, "GPU output validation FAILED: %s\n",
+                validation_msg.c_str());
+      }
+    } else {
+      validation_msg = "skipped (missing path)";
+    }
+
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      last_worker_metrics_      = wm;
+      last_worker_validation_msg_ = validation_msg;
+    }
+    last_worker_validated_.store(validated);
+
+    return Status::OK();
+  }
+
   mutable std::mutex mu_;
   const std::string db_path_;
   const Options options_;
   const std::string scratch_id_;
   const std::string ground_truth_root_;
   const std::string replay_root_;
+  const std::string gpu_worker_root_;
   std::map<std::string, JobState> jobs_;
   std::string last_ground_truth_dir_;
   HookBenchmarkRunMetrics last_metrics_;
+  GpuWorkerMetrics last_worker_metrics_;
+  std::string last_worker_validation_msg_;
 
   std::atomic<uint64_t> next_job_id_{0};
   std::atomic<uint64_t> ground_truth_runs_{0};
@@ -522,6 +765,7 @@ class GroundTruthReplayCompactionService : public CompactionService {
   std::atomic<size_t> last_output_file_count_{0};
   std::atomic<CompactionServiceJobStatus> final_install_status_{
       CompactionServiceJobStatus::kUseLocal};
+  std::atomic<bool> last_worker_validated_{false};
 };
 
 class GpuCompactionHookBenchmarkTest : public DBTestBase {
@@ -684,6 +928,24 @@ TEST_F(GpuCompactionHookBenchmarkTest, ManualCompactionReplaysGroundTruthSsts) {
             metrics.input_stage.total_us, metrics.replay.kernel_us,
             OutputPersistUs(metrics), post_write_completion_us, verify_us,
             metrics.input_stage.bytes, metrics.replay.bytes);
+
+    const GpuWorkerMetrics wm = compaction_service_->GetLastWorkerMetrics();
+    if (wm.parsed) {
+      fprintf(stdout,
+              "GPU_COMPACTION_WORKER_BENCH rep=%d "
+              "total_us=%.1f sst_read_us=%.1f h2d_us=%.1f "
+              "merge_kernel_us=%.1f d2h_us=%.1f sst_write_us=%.1f "
+              "input_files=%zu input_keys=%zu output_keys=%zu "
+              "validated=%s\n",
+              rep, wm.total_us, wm.sst_read_us, wm.h2d_us, wm.kernel_us,
+              wm.d2h_us, wm.sst_write_us, wm.input_files, wm.input_keys,
+              wm.output_keys,
+              compaction_service_->LastWorkerValidated() ? "PASS" : "FAIL");
+      if (!compaction_service_->LastWorkerValidated()) {
+        fprintf(stdout, "  validation_msg=%s\n",
+                compaction_service_->LastWorkerValidationMsg().c_str());
+      }
+    }
   }
 }
 
