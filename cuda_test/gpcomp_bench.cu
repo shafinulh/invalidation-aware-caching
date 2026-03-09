@@ -42,6 +42,7 @@
 
 #include "gpcomp_merge.cuh"
 #include "gpcomp_bloom.cuh"
+#include "gpcomp_cufile.cuh"
 /* gpcomp_common.cuh is pulled in by both headers above */
 
 #include <algorithm>
@@ -246,6 +247,13 @@ struct BloomResult {
     RunStats cpu;        /* CPU per-block bloom               */
     RunStats kernel;     /* GPU kernel-only (pre-transferred) */
     RunStats batched;    /* GPU 1×H2D + grid + 1×D2H          */
+};
+
+struct GDSMergeResult {
+    RunStats gds_load;   /* disk→device via cuFile (compat/native) or pinned H2D */
+    RunStats kernel;     /* GPU merge kernel-only (data already on device)        */
+    RunStats wall;       /* gds_load + kernel + D2H                               */
+    bool     validated;
 };
 
 /* =========================================================================
@@ -691,6 +699,217 @@ static BloomResult bench_bloom(const std::vector<KVPair>& merged,
 }
 
 /* =========================================================================
+ * BENCHMARK 4 – GDS I/O + Merge kernel  (disk → device → merged output)
+ *
+ * Loads all SST binary files directly into device memory using the cuFile
+ * abstraction layer (gpcomp_cufile.cuh), then runs the merge kernel with
+ * the data already on the device – eliminating the separate H2D transfer.
+ *
+ *   GDS_COMPAT (RTX 3070): cuFile uses a pinned bounce-buffer in the driver;
+ *              avoids the OS page-cache copy-in that plain fread incurs.
+ *   GDS_NATIVE (A30):      cuFileRead issues a PCIe DMA directly to VRAM,
+ *              so the load is the only I/O operation and H2D → 0 ns.
+ *   GDS_DISABLED:          falls back to pinned fread + cudaMemcpy (same as
+ *              compat but without the cuFile driver overhead).
+ *
+ * This benchmark reports:
+ *   GDS I/O   – disk-to-device load time (replaces POSIX I/O + H2D)
+ *   kernel    – GPU merge kernel-only (CUDA events, data pre-loaded)
+ *   wall      – GDS I/O + kernel + D2H (end-to-end per-run)
+ *
+ * Comparison against Benchmark 1:
+ *   Traditional path: io_ms (POSIX host load) + mr.gpu_wall (H2D+k+D2H)
+ *   GDS path:         result.wall             (load+k+D2H)
+ * ======================================================================= */
+static GDSMergeResult bench_gds_io_merge(
+        const std::string&              dataset_dir,
+        const DatasetMeta&              meta,
+        const std::vector<KVPair>&      cpu_reference,  /* validation oracle */
+        const MergeResult&              mr_posix,       /* Benchmark 1 stats */
+        double                          posix_io_ms,    /* measured disk I/O  */
+        int                             runs,
+        GDSMode                         mode)
+{
+    hr();
+    printf("BENCHMARK 4 – GDS I/O + Merge  [%s]\n", gds_mode_name(mode));
+    hr();
+
+    int      num_sst = meta.num_sst;
+    uint64_t total   = meta.total_keys;
+
+    /* Build size / offset tables */
+    std::vector<int> h_sizes(num_sst);
+    for (int i = 0; i < num_sst; ++i) h_sizes[i] = meta.sst_sizes[i];
+
+    std::vector<int> h_offsets(num_sst + 1);
+    h_offsets[0] = 0;
+    for (int i = 0; i < num_sst; ++i)
+        h_offsets[i + 1] = h_offsets[i] + h_sizes[i];
+
+    /* Persistent device buffers for all SST arrays */
+    std::vector<KVPair*> d_sst_v(num_sst);
+    for (int i = 0; i < num_sst; ++i)
+        CUDA_CHECK(cudaMalloc(&d_sst_v[i],
+                              (size_t)h_sizes[i] * sizeof(KVPair)));
+
+    KVPair **d_sst_arrays;
+    int     *d_sst_sizes_dev, *d_sst_offsets_dev;
+    KVPair  *d_output;
+    CUDA_CHECK(cudaMalloc(&d_sst_arrays,
+                          (size_t)num_sst       * sizeof(KVPair*)));
+    CUDA_CHECK(cudaMalloc(&d_sst_sizes_dev,
+                          (size_t)num_sst       * sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&d_sst_offsets_dev,
+                          (size_t)(num_sst + 1) * sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&d_output,
+                          (size_t)total         * sizeof(KVPair)));
+
+    CUDA_CHECK(cudaMemcpy(d_sst_arrays,      d_sst_v.data(),
+               (size_t)num_sst       * sizeof(KVPair*), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_sst_sizes_dev,   h_sizes.data(),
+               (size_t)num_sst       * sizeof(int),     cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_sst_offsets_dev, h_offsets.data(),
+               (size_t)(num_sst + 1) * sizeof(int),     cudaMemcpyHostToDevice));
+
+    const int MERGE_BLOCK = 256;
+    int merge_grid = ((int)total + MERGE_BLOCK - 1) / MERGE_BLOCK;
+
+    /* Build SST file path list */
+    std::vector<std::string> sst_paths(num_sst);
+    for (int i = 0; i < num_sst; ++i) {
+        char fname[64];
+        snprintf(fname, sizeof(fname), "sst_%04d.bin", i);
+        sst_paths[i] = dataset_dir + "/" + fname;
+    }
+
+    /* Warm-up: one full GDS load + kernel pass, not timed */
+    printf("  Warm-up (1 GDS load + kernel pass) ...\n"); fflush(stdout);
+    for (int i = 0; i < num_sst; ++i)
+        gpcomp_gds_load_to_device(sst_paths[i].c_str(),
+                                  d_sst_v[i],
+                                  (size_t)h_sizes[i] * sizeof(KVPair));
+    merge_kernel<<<merge_grid, MERGE_BLOCK>>>(d_sst_arrays, d_sst_sizes_dev,
+                                              d_sst_offsets_dev, num_sst, d_output);
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    /* Timed runs */
+    printf("  Running GDS I/O + merge (%d runs) ...\n", runs); fflush(stdout);
+    std::vector<double> load_s(runs), kernel_s(runs), wall_s(runs);
+    std::vector<KVPair> gpu_output(total);
+
+    for (int r = 0; r < runs; ++r) {
+        auto wall_t0 = std::chrono::steady_clock::now();
+
+        /* GDS load: disk → device (replaces POSIX I/O + cudaMemcpy H2D) */
+        auto load_t0 = std::chrono::steady_clock::now();
+        for (int i = 0; i < num_sst; ++i) {
+            if (gpcomp_gds_load_to_device(sst_paths[i].c_str(),
+                                          d_sst_v[i],
+                                          (size_t)h_sizes[i] * sizeof(KVPair)) != 0) {
+                fprintf(stderr, "  GDS load failed for %s\n",
+                        sst_paths[i].c_str());
+            }
+        }
+        load_s[r] = std::chrono::duration<double, std::milli>(
+                        std::chrono::steady_clock::now() - load_t0).count();
+
+        /* Merge kernel – data is already on device */
+        CudaTimer ktimer;
+        ktimer.start();
+        merge_kernel<<<merge_grid, MERGE_BLOCK>>>(d_sst_arrays, d_sst_sizes_dev,
+                                                  d_sst_offsets_dev, num_sst,
+                                                  d_output);
+        kernel_s[r] = (double)ktimer.stop_ms();
+
+        /* D2H for output */
+        CUDA_CHECK(cudaMemcpy(gpu_output.data(), d_output,
+                              (size_t)total * sizeof(KVPair),
+                              cudaMemcpyDeviceToHost));
+
+        wall_s[r] = std::chrono::duration<double, std::milli>(
+                        std::chrono::steady_clock::now() - wall_t0).count();
+    }
+
+    /* Cleanup device buffers */
+    for (int i = 0; i < num_sst; ++i) cudaFree(d_sst_v[i]);
+    cudaFree(d_sst_arrays);
+    cudaFree(d_sst_sizes_dev);
+    cudaFree(d_sst_offsets_dev);
+    cudaFree(d_output);
+
+    /* Validate against CPU oracle */
+    bool ok = (gpu_output.size() == cpu_reference.size());
+    if (ok) {
+        for (size_t i = 0; i < gpu_output.size(); ++i) {
+            if (gpu_output[i].key   != cpu_reference[i].key ||
+                gpu_output[i].value != cpu_reference[i].value) {
+                fprintf(stderr,
+                    "  GDS FAIL: mismatch at %zu: "
+                    "GPU {key=%llu, val=%llu} vs CPU {key=%llu, val=%llu}\n",
+                    i,
+                    (unsigned long long)gpu_output[i].key,
+                    (unsigned long long)gpu_output[i].value,
+                    (unsigned long long)cpu_reference[i].key,
+                    (unsigned long long)cpu_reference[i].value);
+                ok = false;
+                break;
+            }
+        }
+    }
+
+    RunStats load_stats   = RunStats::from(load_s);
+    RunStats kernel_stats = RunStats::from(kernel_s);
+    RunStats wall_stats   = RunStats::from(wall_s);
+
+    double data_mb = (double)total * sizeof(KVPair) / (1 << 20);
+
+    printf("\n");
+    printf("  Input:  %d SSTs × %d keys = %llu total  (%.1f MB)   runs=%d\n",
+           num_sst, num_sst ? (int)(total / num_sst) : 0,
+           (unsigned long long)total, data_mb, runs);
+    print_stat("GDS I/O  (disk→device)",         load_stats,   total);
+    print_stat("GPU merge kernel-only",           kernel_stats, total);
+    print_stat("GDS wall (I/O + kernel + D2H)",   wall_stats,   total);
+    printf("  GDS I/O bandwidth at min:  %.1f MB/s\n",
+           data_mb / (load_stats.min / 1e3));
+    printf("  Validation:                %s\n", ok ? "PASS ✓" : "FAIL ✗");
+
+    /* ---- Comparison vs traditional POSIX path ---- */
+    double posix_wall_min  = posix_io_ms + mr_posix.gpu_wall.min;
+    double posix_wall_mean = posix_io_ms + mr_posix.gpu_wall.mean;
+    double gds_wall_min    = wall_stats.min;
+    double gds_wall_mean   = wall_stats.mean;
+
+    printf("\n");
+    printf("  ┌─────────────────────────────────────────────────────────┐\n");
+    printf("  │  I/O + Merge path comparison (min / mean)               │\n");
+    printf("  ├─────────────────────────────────────────────────────────┤\n");
+    printf("  │  POSIX I/O + H2D + kernel + D2H:  %7.2f / %7.2f ms  │\n",
+           posix_wall_min, posix_wall_mean);
+    printf("  │    (%s + %s)\n",
+           "disk→host (POSIX)", "cudaMemcpy H2D");
+    printf("  │  GDS %-11s + kernel + D2H:  %7.2f / %7.2f ms  │\n",
+           s_gds_mode == GDS_NATIVE ? "(native)" : "(compat)",
+           gds_wall_min, gds_wall_mean);
+    printf("  ├─────────────────────────────────────────────────────────┤\n");
+    printf("  │  Speedup (min):   %.2f×    Speedup (mean):  %.2f×       │\n",
+           posix_wall_min  / gds_wall_min,
+           posix_wall_mean / gds_wall_mean);
+    printf("  │  I/O savings (min):  %.2f ms   "
+           "I/O savings (mean):  %.2f ms  │\n",
+           posix_io_ms - load_stats.min,
+           posix_io_ms - load_stats.mean);
+    printf("  └─────────────────────────────────────────────────────────┘\n\n");
+
+    GDSMergeResult result;
+    result.gds_load  = load_stats;
+    result.kernel    = kernel_stats;
+    result.wall      = wall_stats;
+    result.validated = ok;
+    return result;
+}
+
+/* =========================================================================
  * BENCHMARK 3 – Total compaction job (Alg1 + Alg2 end-to-end)
  * ======================================================================= */
 static void bench_total_compaction(const MergeResult& mr,
@@ -799,6 +1018,12 @@ static void usage(const char* prog)
         "  --compaction_rounds N    simulate N compaction rounds in Benchmark 3 [default: 0 = skip]\n"
         "  --fillrandom_keys N      auto-compute rounds for N total keys (overrides --compaction_rounds)\n"
         "                           Accepts K/M/B suffixes: 10M = 10,000,000  200M  1B  500K\n"
+        "  --gds                    Enable Benchmark 4: GDS I/O + Merge via cuFile\n"
+        "                           (requires -DGPCOMP_USE_CUFILE build; falls back to\n"
+        "                            pinned cudaMemcpy when cuFile is not compiled in)\n"
+        "  --compat-mode            Force cuFile Compatibility Mode before driver open\n"
+        "                           (use on RTX 3070 / any GPU without native GDS;\n"
+        "                            implies --gds)\n"
         "  --help\n",
         prog);
 }
@@ -812,8 +1037,10 @@ int main(int argc, char* argv[])
     int overhead_bytes       = 20;
     int fpr_samples          = 10000;
     int runs                 = 5;
-    int compaction_rounds    = 0;   /* 0 = skip Benchmark 4 */
+    int compaction_rounds    = 0;   /* 0 = skip Benchmark 3           */
     int64_t fillrandom_keys  = 0;   /* if >0, overrides compaction_rounds */
+    bool use_gds             = false;
+    bool force_compat        = false;
 
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
@@ -833,8 +1060,18 @@ int main(int argc, char* argv[])
         else if (a == "--runs")            runs              = std::stoi(next());
         else if (a == "--compaction_rounds") compaction_rounds = std::stoi(next());
         else if (a == "--fillrandom_keys")   fillrandom_keys   = parse_count(next());
+        else if (a == "--gds")              use_gds           = true;
+        else if (a == "--compat-mode")    { force_compat = true; use_gds = true; }
         else if (a == "--help" || a == "-h") { usage(argv[0]); return 0; }
         else { fprintf(stderr, "error: unknown option '%s'\n", a.c_str()); return 1; }
+    }
+
+    /* ---- GDS / cuFile initialisation (before any I/O) ---- */
+    GDSMode gds_mode = GDS_DISABLED;
+    if (use_gds) {
+        if (force_compat)
+            gpcomp_gds_force_compat_mode();   /* writes /tmp JSON + sets env-var */
+        gds_mode = gpcomp_gds_init();
     }
 
     /* ---- GPU info ---- */
@@ -848,6 +1085,7 @@ int main(int argc, char* argv[])
                (double)prop.totalGlobalMem / (1 << 30),
                prop.sharedMemPerBlock / 1024,
                prop.multiProcessorCount);
+        printf("  GDS mode: %s\n", gds_mode_name(gds_mode));
         printf("  Dataset: %s\n", dataset_dir.c_str());
         printf("═══════════════════════════════════════════════════════════\n\n");
     }
@@ -905,6 +1143,20 @@ int main(int argc, char* argv[])
                (unsigned long long)meta.total_keys);
     }
     bench_total_compaction(mr, br, io_ms, meta.total_keys, runs, compaction_rounds);
+
+    /* ================================================================
+     * Benchmark 4 (optional): GDS I/O + Merge
+     *
+     * Enabled by --gds (any GPU, pinned-memory fallback) or
+     *            --compat-mode (RTX 3070 / no native GDS hardware).
+     * On A30 with native GDS hardware: build with GDS=1 and omit
+     * --compat-mode; cuFileDriverOpen() will activate NATIVE mode.
+     * ================================================================ */
+    if (use_gds) {
+        bench_gds_io_merge(dataset_dir, meta, merged, mr, io_ms, runs, gds_mode);
+    }
+
+    gpcomp_gds_cleanup();
 
     hr();
     printf("Done.\n");

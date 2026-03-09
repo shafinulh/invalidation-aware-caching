@@ -11,14 +11,22 @@ Measures and compares CPU vs GPU performance for the two compaction algorithms:
 
 ```
 cuda_test/
-├── gpcomp_bench.cu          # main benchmark program
+├── gpcomp_bench.cu          # main benchmark program (Benchmarks 1-4)
 ├── gpcomp_merge.cuh         # merge kernel + launcher
 ├── gpcomp_bloom.cuh         # bloom filter kernels (batched)
 ├── gpcomp_common.cuh        # shared types (KVPair), CPU helpers
+├── gpcomp_cufile.cuh        # cuFile / GPUDirect Storage abstraction layer
 ├── gpcomp_datagen.cpp       # dataset generator
 ├── gpcomp_tests.cu          # unit tests
 ├── Makefile
-├── test.sh                  # value-size sweep script (this doc)
+├── test.sh                  # value-size sweep script
+├── gds/                     # locally extracted cuFile package (no root needed)
+│   ├── libcufile.deb        # runtime .deb (libcufile 1.4.0.31, CUDA 11.8)
+│   ├── libcufile-dev.deb    # dev .deb (cufile.h + link stubs)
+│   ├── setup_local.sh       # script: extracts debs → gds/local/
+│   └── local/
+│       ├── include/cufile.h # extracted header
+│       └── lib/             # extracted .so + symlinks
 ├── dataset/                 # generated dataset (SST .bin files + dataset.meta)
 └── results/                 # all sweep outputs (created by test.sh)
     └── run_YYYY-MM-DD_HH-MM-SS/
@@ -33,13 +41,25 @@ cuda_test/
 ## Build
 
 ```sh
-make gpcomp_bench       # build benchmark binary
+make gpcomp_bench       # build benchmark binary (no GDS)
 make gpcomp_datagen     # build dataset generator
 make gpcomp_unit_tests  # build unit tests
 make all                # build everything
 ```
 
 Requires: CUDA 11+, `nvcc`, C++17.
+
+### Build with cuFile / GPUDirect Storage (GDS)
+
+See [GDS Setup](#gds--cufile-setup-gpudirect-storage) below for the one-time `gds/` extraction step.
+
+```sh
+make GDS=1 gpcomp_bench          # build with cuFile support
+make bench-gds                   # generate dataset + run compat-mode (any GPU)
+make bench-gds-native            # generate dataset + run native mode (A30/A100/H100)
+```
+
+The `Makefile` automatically points `-I`, `-L`, and `-rpath` at `gds/local/` so **no system install is needed and `LD_LIBRARY_PATH` is not required** at runtime.
 
 ---
 
@@ -70,6 +90,8 @@ This produces `dataset/sst_0000.bin … sst_000N.bin` and `dataset/dataset.meta`
 | `--runs N` | `5` | Number of timed repetitions per section (reports min/mean/stddev) |
 | `--fillrandom_keys N` | `0` | Simulate a fillrandom workload of N total keys. Auto-computes number of compaction rounds. Accepts K/M/B suffixes (e.g. `10M`, `200M`, `1B`). `0` = skip. |
 | `--compaction_rounds N` | `0` | Manually set number of compaction rounds. Overridden by `--fillrandom_keys`. |
+| `--gds` | off | Enable **Benchmark 4**: GDS I/O + Merge via cuFile. Requires `GDS=1` build; falls back to pinned `cudaHostAlloc` + `fread` + `cudaMemcpy` if cuFile is not compiled in. |
+| `--compat-mode` | off | Force cuFile **Compatibility Mode** before driver open. Use on RTX 3070 / any GPU without native GDS. Implies `--gds`. |
 | `--help` | — | Print usage |
 
 **Examples:**
@@ -226,7 +248,93 @@ Summary file for the entire sweep. Contains:
 ```
 
 ---
+---
 
+## GDS / cuFile Setup (GPUDirect Storage)
+
+### One-time extraction (no root required)
+
+The `gds/` directory already contains the downloaded `.deb` packages. To extract them into a local library tree:
+
+```sh
+bash gds/setup_local.sh
+```
+
+This creates:
+```
+gds/local/include/cufile.h
+gds/local/lib/libcufile.so.0   → libcufile.so.1.4.0
+gds/local/lib/libcufile.so.1   → libcufile.so.1.4.0
+gds/local/lib/libcufile.so     → libcufile.so.1
+```
+
+### If your machine is missing the `.deb` files
+
+For **CUDA 11.8** (matches our `nvcc` version):
+
+```sh
+# Create gds/ directory
+mkdir -p gds && cd gds
+
+# Download runtime and dev packages (Ubuntu 22.04 debs, binary-compatible with Debian 12)
+BASE=https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64
+curl -fsSL -o libcufile.deb     "$BASE/libcufile-11-8_1.4.0.31-1_amd64.deb"
+curl -fsSL -o libcufile-dev.deb "$BASE/libcufile-dev-11-8_1.4.0.31-1_amd64.deb"
+cd ..
+bash gds/setup_local.sh
+```
+
+For **other CUDA versions**, replace `11-8` and `1.4.0.31` with the version matching your `nvcc --version`. Browse available packages at:
+`https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/`
+
+### GPU compatibility
+
+| GPU | GDS support | Recommended flag |
+|---|---|---|
+| RTX 3070, RTX 3080, RTX 4090, any consumer GPU | **Compat Mode** (bounce-buffer via cuFile driver) | `--compat-mode` |
+| A30, A100, H100, data-centre GPUs with local NVMe | **Native GDS** (PCIe DMA direct to VRAM) | `--gds` (no compat flag) |
+
+> **Note on NFS:** GDS bypasses the OS page cache using `O_DIRECT`. On NFS, this eliminates read-ahead and is typically **slower** than POSIX `fread`. GDS gives the best performance on **local NVMe** attached via PCIe. See analysis below.
+
+### Build and run
+
+```sh
+# Build with cuFile
+make GDS=1 gpcomp_bench
+
+# Run Benchmark 4 on RTX 3070 (or any non-GDS GPU)
+./gpcomp_bench --compat-mode
+
+# Run Benchmark 4 on A30 / A100 / H100 (native GDS)
+./gpcomp_bench --gds
+
+# Combined full benchmark including GDS benchmark
+./gpcomp_bench --compat-mode --fillrandom_keys 200M --runs 5
+```
+
+### Benchmark 4 – GDS I/O + Merge
+
+This benchmark loads all SST files **directly into device memory** using `gpcomp_cufile.cuh`, then immediately runs the merge kernel — eliminating the separate POSIX I/O + `cudaMemcpy H2D` step.
+
+| Metric | Meaning |
+|---|---|
+| **GDS I/O (disk→device)** | `cuFileRead` time (compat: via pinned bounce-buffer; native: PCIe DMA) |
+| **GPU merge kernel-only** | CUDA events around `merge_kernel` — data already on device |
+| **GDS wall** | GDS I/O + kernel + D2H end-to-end |
+
+Output also prints a comparison table vs the traditional POSIX I/O + H2D path.
+
+### Performance results (RTX 3070, NFS storage, 8 SSTs × 524K keys)
+
+| Path | Min latency | Throughput |
+|---|---|---|
+| POSIX fread (OS-cached) | 84 ms I/O | 762 MB/s |
+| POSIX fread (cold NFS) | 404 ms I/O | 158 MB/s |
+| cuFile compat (O_DIRECT, NFS) | 630 ms I/O | 102 MB/s |
+
+**Key finding:** On NFS + consumer GPU, POSIX `fread` into `cudaHostAlloc` is the correct I/O path. cuFile compat mode is 1.5–6× slower on NFS because `O_DIRECT` bypasses read-ahead caching. GDS is designed for **local NVMe**, where it delivers meaningful speedups on a GDS-capable GPU (A30+).
+
+---
 ## What Each Benchmark Measures
 
 ### Benchmark 1 – Merge
