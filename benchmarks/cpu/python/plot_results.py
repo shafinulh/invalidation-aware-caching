@@ -1,5 +1,6 @@
 import os
 import glob
+import sys
 import pandas as pd
 import matplotlib.pyplot as plt
 import re
@@ -37,7 +38,7 @@ def _extract_metadata_from_path(path_parts):
     for part in path_parts:
         if part.startswith("value_"):
             value_size = int(part.split("_")[1])
-        elif part.startswith("comp_"):
+        elif part.startswith("subcomp_") or part.startswith("comp_"):
             comp_threads = int(part.split("_")[1])
         elif part.startswith("write_"):
             write_ratio = int(part.split("_")[1])
@@ -71,7 +72,7 @@ def _extract_mb_per_sec_from_log(log_file, benchmark_name):
 
 
 def _plot_fillrandom(results_base, out_dir):
-    pattern = os.path.join(results_base, "fillrandom", "value_*", "comp_*", "*", "report.csv")
+    pattern = os.path.join(results_base, "fillrandom", "value_*", "subcomp_*", "*", "report.csv")
     files = glob.glob(pattern)
 
     all_data = []
@@ -252,6 +253,47 @@ def _plot_readwritemix(results_base, out_dir):
     plt.close()
     print(f"ReadWriteMix real-time throughput graph saved to: {realtime_png}")
 
+def _plot_gpu_comparison(results_base, out_dir):
+    """Load GPU fillrandom results and append CPU-vs-GPU comparison plots."""
+    script_dir = Path(__file__).resolve().parent
+    gpu_py_dir = str(script_dir.parent.parent / "gpu" / "python")
+    if gpu_py_dir not in sys.path:
+        sys.path.insert(0, gpu_py_dir)
+
+    try:
+        from compare_cpu_gpu_fillrandom import (
+            load_cpu_run,
+            load_gpu_run,
+            plot_comparison,
+            print_comparison_table,
+            VALUE_SIZES,
+        )
+    except ImportError as e:
+        print(f"warning: could not import GPU comparison module: {e}")
+        return
+
+    gpu_results_base = str(
+        script_dir.parent.parent / "gpu" / "results" / "fillrandom_gpu"
+    )
+
+    cpu_data = {}
+    gpu_data = {}
+    for vs in VALUE_SIZES:
+        c = load_cpu_run(results_base, vs, None)
+        if c:
+            cpu_data[vs] = c
+        g = load_gpu_run(gpu_results_base, vs, None)
+        if g:
+            gpu_data[vs] = g
+
+    if not cpu_data and not gpu_data:
+        print("No CPU or GPU data available for comparison plots.")
+        return
+
+    print_comparison_table(cpu_data, gpu_data)
+    plot_comparison(cpu_data, gpu_data, out_dir)
+
+
 def _resolve_results_paths():
     script_dir = Path(__file__).resolve().parent
     env_file = script_dir.parent / "config" / ".env.local"
@@ -276,6 +318,7 @@ def plot_results():
     print(f"Saving plots to: {out_dir}")
     _plot_fillrandom(results_base, out_dir)
     _plot_readwritemix(results_base, out_dir)
+    _plot_gpu_comparison(results_base, out_dir)
 
 
 if __name__ == "__main__":

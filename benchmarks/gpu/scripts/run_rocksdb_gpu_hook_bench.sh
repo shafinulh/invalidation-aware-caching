@@ -10,9 +10,15 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BENCH_ROOT_SCRIPT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 REPO_ROOT_SCRIPT_DIR="$(cd "${BENCH_ROOT_SCRIPT_DIR}/../.." && pwd)"
+WORKSPACE_ROOT_DIR="$(cd "${REPO_ROOT_SCRIPT_DIR}/.." && pwd)"
 
 # Locate local GDS library path (for libcufile.so) and default worker binary.
-GDS_LOCAL_LIB="${GDS_LOCAL_LIB:-${REPO_ROOT_SCRIPT_DIR}/cuda_test/gds/local/lib}"
+# Check repo-local path first, then fall back to workspace-root cuda_test.
+if [[ -d "${REPO_ROOT_SCRIPT_DIR}/cuda_test/gds/local/lib" ]]; then
+  GDS_LOCAL_LIB="${GDS_LOCAL_LIB:-${REPO_ROOT_SCRIPT_DIR}/cuda_test/gds/local/lib}"
+else
+  GDS_LOCAL_LIB="${GDS_LOCAL_LIB:-${WORKSPACE_ROOT_DIR}/cuda_test/gds/local/lib}"
+fi
 export LD_LIBRARY_PATH="${GDS_LOCAL_LIB}${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
 # shellcheck source=common_env.sh

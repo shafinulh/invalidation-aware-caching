@@ -4,10 +4,16 @@ project_notes/
 # Local benchmark env overrides
 benchmarks/*/config/.env.local
 
-# GPU benchmark build artifacts and local logs
+# CPU benchmark data and results
+benchmarks/cpu/data/
+benchmarks/cpu/results/
+
+# GPU benchmark build artifacts, binaries, results, and local logs
 benchmarks/gpu/build/
 benchmarks/gpu/gpu_io_bench
 benchmarks/gpu/gpu_file_replay_bench
+benchmarks/gpu/gpu_compaction_worker
+benchmarks/gpu/results/
 cufile.log
 
 # Python bytecode cache
