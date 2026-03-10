@@ -20,6 +20,7 @@
 
 #include "gpcomp_merge.cuh"
 #include "gpcomp_bloom.cuh"
+#include "gpcomp_pack.cuh"
 
 #include <algorithm>
 #include <cassert>
@@ -603,6 +604,213 @@ static bool test_bloom_single_key_k3()
 }
 
 /* =========================================================================
+ * === PACK / UNPACK TESTS ==================================================
+ * ====================================================================== */
+
+/* --------------------------------------------------------------------- *
+ * T-P1: CPU pack → CPU unpack round-trip (small block)                    *
+ *                                                                         *
+ * 10 sorted keys, restart_interval=4 → 3 restart points.                 *
+ * --------------------------------------------------------------------- */
+static bool test_pack_cpu_roundtrip_small()
+{
+    const int N = 10;
+    KVPair kv[N];
+    for (int i = 0; i < N; ++i) kv[i] = {(uint64_t)(i * 100 + 1), (uint64_t)(i * 7)};
+
+    auto block = cpu_pack_block(kv, N, 4);
+
+    KVPair out[N] = {};
+    int n = cpu_unpack_block(block.data(), block.size(), out);
+
+    bool ok = true;
+    ok &= CHECK(n == N, "unpack returned correct count");
+    for (int i = 0; i < N; ++i) {
+        char msg[64];
+        snprintf(msg, sizeof(msg), "pair[%d] key=%llu value=%llu", i,
+                 (unsigned long long)kv[i].key, (unsigned long long)kv[i].value);
+        ok &= CHECK(out[i].key == kv[i].key && out[i].value == kv[i].value, msg);
+    }
+    return ok;
+}
+
+/* --------------------------------------------------------------------- *
+ * T-P2: GPU pack → GPU unpack round-trip (small block)                    *
+ * --------------------------------------------------------------------- */
+static bool test_pack_gpu_roundtrip_small()
+{
+    const int N = 10;
+    KVPair kv[N];
+    for (int i = 0; i < N; ++i) kv[i] = {(uint64_t)(i * 100 + 1), (uint64_t)(i * 7)};
+
+    PackResult pr;
+    launch_pack(kv, N, N, PACK_RESTART_INTERVAL, pr);
+
+    KVPair out[N] = {};
+    launch_unpack(pr.block_buf.data(), pr.block_buf.size(),
+                  pr.block_offsets.data(), pr.num_blocks,
+                  N, N, out);
+
+    bool ok = true;
+    ok &= CHECK(pr.num_blocks == 1, "single block produced");
+    for (int i = 0; i < N; ++i) {
+        ok &= CHECK(out[i].key == kv[i].key && out[i].value == kv[i].value,
+                    "GPU roundtrip pair matches");
+    }
+    return ok;
+}
+
+/* --------------------------------------------------------------------- *
+ * T-P3: GPU pack matches CPU pack (bit-exact)                             *
+ * --------------------------------------------------------------------- */
+static bool test_pack_gpu_matches_cpu()
+{
+    const int N = 20;
+    KVPair kv[N];
+    for (int i = 0; i < N; ++i) kv[i] = {(uint64_t)(i * 50 + 3), (uint64_t)(i * 13)};
+
+    auto cpu_block = cpu_pack_block(kv, N, PACK_RESTART_INTERVAL);
+
+    PackResult gpu_pr;
+    launch_pack(kv, N, N, PACK_RESTART_INTERVAL, gpu_pr);
+
+    bool ok = true;
+    ok &= CHECK(gpu_pr.block_buf.size() == cpu_block.size(),
+                "GPU and CPU block sizes match");
+    if (gpu_pr.block_buf.size() == cpu_block.size()) {
+        bool match = (memcmp(gpu_pr.block_buf.data(), cpu_block.data(),
+                             cpu_block.size()) == 0);
+        ok &= CHECK(match, "GPU and CPU block content is bit-exact");
+        if (!match) {
+            for (size_t b = 0; b < cpu_block.size(); ++b)
+                if (gpu_pr.block_buf[b] != cpu_block[b])
+                    printf("      byte[%zu]: gpu=0x%02x  cpu=0x%02x\n",
+                           b, gpu_pr.block_buf[b], cpu_block[b]);
+        }
+    }
+    return ok;
+}
+
+/* --------------------------------------------------------------------- *
+ * T-P4: Multiple blocks – GPU pack/unpack round-trip                      *
+ *                                                                         *
+ * 50 keys split into blocks of 12 → 5 blocks (12,12,12,12,2).            *
+ * --------------------------------------------------------------------- */
+static bool test_pack_gpu_multiple_blocks()
+{
+    const int N = 50, KPB = 12;
+    std::vector<KVPair> kv(N);
+    for (int i = 0; i < N; ++i) kv[i] = {(uint64_t)(i * 31 + 7), (uint64_t)(i * 17)};
+
+    PackResult pr;
+    launch_pack(kv.data(), N, KPB, PACK_RESTART_INTERVAL, pr);
+
+    int expected_blocks = (N + KPB - 1) / KPB;
+    bool ok = true;
+    ok &= CHECK(pr.num_blocks == expected_blocks, "correct number of blocks");
+
+    std::vector<KVPair> out(N);
+    launch_unpack(pr.block_buf.data(), pr.block_buf.size(),
+                  pr.block_offsets.data(), pr.num_blocks,
+                  KPB, N, out.data());
+
+    bool all_match = true;
+    for (int i = 0; i < N; ++i) {
+        if (out[i].key != kv[i].key || out[i].value != kv[i].value) {
+            printf("      mismatch at %d: got {%llu,%llu} expected {%llu,%llu}\n",
+                   i, (unsigned long long)out[i].key,
+                   (unsigned long long)out[i].value,
+                   (unsigned long long)kv[i].key,
+                   (unsigned long long)kv[i].value);
+            all_match = false;
+            break;
+        }
+    }
+    ok &= CHECK(all_match, "all pairs match after multi-block round-trip");
+    return ok;
+}
+
+/* --------------------------------------------------------------------- *
+ * T-P5: Prefix compression effectiveness                                  *
+ *                                                                         *
+ * Sequential keys share many prefix bytes → packed block should be        *
+ * smaller than raw KVPair array.                                          *
+ * --------------------------------------------------------------------- */
+static bool test_pack_compression()
+{
+    const int N = 100;
+    std::vector<KVPair> kv(N);
+    /* Sequential keys: high bytes shared → good prefix compression */
+    for (int i = 0; i < N; ++i) kv[i] = {(uint64_t)(1000000 + i), (uint64_t)i};
+
+    PackResult pr;
+    launch_pack(kv.data(), N, N, PACK_RESTART_INTERVAL, pr);
+
+    size_t raw_bytes    = (size_t)N * sizeof(KVPair);
+    size_t packed_bytes = pr.block_buf.size();
+
+    bool ok = true;
+    ok &= CHECK(packed_bytes < raw_bytes,
+                "packed block is smaller than raw (prefix compression works)");
+    printf("      raw=%zu  packed=%zu  ratio=%.3f\n",
+           raw_bytes, packed_bytes, (double)packed_bytes / raw_bytes);
+    return ok;
+}
+
+/* --------------------------------------------------------------------- *
+ * T-P6: Large block with many restarts                                    *
+ *                                                                         *
+ * 500 keys, restart_interval=16 → 32 restart points.                     *
+ * --------------------------------------------------------------------- */
+static bool test_pack_gpu_large()
+{
+    const int N = 500;
+    std::vector<KVPair> kv(N);
+    for (int i = 0; i < N; ++i)
+        kv[i] = {(uint64_t)(i * 97 + 11), (uint64_t)(i * 53)};
+
+    PackResult pr;
+    launch_pack(kv.data(), N, N, PACK_RESTART_INTERVAL, pr);
+
+    std::vector<KVPair> out(N);
+    launch_unpack(pr.block_buf.data(), pr.block_buf.size(),
+                  pr.block_offsets.data(), pr.num_blocks,
+                  N, N, out.data());
+
+    bool ok = true;
+    bool all_match = true;
+    for (int i = 0; i < N; ++i) {
+        if (out[i].key != kv[i].key || out[i].value != kv[i].value) {
+            all_match = false;
+            break;
+        }
+    }
+    ok &= CHECK(all_match, "500-pair GPU round-trip correct");
+    return ok;
+}
+
+/* --------------------------------------------------------------------- *
+ * T-P7: Single entry block                                                *
+ * --------------------------------------------------------------------- */
+static bool test_pack_single_entry()
+{
+    KVPair kv[1] = {{42, 99}};
+
+    PackResult pr;
+    launch_pack(kv, 1, 1, PACK_RESTART_INTERVAL, pr);
+
+    KVPair out[1] = {};
+    launch_unpack(pr.block_buf.data(), pr.block_buf.size(),
+                  pr.block_offsets.data(), pr.num_blocks,
+                  1, 1, out);
+
+    bool ok = true;
+    ok &= CHECK(out[0].key == 42 && out[0].value == 99,
+                "single-entry round-trip correct");
+    return ok;
+}
+
+/* =========================================================================
  * main
  * ====================================================================== */
 
@@ -632,6 +840,15 @@ int main()
     run_test("T-B8 | Bloom: full saturation",                   test_bloom_full_saturation);
     run_test("T-B9 | Bloom: false positive rate < 5%",          test_bloom_false_positive_rate);
     run_test("T-B10| Bloom: single key K=3, bit-count check",   test_bloom_single_key_k3);
+
+    /* Pack / Unpack tests */
+    run_test("T-P1 | Pack: CPU round-trip (small, restart=4)",    test_pack_cpu_roundtrip_small);
+    run_test("T-P2 | Pack: GPU round-trip (small block)",         test_pack_gpu_roundtrip_small);
+    run_test("T-P3 | Pack: GPU matches CPU (bit-exact)",          test_pack_gpu_matches_cpu);
+    run_test("T-P4 | Pack: multi-block GPU round-trip",           test_pack_gpu_multiple_blocks);
+    run_test("T-P5 | Pack: prefix compression effectiveness",     test_pack_compression);
+    run_test("T-P6 | Pack: large block (500 keys, 32 restarts)", test_pack_gpu_large);
+    run_test("T-P7 | Pack: single-entry block",                   test_pack_single_entry);
 
     printf("\n==========================================================\n");
     printf("  Results: %d passed   %d failed   %d skipped\n",

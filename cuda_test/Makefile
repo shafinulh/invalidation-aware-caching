@@ -52,7 +52,7 @@ else
   GDS_TAG      :=
 endif
 
-HEADERS := gpcomp_common.cuh gpcomp_merge.cuh gpcomp_bloom.cuh gpcomp_cufile.cuh
+HEADERS := gpcomp_common.cuh gpcomp_merge.cuh gpcomp_bloom.cuh gpcomp_pack.cuh gpcomp_cufile.cuh
 
 .PHONY: all test bench bench-large bench-gds bench-gds-native clean
 

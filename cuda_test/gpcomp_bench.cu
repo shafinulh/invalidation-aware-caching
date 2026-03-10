@@ -42,8 +42,9 @@
 
 #include "gpcomp_merge.cuh"
 #include "gpcomp_bloom.cuh"
+#include "gpcomp_pack.cuh"
 #include "gpcomp_cufile.cuh"
-/* gpcomp_common.cuh is pulled in by both headers above */
+/* gpcomp_common.cuh is pulled in by the headers above */
 
 #include <algorithm>
 #include <cassert>
@@ -238,15 +239,26 @@ static void print_stat(const char* label, const RunStats& s, uint64_t keys)
  * Result structs – returned by each benchmark for the combined section
  * ---------------------------------------------------------------------- */
 struct MergeResult {
-    RunStats cpu;        /* std::sort                */
-    RunStats kernel;     /* GPU kernel-only          */
-    RunStats gpu_wall;   /* GPU H2D + kernel + D2H   */
+    RunStats cpu;             /* std::sort                             */
+    RunStats kernel;          /* GPU kernel-only                       */
+    RunStats gpu_wall;        /* GPU H2D + kernel + D2H  (heap src)    */
+    RunStats gpu_wall_pinned; /* GPU pinned async H2D + kernel + D2H   */
+    RunStats h2d_pinned;      /* pinned H2D-only                       */
 };
 
 struct BloomResult {
     RunStats cpu;        /* CPU per-block bloom               */
     RunStats kernel;     /* GPU kernel-only (pre-transferred) */
     RunStats batched;    /* GPU 1×H2D + grid + 1×D2H          */
+};
+
+struct PackUnpackResult {
+    RunStats cpu_pack;     /* CPU pack (serialise)               */
+    RunStats cpu_unpack;   /* CPU unpack (parse)                 */
+    RunStats gpu_pack_k;   /* GPU pack kernel-only               */
+    RunStats gpu_pack_w;   /* GPU pack wall (H2D+k+D2H)         */
+    RunStats gpu_unpack_k; /* GPU unpack kernel-only             */
+    RunStats gpu_unpack_w; /* GPU unpack wall (H2D+k+D2H)       */
 };
 
 struct GDSMergeResult {
@@ -350,6 +362,88 @@ static MergeResult bench_merge(const std::vector<std::vector<KVPair>>& ssts,
     RunStats kernel_stats = RunStats::from(kernel_s);
     RunStats wall_stats   = RunStats::from(wall_s);
 
+    /* ---- Pinned + async H2D variant ----------------------------------------
+     * Each SST is copied into a pinned host buffer (cudaMallocHost) and then
+     * transferred to the device with cudaMemcpyAsync on a dedicated per-SST
+     * stream.  All copies are dispatched before DeviceSynchronize so the GPU's
+     * single H2D copy engine can chain them back-to-back with minimal overhead,
+     * and the pinned src eliminates the driver's heap→staging bounce copy.
+     * -------------------------------------------------------------------- */
+    RunStats pinned_wall_stats, pinned_h2d_stats;
+    {
+        printf("  Running GPU merge with pinned+async H2D (%d runs) ...\n", runs);
+        fflush(stdout);
+
+        /* Pinned host mirrors, one per SST */
+        std::vector<KVPair*> h_pin(num_sst, nullptr);
+        for (int i = 0; i < num_sst; ++i) {
+            CUDA_CHECK(cudaMallocHost(&h_pin[i], (size_t)h_sizes[i] * sizeof(KVPair)));
+            memcpy(h_pin[i], h_ptrs[i], (size_t)h_sizes[i] * sizeof(KVPair));
+        }
+
+        /* New device buffers – reuse existing d_sst_sizes_dev / d_sst_offsets_dev */
+        std::vector<KVPair*> d_pin(num_sst);
+        for (int i = 0; i < num_sst; ++i)
+            CUDA_CHECK(cudaMalloc(&d_pin[i], (size_t)h_sizes[i] * sizeof(KVPair)));
+        KVPair **d_pin_arr;
+        CUDA_CHECK(cudaMalloc(&d_pin_arr, (size_t)num_sst * sizeof(KVPair*)));
+        CUDA_CHECK(cudaMemcpy(d_pin_arr, d_pin.data(),
+                              (size_t)num_sst * sizeof(KVPair*), cudaMemcpyHostToDevice));
+        KVPair *d_out2;
+        CUDA_CHECK(cudaMalloc(&d_out2, (size_t)total * sizeof(KVPair)));
+
+        /* One H2D stream per SST so copies are dispatched in parallel */
+        std::vector<cudaStream_t> h2d_streams(num_sst);
+        for (int i = 0; i < num_sst; ++i)
+            CUDA_CHECK(cudaStreamCreate(&h2d_streams[i]));
+
+        /* Warm-up */
+        for (int i = 0; i < num_sst; ++i)
+            CUDA_CHECK(cudaMemcpyAsync(d_pin[i], h_pin[i],
+                                       (size_t)h_sizes[i] * sizeof(KVPair),
+                                       cudaMemcpyHostToDevice, h2d_streams[i]));
+        CUDA_CHECK(cudaDeviceSynchronize());
+        merge_kernel<<<merge_grid, MERGE_BLOCK>>>(d_pin_arr, d_sst_sizes_dev,
+                                                  d_sst_offsets_dev, num_sst, d_out2);
+        CUDA_CHECK(cudaDeviceSynchronize());
+
+        std::vector<double> pw_s(runs), ph2d_s(runs);
+        for (int r = 0; r < runs; ++r) {
+            auto t0 = std::chrono::steady_clock::now();
+
+            /* Async H2D on parallel streams – single DeviceSync waits for all */
+            auto h2d_t0 = std::chrono::steady_clock::now();
+            for (int i = 0; i < num_sst; ++i)
+                CUDA_CHECK(cudaMemcpyAsync(d_pin[i], h_pin[i],
+                                           (size_t)h_sizes[i] * sizeof(KVPair),
+                                           cudaMemcpyHostToDevice, h2d_streams[i]));
+            CUDA_CHECK(cudaDeviceSynchronize());
+            ph2d_s[r] = std::chrono::duration<double,std::milli>(
+                            std::chrono::steady_clock::now() - h2d_t0).count();
+
+            CudaTimer ktimer; ktimer.start();
+            merge_kernel<<<merge_grid, MERGE_BLOCK>>>(d_pin_arr, d_sst_sizes_dev,
+                                                      d_sst_offsets_dev, num_sst, d_out2);
+            (void)ktimer.stop_ms();
+
+            CUDA_CHECK(cudaMemcpy(gpu_output.data(), d_out2,
+                                  (size_t)total * sizeof(KVPair),
+                                  cudaMemcpyDeviceToHost));
+            pw_s[r] = std::chrono::duration<double,std::milli>(
+                          std::chrono::steady_clock::now() - t0).count();
+        }
+        pinned_wall_stats = RunStats::from(pw_s);
+        pinned_h2d_stats  = RunStats::from(ph2d_s);
+
+        for (int i = 0; i < num_sst; ++i) {
+            cudaFreeHost(h_pin[i]);
+            cudaFree(d_pin[i]);
+            cudaStreamDestroy(h2d_streams[i]);
+        }
+        cudaFree(d_pin_arr);
+        cudaFree(d_out2);
+    }
+
     /* Cleanup */
     for (int i = 0; i < num_sst; ++i) cudaFree(d_sst_v[i]);
     cudaFree(d_sst_arrays);  cudaFree(d_sst_sizes_dev);
@@ -391,17 +485,29 @@ static MergeResult bench_merge(const std::vector<std::vector<KVPair>>& ssts,
     print_stat("CPU sort",           cpu_stats,    total);
     print_stat("GPU kernel-only",    kernel_stats, total);
     print_stat("GPU wall (H2D+k+D2H)",wall_stats,  total);
+    print_stat("GPU wall (pinned async H2D+k+D2H)", pinned_wall_stats, total);
     printf("  (GPU kernel BW at min: %.2f GB/s)\n", data_gb / (kernel_stats.min / 1e3));
+    printf("  I/O breakdown (min):  disk %.2f ms  |  H2D(pinned) %.2f ms  |"
+           "  kernel %.2f ms  |  D2H ~%.2f ms\n",
+           io_ms, pinned_h2d_stats.min, kernel_stats.min,
+           pinned_wall_stats.min - pinned_h2d_stats.min - kernel_stats.min);
+    printf("  Wall savings (pinned vs heap H2D):   %.2f ms  (%.2f×)\n",
+           wall_stats.min - pinned_wall_stats.min,
+           wall_stats.min / pinned_wall_stats.min);
     printf("  Speedup kernel vs CPU sort (min):  %.2f×\n",
            cpu_stats.min / kernel_stats.min);
     printf("  Speedup wall   vs CPU+I/O  (min):  %.2f×\n",
            cpu_total_min / wall_stats.min);
+    printf("  Speedup pinned vs CPU+I/O  (min):  %.2f×\n",
+           cpu_total_min / pinned_wall_stats.min);
     printf("  Validation:             %s\n\n", ok ? "PASS ✓" : "FAIL ✗");
 
     MergeResult r;
-    r.cpu     = cpu_stats;
-    r.kernel  = kernel_stats;
-    r.gpu_wall= wall_stats;
+    r.cpu              = cpu_stats;
+    r.kernel           = kernel_stats;
+    r.gpu_wall         = wall_stats;
+    r.gpu_wall_pinned  = pinned_wall_stats;
+    r.h2d_pinned       = pinned_h2d_stats;
     return r;
 }
 
@@ -910,6 +1016,534 @@ static GDSMergeResult bench_gds_io_merge(
 }
 
 /* =========================================================================
+ * BENCHMARK 5 – Pack / Unpack kernels (serialise ↔ data blocks)
+ *
+ * Pack:   sorted KVPair array → prefix-compressed SST data blocks (Fig. 8)
+ * Unpack: SST data blocks → flat KVPair array                    (Fig. 7)
+ *
+ * Measured independently and in a round-trip (pack → unpack) to verify
+ * correctness.  Both CPU and GPU paths are timed.
+ * ======================================================================= */
+static PackUnpackResult bench_pack_unpack(
+        const std::vector<KVPair>& merged,
+        int    keys_per_block,
+        int    restart_interval,
+        int    runs)
+{
+    hr();
+    printf("BENCHMARK 5 – Pack / Unpack kernels (Fig. 7 & 8)\n");
+    hr();
+
+    int total_keys = (int)merged.size();
+    int num_blocks = (total_keys + keys_per_block - 1) / keys_per_block;
+
+    printf("  Total keys:         %d\n", total_keys);
+    printf("  Keys/block:         %d\n", keys_per_block);
+    printf("  Restart interval:   %d\n", restart_interval);
+    printf("  Data blocks:        %d\n", num_blocks);
+    printf("\n");
+
+    /* ── CPU Pack baseline ─────────────────────────────────────────── */
+    printf("  Running CPU pack (%d runs) ...\n", runs); fflush(stdout);
+    std::vector<double> cpu_pack_s(runs);
+    std::vector<std::vector<uint8_t>> cpu_blocks(num_blocks);
+    for (int r = 0; r < runs; ++r) {
+        auto t0 = std::chrono::steady_clock::now();
+        for (int b = 0; b < num_blocks; ++b) {
+            int offset = b * keys_per_block;
+            int bk     = std::min(keys_per_block, total_keys - offset);
+            cpu_blocks[b] = cpu_pack_block(merged.data() + offset, bk,
+                                            restart_interval);
+        }
+        cpu_pack_s[r] = std::chrono::duration<double,std::milli>(
+                            std::chrono::steady_clock::now() - t0).count();
+    }
+    RunStats cpu_pack_stats = RunStats::from(cpu_pack_s);
+
+    /* ── CPU Unpack baseline ───────────────────────────────────────── */
+    printf("  Running CPU unpack (%d runs) ...\n", runs); fflush(stdout);
+    std::vector<KVPair> cpu_unpacked(total_keys);
+    std::vector<double> cpu_unpack_s(runs);
+    for (int r = 0; r < runs; ++r) {
+        auto t0 = std::chrono::steady_clock::now();
+        int kv_offset = 0;
+        for (int b = 0; b < num_blocks; ++b) {
+            int n = cpu_unpack_block(cpu_blocks[b].data(),
+                                     cpu_blocks[b].size(),
+                                     cpu_unpacked.data() + kv_offset);
+            kv_offset += n;
+        }
+        cpu_unpack_s[r] = std::chrono::duration<double,std::milli>(
+                              std::chrono::steady_clock::now() - t0).count();
+    }
+    RunStats cpu_unpack_stats = RunStats::from(cpu_unpack_s);
+
+    /* Validate CPU round-trip */
+    bool cpu_rt_ok = true;
+    for (int i = 0; i < total_keys && cpu_rt_ok; ++i) {
+        if (cpu_unpacked[i].key != merged[i].key ||
+            cpu_unpacked[i].value != merged[i].value) {
+            fprintf(stderr, "  CPU round-trip MISMATCH at %d: "
+                    "{%llu,%llu} vs {%llu,%llu}\n", i,
+                    (unsigned long long)cpu_unpacked[i].key,
+                    (unsigned long long)cpu_unpacked[i].value,
+                    (unsigned long long)merged[i].key,
+                    (unsigned long long)merged[i].value);
+            cpu_rt_ok = false;
+        }
+    }
+
+    /* ── GPU Pack ──────────────────────────────────────────────────── */
+    printf("  Running GPU pack (%d runs) ...\n", runs); fflush(stdout);
+
+    /* Warm-up */
+    PackResult warmup_pr;
+    launch_pack(merged.data(), total_keys, keys_per_block,
+                restart_interval, warmup_pr);
+
+    /* Device buffers for timed runs */
+    int max_restarts    = (keys_per_block + restart_interval - 1) / restart_interval;
+    int max_block_bytes = PACK_HEADER_BYTES
+                        + keys_per_block * PACK_MAX_ENTRY_BYTES
+                        + max_restarts * (int)sizeof(uint32_t);
+
+    KVPair   *d_kv;
+    uint8_t  *d_blocks;
+    uint32_t *d_block_sizes;
+    CUDA_CHECK(cudaMalloc(&d_kv,          (size_t)total_keys * sizeof(KVPair)));
+    CUDA_CHECK(cudaMalloc(&d_blocks,      (size_t)num_blocks * max_block_bytes));
+    CUDA_CHECK(cudaMalloc(&d_block_sizes, (size_t)num_blocks * sizeof(uint32_t)));
+
+    int smem_bytes = 3 * max_restarts * (int)sizeof(uint32_t);
+    int block_dim  = ((max_restarts + 31) / 32) * 32;
+    if (block_dim < 32) block_dim = 32;
+
+    std::vector<double> gpu_pack_k(runs), gpu_pack_w(runs);
+    PackResult gpu_pr;
+    gpu_pr.num_blocks = num_blocks;
+    gpu_pr.block_sizes.resize(num_blocks);
+
+    for (int r = 0; r < runs; ++r) {
+        auto wall_t0 = std::chrono::steady_clock::now();
+
+        CUDA_CHECK(cudaMemcpy(d_kv, merged.data(),
+                              (size_t)total_keys * sizeof(KVPair),
+                              cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemset(d_blocks, 0, (size_t)num_blocks * max_block_bytes));
+
+        cudaEvent_t ev0, ev1;
+        CUDA_CHECK(cudaEventCreate(&ev0));
+        CUDA_CHECK(cudaEventCreate(&ev1));
+        CUDA_CHECK(cudaEventRecord(ev0, 0));
+
+        pack_kernel<<<num_blocks, block_dim, smem_bytes>>>(
+            d_kv, total_keys, keys_per_block, restart_interval,
+            d_blocks, d_block_sizes, max_block_bytes);
+
+        CUDA_CHECK(cudaEventRecord(ev1, 0));
+        CUDA_CHECK(cudaEventSynchronize(ev1));
+        float kms = 0;
+        CUDA_CHECK(cudaEventElapsedTime(&kms, ev0, ev1));
+        gpu_pack_k[r] = (double)kms;
+        cudaEventDestroy(ev0);
+        cudaEventDestroy(ev1);
+
+        CUDA_CHECK(cudaMemcpy(gpu_pr.block_sizes.data(), d_block_sizes,
+                              (size_t)num_blocks * sizeof(uint32_t),
+                              cudaMemcpyDeviceToHost));
+
+        gpu_pack_w[r] = std::chrono::duration<double,std::milli>(
+                            std::chrono::steady_clock::now() - wall_t0).count();
+    }
+    RunStats gpu_pack_k_stats = RunStats::from(gpu_pack_k);
+    RunStats gpu_pack_w_stats = RunStats::from(gpu_pack_w);
+
+    /* Download last pack result for unpack benchmark */
+    std::vector<uint8_t> raw_blocks((size_t)num_blocks * max_block_bytes);
+    CUDA_CHECK(cudaMemcpy(raw_blocks.data(), d_blocks,
+                          (size_t)num_blocks * max_block_bytes,
+                          cudaMemcpyDeviceToHost));
+    cudaFree(d_kv);
+    cudaFree(d_blocks);
+    cudaFree(d_block_sizes);
+
+    /* Compact GPU packed blocks */
+    gpu_pr.block_offsets.resize(num_blocks);
+    size_t total_bytes = 0;
+    for (int b = 0; b < num_blocks; ++b)
+        total_bytes += gpu_pr.block_sizes[b];
+    gpu_pr.block_buf.resize(total_bytes);
+    size_t off = 0;
+    for (int b = 0; b < num_blocks; ++b) {
+        gpu_pr.block_offsets[b] = (uint32_t)off;
+        memcpy(gpu_pr.block_buf.data() + off,
+               raw_blocks.data() + (size_t)b * max_block_bytes,
+               gpu_pr.block_sizes[b]);
+        off += gpu_pr.block_sizes[b];
+    }
+
+    /* ── GPU Unpack ────────────────────────────────────────────────── */
+    printf("  Running GPU unpack (%d runs) ...\n", runs); fflush(stdout);
+
+    /* Warm-up */
+    {
+        std::vector<KVPair> tmp(total_keys);
+        launch_unpack(gpu_pr.block_buf.data(), gpu_pr.block_buf.size(),
+                      gpu_pr.block_offsets.data(), num_blocks,
+                      keys_per_block, total_keys, tmp.data());
+    }
+
+    uint8_t  *d_blk_buf;
+    uint32_t *d_blk_offsets;
+    KVPair   *d_kv_out;
+    CUDA_CHECK(cudaMalloc(&d_blk_buf,     gpu_pr.block_buf.size()));
+    CUDA_CHECK(cudaMalloc(&d_blk_offsets, (size_t)num_blocks * sizeof(uint32_t)));
+    CUDA_CHECK(cudaMalloc(&d_kv_out,      (size_t)total_keys * sizeof(KVPair)));
+
+    int unpack_max_restarts = max_restarts;
+    int unpack_block_dim    = ((unpack_max_restarts + 31) / 32) * 32;
+    if (unpack_block_dim < 32) unpack_block_dim = 32;
+
+    std::vector<KVPair> gpu_unpacked(total_keys);
+    std::vector<double> gpu_unpack_k(runs), gpu_unpack_w(runs);
+
+    for (int r = 0; r < runs; ++r) {
+        auto wall_t0 = std::chrono::steady_clock::now();
+
+        CUDA_CHECK(cudaMemcpy(d_blk_buf, gpu_pr.block_buf.data(),
+                              gpu_pr.block_buf.size(),
+                              cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(d_blk_offsets, gpu_pr.block_offsets.data(),
+                              (size_t)num_blocks * sizeof(uint32_t),
+                              cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemset(d_kv_out, 0, (size_t)total_keys * sizeof(KVPair)));
+
+        cudaEvent_t ev0, ev1;
+        CUDA_CHECK(cudaEventCreate(&ev0));
+        CUDA_CHECK(cudaEventCreate(&ev1));
+        CUDA_CHECK(cudaEventRecord(ev0, 0));
+
+        unpack_kernel<<<num_blocks, unpack_block_dim>>>(
+            d_blk_buf, d_blk_offsets, num_blocks,
+            keys_per_block, d_kv_out, total_keys);
+
+        CUDA_CHECK(cudaEventRecord(ev1, 0));
+        CUDA_CHECK(cudaEventSynchronize(ev1));
+        float kms = 0;
+        CUDA_CHECK(cudaEventElapsedTime(&kms, ev0, ev1));
+        gpu_unpack_k[r] = (double)kms;
+        cudaEventDestroy(ev0);
+        cudaEventDestroy(ev1);
+
+        CUDA_CHECK(cudaMemcpy(gpu_unpacked.data(), d_kv_out,
+                              (size_t)total_keys * sizeof(KVPair),
+                              cudaMemcpyDeviceToHost));
+
+        gpu_unpack_w[r] = std::chrono::duration<double,std::milli>(
+                              std::chrono::steady_clock::now() - wall_t0).count();
+    }
+    RunStats gpu_unpack_k_stats = RunStats::from(gpu_unpack_k);
+    RunStats gpu_unpack_w_stats = RunStats::from(gpu_unpack_w);
+
+    cudaFree(d_blk_buf);
+    cudaFree(d_blk_offsets);
+    cudaFree(d_kv_out);
+
+    /* ── Validate GPU round-trip ───────────────────────────────────── */
+    bool gpu_rt_ok = true;
+    for (int i = 0; i < total_keys && gpu_rt_ok; ++i) {
+        if (gpu_unpacked[i].key != merged[i].key ||
+            gpu_unpacked[i].value != merged[i].value) {
+            fprintf(stderr, "  GPU round-trip MISMATCH at %d: "
+                    "{%llu,%llu} vs {%llu,%llu}\n", i,
+                    (unsigned long long)gpu_unpacked[i].key,
+                    (unsigned long long)gpu_unpacked[i].value,
+                    (unsigned long long)merged[i].key,
+                    (unsigned long long)merged[i].value);
+            gpu_rt_ok = false;
+        }
+    }
+
+    /* Compression ratio */
+    size_t raw_bytes    = (size_t)total_keys * sizeof(KVPair);
+    size_t packed_bytes = gpu_pr.block_buf.size();
+    double ratio        = (double)packed_bytes / (double)raw_bytes;
+
+    /* ── Print results ─────────────────────────────────────────────── */
+    printf("\n");
+    printf("  Block config:  %d blocks × %d entries  restart_interval=%d   runs=%d\n",
+           num_blocks, keys_per_block, restart_interval, runs);
+    printf("  Raw size:      %zu bytes  (%.1f MB)\n", raw_bytes,
+           (double)raw_bytes / (1 << 20));
+    printf("  Packed size:   %zu bytes  (%.1f MB)  ratio=%.3f\n",
+           packed_bytes, (double)packed_bytes / (1 << 20), ratio);
+    printf("\n");
+    print_stat("CPU pack",                    cpu_pack_stats,   (uint64_t)total_keys);
+    print_stat("CPU unpack",                  cpu_unpack_stats, (uint64_t)total_keys);
+    print_stat("GPU pack kernel-only",        gpu_pack_k_stats, (uint64_t)total_keys);
+    print_stat("GPU pack wall (H2D+k+D2H)",  gpu_pack_w_stats, (uint64_t)total_keys);
+    print_stat("GPU unpack kernel-only",      gpu_unpack_k_stats, (uint64_t)total_keys);
+    print_stat("GPU unpack wall (H2D+k+D2H)",gpu_unpack_w_stats, (uint64_t)total_keys);
+    printf("  Pack speedup kernel vs CPU (min):   %.2f×\n",
+           cpu_pack_stats.min / gpu_pack_k_stats.min);
+    printf("  Unpack speedup kernel vs CPU (min): %.2f×\n",
+           cpu_unpack_stats.min / gpu_unpack_k_stats.min);
+    printf("  CPU round-trip:   %s\n", cpu_rt_ok  ? "PASS ✓" : "FAIL ✗");
+    printf("  GPU round-trip:   %s\n", gpu_rt_ok  ? "PASS ✓" : "FAIL ✗");
+    printf("\n");
+
+    PackUnpackResult pur;
+    pur.cpu_pack     = cpu_pack_stats;
+    pur.cpu_unpack   = cpu_unpack_stats;
+    pur.gpu_pack_k   = gpu_pack_k_stats;
+    pur.gpu_pack_w   = gpu_pack_w_stats;
+    pur.gpu_unpack_k = gpu_unpack_k_stats;
+    pur.gpu_unpack_w = gpu_unpack_w_stats;
+    return pur;
+}
+
+/* =========================================================================
+ * BENCHMARK 6 – Full GPU compaction pipeline
+ *
+ * Unpack (parse input SSTs) → Merge → Bloom → Pack (serialise output SST)
+ *
+ * This models the complete L0→L1 compaction on GPU:
+ *   1. Unpack input SST data blocks into flat KVPair arrays
+ *   2. Merge all KVPair arrays into one sorted array
+ *   3. Build bloom filters for each output data block
+ *   4. Pack sorted array into output SST data blocks
+ *
+ * Measures are:
+ *   CPU pipeline:  CPU sort + CPU bloom + CPU pack
+ *   GPU pipeline:  GPU merge + GPU batched bloom + GPU pack  (wall times)
+ *   GPU pipeline kernel-only: kernel times excluding H2D/D2H
+ * ======================================================================= */
+static void bench_full_pipeline(
+        const std::vector<std::vector<KVPair>>& ssts,
+        const DatasetMeta&    meta,
+        const MergeResult&    mr,
+        const BloomResult&    br,
+        const PackUnpackResult& pur,
+        double                io_ms,
+        int                   keys_per_block,
+        int                   restart_interval,
+        int                   runs,
+        int                   compaction_rounds)
+{
+    hr();
+    printf("BENCHMARK 6 – Full GPU compaction pipeline (Unpack → Merge → Bloom → Pack)\n");
+    hr();
+
+    uint64_t total_keys = meta.total_keys;
+    int num_blocks = (int)((total_keys + keys_per_block - 1) / keys_per_block);
+
+    printf("  Pipeline stages:\n");
+    printf("    1. Unpack  – parse %d input SST blocks → flat KVPair arrays\n",
+           meta.num_sst);
+    printf("    2. Merge   – %llu keys from %d SSTs\n",
+           (unsigned long long)total_keys, meta.num_sst);
+    printf("    3. Bloom   – generate bloom filters for %d output blocks\n",
+           num_blocks);
+    printf("    4. Pack    – serialise sorted output into %d data blocks\n",
+           num_blocks);
+    printf("\n");
+
+    /* Per-stage timing summary (from individual benchmarks) */
+    printf("  Per-stage timing (best-of-%d):\n", runs);
+    printf("  %-44s  %9s  %9s\n", "Stage", "CPU(ms)", "GPU wall(ms)");
+    printf("  %-44s  %9s  %9s\n",
+           "────────────────────────────────────────────",
+           "---------", "---------");
+    printf("  %-44s  %9.2f  %9.2f\n",
+           "1. Unpack  (parse input blocks)",
+           pur.cpu_unpack.min, pur.gpu_unpack_w.min);
+    printf("  %-44s  %9.2f  %9.2f\n",
+           "2. Merge   (sort/merge all keys)",
+           mr.cpu.min, mr.gpu_wall.min);
+    printf("  %-44s  %9.2f  %9.2f\n",
+           "3. Bloom   (build per-block filters)",
+           br.cpu.min, br.batched.min);
+    printf("  %-44s  %9.2f  %9.2f\n",
+           "4. Pack    (serialise output blocks)",
+           pur.cpu_pack.min, pur.gpu_pack_w.min);
+    printf("\n");
+
+    /* Totals */
+    double cpu_total_min  = pur.cpu_unpack.min + mr.cpu.min
+                          + br.cpu.min + pur.cpu_pack.min;
+    double cpu_total_mean = pur.cpu_unpack.mean + mr.cpu.mean
+                          + br.cpu.mean + pur.cpu_pack.mean;
+    double gpu_total_min  = pur.gpu_unpack_w.min + mr.gpu_wall.min
+                          + br.batched.min + pur.gpu_pack_w.min;
+    double gpu_total_mean = pur.gpu_unpack_w.mean + mr.gpu_wall.mean
+                          + br.batched.mean + pur.gpu_pack_w.mean;
+    double gpu_kern_min   = pur.gpu_unpack_k.min + mr.kernel.min
+                          + br.kernel.min + pur.gpu_pack_k.min;
+    double gpu_kern_mean  = pur.gpu_unpack_k.mean + mr.kernel.mean
+                          + br.kernel.mean + pur.gpu_pack_k.mean;
+
+    printf("  ┌─────────────────────────────────────────────────────────────┐\n");
+    printf("  │  Full pipeline comparison (min / mean)                      │\n");
+    printf("  ├─────────────────────────────────────────────────────────────┤\n");
+    printf("  │  CPU total (unpack+sort+bloom+pack):  %7.2f / %7.2f ms  │\n",
+           cpu_total_min, cpu_total_mean);
+    printf("  │  GPU wall  (unpack+merge+bloom+pack): %7.2f / %7.2f ms  │\n",
+           gpu_total_min, gpu_total_mean);
+    printf("  │  GPU kernel-only:                     %7.2f / %7.2f ms  │\n",
+           gpu_kern_min, gpu_kern_mean);
+    printf("  ├─────────────────────────────────────────────────────────────┤\n");
+    printf("  │  Pipeline speedup wall  (min): %.2f×    (mean): %.2f×      │\n",
+           cpu_total_min / gpu_total_min,
+           cpu_total_mean / gpu_total_mean);
+    printf("  │  Pipeline speedup kern  (min): %.2f×    (mean): %.2f×      │\n",
+           cpu_total_min / gpu_kern_min,
+           cpu_total_mean / gpu_kern_mean);
+    printf("  │  Throughput CPU  (min): %.2f M keys/s                      │\n",
+           (double)total_keys / cpu_total_min / 1e3);
+    printf("  │  Throughput GPU  (min): %.2f M keys/s                      │\n",
+           (double)total_keys / gpu_total_min / 1e3);
+    printf("  └─────────────────────────────────────────────────────────────┘\n");
+
+    /* ── I/O Analysis ─────────────────────────────────────────────────────
+     * Break down exactly where time is spent across the full round.
+     * H2D is the merge input transfer (pinned measurement from Benchmark 1).
+     * D2H is estimated as (pinned_wall - H2D - kernel).
+     * -------------------------------------------------------------------- */
+    {
+        double h2d_ms   = mr.h2d_pinned.min;          /* merge input H2D     */
+        double kern_ms  = gpu_kern_min;                /* all kernels         */
+        double d2h_ms   = mr.gpu_wall_pinned.min - h2d_ms - mr.kernel.min;
+        if (d2h_ms < 0) d2h_ms = 0;
+        double xfer_ms  = h2d_ms + d2h_ms;
+        double round_ms = io_ms + gpu_total_min;      /* entire GPU round    */
+
+        printf("\n  I/O analysis (where time goes per GPU round):\n");
+        printf("  %-38s  %8s  %7s\n", "Component", "ms (min)", "% of round");
+        printf("  %-38s  %8s  %7s\n",
+               "──────────────────────────────────────", "--------", "----------");
+        printf("  %-38s  %8.2f  %6.1f%%\n", "Disk read (fread, NFS)",
+               io_ms,   100.0 * io_ms   / round_ms);
+        printf("  %-38s  %8.2f  %6.1f%%\n", "H2D transfer (merge input, pinned)",
+               h2d_ms,  100.0 * h2d_ms  / round_ms);
+        printf("  %-38s  %8.2f  %6.1f%%\n", "GPU kernels (unpack+merge+bloom+pack)",
+               kern_ms, 100.0 * kern_ms / round_ms);
+        printf("  %-38s  %8.2f  %6.1f%%\n", "D2H transfer (merge output, est.)",
+               d2h_ms,  100.0 * d2h_ms  / round_ms);
+        printf("  %-38s  %8.2f  %6.1f%%\n", "Other GPU wall overhead",
+               gpu_total_min - kern_ms - xfer_ms,
+               100.0 * (gpu_total_min - kern_ms - xfer_ms) / round_ms);
+        printf("  %-38s  %8.2f  %6.1f%%\n", "TOTAL GPU round (I/O + wall)",
+               round_ms, 100.0);
+        printf("\n");
+        printf("  Bottleneck:  ");
+        double max_comp = io_ms;
+        const char* bottleneck = "disk I/O (NFS fread)";
+        if (h2d_ms  > max_comp) { max_comp = h2d_ms;  bottleneck = "PCIe H2D transfer"; }
+        if (kern_ms > max_comp) { max_comp = kern_ms; bottleneck = "GPU kernels";        }
+        printf("%s  (%.2f ms = %.1f%% of round)\n",
+               bottleneck, max_comp, 100.0 * max_comp / round_ms);
+
+        /* ── Projected pipelined throughput ─────────────────────────────
+         * Double-buffered pipelining overlaps disk I/O of round N+1 with
+         * GPU processing of round N.  The per-round bottleneck becomes
+         * max(disk, GPU_wall) instead of disk + GPU_wall.
+         * ---------------------------------------------------------------- */
+        double pipe_round_ms = (io_ms > gpu_total_min) ? io_ms : gpu_total_min;
+        printf("\n  Projected pipelined round (overlap disk I/O with GPU):\n");
+        printf("    per-round bottleneck: max(disk %.2f, GPU %.2f) = %.2f ms\n",
+               io_ms, gpu_total_min, pipe_round_ms);
+        printf("    per-round speedup vs serial:  %.2f×\n", round_ms / pipe_round_ms);
+        if (compaction_rounds > 0) {
+            double cpu_total_round = io_ms + cpu_total_min;
+            double pipe_total_ms   = (double)compaction_rounds * pipe_round_ms;
+            double serial_total_ms = (double)compaction_rounds * round_ms;
+            double cpu_sim_ms      = (double)compaction_rounds * cpu_total_round;
+            printf("    aggregate %d rounds:  %.1f ms  vs serial %.1f ms  (%.2f× faster)\n",
+                   compaction_rounds, pipe_total_ms, serial_total_ms,
+                   serial_total_ms / pipe_total_ms);
+            printf("    speedup vs CPU total:      %.2f×\n",
+                   cpu_sim_ms / pipe_total_ms);
+        }
+        printf("\n");
+    }
+
+    /* ── Pinned H2D variant for full pipeline ────────────────────────────
+     * Replace mr.gpu_wall with mr.gpu_wall_pinned (pinned async H2D)
+     * to see how pinned memory improves the complete wall time.
+     * -------------------------------------------------------------------- */
+    {
+        double gpu_pinned_min  = pur.gpu_unpack_w.min + mr.gpu_wall_pinned.min
+                               + br.batched.min + pur.gpu_pack_w.min;
+        double gpu_pinned_mean = pur.gpu_unpack_w.mean + mr.gpu_wall_pinned.mean
+                               + br.batched.mean + pur.gpu_pack_w.mean;
+        printf("  With pinned async H2D for merge (B1 optimisation):\n");
+        printf("  %-44s  %9s  %9s\n", "Stage", "heap(ms)", "pinned(ms)");
+        printf("  %-44s  %9s  %9s\n",
+               "────────────────────────────────────────────",
+               "---------", "---------");
+        printf("  %-44s  %9.2f  %9.2f\n", "1. Unpack",
+               pur.gpu_unpack_w.min, pur.gpu_unpack_w.min);
+        printf("  %-44s  %9.2f  %9.2f\n", "2. Merge (H2D+k+D2H)",
+               mr.gpu_wall.min, mr.gpu_wall_pinned.min);
+        printf("  %-44s  %9.2f  %9.2f\n", "3. Bloom",
+               br.batched.min, br.batched.min);
+        printf("  %-44s  %9.2f  %9.2f\n", "4. Pack",
+               pur.gpu_pack_w.min, pur.gpu_pack_w.min);
+        printf("  %-44s  %9.2f  %9.2f\n", "TOTAL GPU wall",
+               gpu_total_min, gpu_pinned_min);
+        printf("  %-44s  %9s  %9.2f×\n", "Speedup (wall pinned vs wall heap)",
+               "-", gpu_total_min / gpu_pinned_min);
+        (void)gpu_pinned_mean;
+    }
+
+    /* Including I/O */
+    printf("\n  With disk I/O (%.2f ms):\n", io_ms);
+    printf("    CPU pipeline total:     %.2f ms  (I/O + CPU compute)\n",
+           io_ms + cpu_total_min);
+    printf("    GPU pipeline total:     %.2f ms  (I/O + GPU wall)\n",
+           io_ms + gpu_total_min);
+    printf("    GPU pinned total:       %.2f ms  (I/O + GPU pinned wall)\n",
+           io_ms + pur.gpu_unpack_w.min + mr.gpu_wall_pinned.min
+                 + br.batched.min + pur.gpu_pack_w.min);
+    printf("    End-to-end speedup (heap):   %.2f×\n",
+           (io_ms + cpu_total_min) / (io_ms + gpu_total_min));
+    printf("    End-to-end speedup (pinned): %.2f×\n",
+           (io_ms + cpu_total_min) /
+           (io_ms + pur.gpu_unpack_w.min + mr.gpu_wall_pinned.min
+                  + br.batched.min + pur.gpu_pack_w.min));
+
+    /* Compaction round simulation (if requested) */
+    if (compaction_rounds > 0) {
+        printf("\n  Compaction simulation (%d rounds × %llu keys = %.1f M total keys):\n",
+               compaction_rounds, (unsigned long long)total_keys,
+               (double)compaction_rounds * total_keys / 1e6);
+
+        double gpu_pinned_min  = pur.gpu_unpack_w.min + mr.gpu_wall_pinned.min
+                               + br.batched.min + pur.gpu_pack_w.min;
+        double cpu_sim         = (double)compaction_rounds * (io_ms + cpu_total_min);
+        double gpu_sim         = (double)compaction_rounds * (io_ms + gpu_total_min);
+        double gpu_pinned_sim  = (double)compaction_rounds * (io_ms + gpu_pinned_min);
+
+        printf("    CPU total:       %.1f ms  (%.2f s)  throughput: %.2f M keys/s\n",
+               cpu_sim, cpu_sim / 1e3,
+               (double)compaction_rounds * total_keys / cpu_sim / 1e3);
+        printf("    GPU total:       %.1f ms  (%.2f s)  throughput: %.2f M keys/s\n",
+               gpu_sim, gpu_sim / 1e3,
+               (double)compaction_rounds * total_keys / gpu_sim / 1e3);
+        printf("    GPU pinned H2D:  %.1f ms  (%.2f s)  throughput: %.2f M keys/s\n",
+               gpu_pinned_sim, gpu_pinned_sim / 1e3,
+               (double)compaction_rounds * total_keys / gpu_pinned_sim / 1e3);
+        printf("    Speedup (heap):   %.2f×\n", cpu_sim / gpu_sim);
+        printf("    Speedup (pinned): %.2f×\n", cpu_sim / gpu_pinned_sim);
+        printf("    Time saved (heap):   %.1f ms  (%.2f s)\n",
+               cpu_sim - gpu_sim, (cpu_sim - gpu_sim) / 1e3);
+        printf("    Time saved (pinned): %.1f ms  (%.2f s)\n",
+               cpu_sim - gpu_pinned_sim, (cpu_sim - gpu_pinned_sim) / 1e3);
+    }
+    printf("\n");
+}
+
+/* =========================================================================
  * BENCHMARK 3 – Total compaction job (Alg1 + Alg2 end-to-end)
  * ======================================================================= */
 static void bench_total_compaction(const MergeResult& mr,
@@ -1013,9 +1647,10 @@ static void usage(const char* prog)
         "  --key_size        BYTES  key size (bytes)             [default: 16]\n"
         "  --value_size      BYTES  value size (bytes)           [default: 64]\n"
         "  --overhead        BYTES  per-entry SST overhead bytes [default: 20]\n"
+        "  --restart_interval N     prefix-compress restart interval  [default: 16]\n"
         "  --fpr_samples     N      non-member samples for FPR   [default: 10000]\n"
         "  --runs            N      timed repetitions per section [default: 5]\n"
-        "  --compaction_rounds N    simulate N compaction rounds in Benchmark 3 [default: 0 = skip]\n"
+        "  --compaction_rounds N    simulate N compaction rounds  [default: 0 = skip]\n"
         "  --fillrandom_keys N      auto-compute rounds for N total keys (overrides --compaction_rounds)\n"
         "                           Accepts K/M/B suffixes: 10M = 10,000,000  200M  1B  500K\n"
         "  --gds                    Enable Benchmark 4: GDS I/O + Merge via cuFile\n"
@@ -1037,6 +1672,7 @@ int main(int argc, char* argv[])
     int overhead_bytes       = 20;
     int fpr_samples          = 10000;
     int runs                 = 5;
+    int restart_interval     = PACK_RESTART_INTERVAL;  /* 16 */
     int compaction_rounds    = 0;   /* 0 = skip Benchmark 3           */
     int64_t fillrandom_keys  = 0;   /* if >0, overrides compaction_rounds */
     bool use_gds             = false;
@@ -1056,6 +1692,7 @@ int main(int argc, char* argv[])
         else if (a == "--key_size")    key_size_bytes    = std::stoi(next());
         else if (a == "--value_size")  value_size_bytes  = std::stoi(next());
         else if (a == "--overhead")    overhead_bytes    = std::stoi(next());
+        else if (a == "--restart_interval") restart_interval = std::stoi(next());
         else if (a == "--fpr_samples") fpr_samples       = std::stoi(next());
         else if (a == "--runs")            runs              = std::stoi(next());
         else if (a == "--compaction_rounds") compaction_rounds = std::stoi(next());
@@ -1132,7 +1769,17 @@ int main(int argc, char* argv[])
                                  overhead_bytes, fpr_samples, runs);
 
     /* ================================================================
-     * Benchmark 3: Total compaction job + fillrandom simulation
+     * Benchmark 5: Pack / Unpack (serialise ↔ data blocks)
+     * ================================================================ */
+    int bytes_per_entry = key_size_bytes + value_size_bytes + overhead_bytes;
+    int pack_keys_per_block = block_size_bytes / bytes_per_entry;
+    if (pack_keys_per_block <= 0) pack_keys_per_block = 1;
+
+    PackUnpackResult pur = bench_pack_unpack(merged, pack_keys_per_block,
+                                             restart_interval, runs);
+
+    /* ================================================================
+     * Benchmark 6: Full GPU compaction pipeline
      * ================================================================ */
     if (fillrandom_keys > 0) {
         compaction_rounds = (int)(((int64_t)fillrandom_keys + (int64_t)meta.total_keys - 1)
@@ -1142,6 +1789,13 @@ int main(int argc, char* argv[])
                compaction_rounds,
                (unsigned long long)meta.total_keys);
     }
+    bench_full_pipeline(ssts, meta, mr, br, pur, io_ms,
+                        pack_keys_per_block, restart_interval,
+                        runs, compaction_rounds);
+
+    /* ================================================================
+     * Benchmark 3: Total compaction job (legacy: Merge + Bloom only)
+     * ================================================================ */
     bench_total_compaction(mr, br, io_ms, meta.total_keys, runs, compaction_rounds);
 
     /* ================================================================

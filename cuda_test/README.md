@@ -11,28 +11,24 @@ Measures and compares CPU vs GPU performance for the two compaction algorithms:
 
 ```
 cuda_test/
-├── gpcomp_bench.cu          # main benchmark program (Benchmarks 1-4)
-├── gpcomp_merge.cuh         # merge kernel + launcher
-├── gpcomp_bloom.cuh         # bloom filter kernels (batched)
+├── gpcomp_bench.cu          # main benchmark program (Benchmarks 1–6)
+├── gpcomp_merge.cuh         # Algorithm 1: merge kernel + launcher
+├── gpcomp_bloom.cuh         # Algorithm 2: bloom filter kernels (batched)
+├── gpcomp_pack.cuh          # Fig. 7 & 8: Pack/Unpack GPU kernels
 ├── gpcomp_common.cuh        # shared types (KVPair), CPU helpers
-├── gpcomp_cufile.cuh        # cuFile / GPUDirect Storage abstraction layer
+├── gpcomp_cufile.cuh        # GDS / cuFile abstraction layer
 ├── gpcomp_datagen.cpp       # dataset generator
-├── gpcomp_tests.cu          # unit tests
+├── gpcomp_tests.cu          # unit tests (263 tests: merge + bloom + pack/unpack)
 ├── Makefile
 ├── test.sh                  # value-size sweep script
-├── gds/                     # locally extracted cuFile package (no root needed)
-│   ├── libcufile.deb        # runtime .deb (libcufile 1.4.0.31, CUDA 11.8)
-│   ├── libcufile-dev.deb    # dev .deb (cufile.h + link stubs)
-│   ├── setup_local.sh       # script: extracts debs → gds/local/
-│   └── local/
-│       ├── include/cufile.h # extracted header
-│       └── lib/             # extracted .so + symlinks
+├── sync_to_repo.sh          # sync working files + git push to master
+├── GPU_ACCELERATION_EXPLAINED.md  # in-depth algorithm + architecture guide
 ├── dataset/                 # generated dataset (SST .bin files + dataset.meta)
 └── results/                 # all sweep outputs (created by test.sh)
     └── run_YYYY-MM-DD_HH-MM-SS/
-        ├── result_val32B.txt
-        ├── result_val64B.txt
-        ├── result_val128B.txt
+        ├── result_val32B_keys200M.txt
+        ├── result_val64B_keys200M.txt
+        ├── result_val128B_keys200M.txt
         └── result_metadata.txt
 ```
 
@@ -41,25 +37,13 @@ cuda_test/
 ## Build
 
 ```sh
-make gpcomp_bench       # build benchmark binary (no GDS)
+make gpcomp_bench       # build benchmark binary
 make gpcomp_datagen     # build dataset generator
 make gpcomp_unit_tests  # build unit tests
 make all                # build everything
 ```
 
 Requires: CUDA 11+, `nvcc`, C++17.
-
-### Build with cuFile / GPUDirect Storage (GDS)
-
-See [GDS Setup](#gds--cufile-setup-gpudirect-storage) below for the one-time `gds/` extraction step.
-
-```sh
-make GDS=1 gpcomp_bench          # build with cuFile support
-make bench-gds                   # generate dataset + run compat-mode (any GPU)
-make bench-gds-native            # generate dataset + run native mode (A30/A100/H100)
-```
-
-The `Makefile` automatically points `-I`, `-L`, and `-rpath` at `gds/local/` so **no system install is needed and `LD_LIBRARY_PATH` is not required** at runtime.
 
 ---
 
@@ -86,12 +70,13 @@ This produces `dataset/sst_0000.bin … sst_000N.bin` and `dataset/dataset.meta`
 | `--key_size BYTES` | `16` | Key size in bytes |
 | `--value_size BYTES` | `64` | **Value size in bytes** — changes keys/block and bloom config |
 | `--overhead BYTES` | `20` | Per-entry SST overhead bytes |
+| `--restart_interval N` | `16` | Prefix-compression restart interval for Pack/Unpack (matches RocksDB default) |
 | `--fpr_samples N` | `10000` | Non-member samples used to measure false positive rate |
 | `--runs N` | `5` | Number of timed repetitions per section (reports min/mean/stddev) |
-| `--fillrandom_keys N` | `0` | Simulate a fillrandom workload of N total keys. Auto-computes number of compaction rounds. Accepts K/M/B suffixes (e.g. `10M`, `200M`, `1B`). `0` = skip. |
+| `--fillrandom_keys N` | `0` | Simulate a fillrandom workload of N total keys. Auto-computes compaction rounds. Accepts K/M/B suffixes (e.g. `10M`, `200M`, `1B`). `0` = skip. |
 | `--compaction_rounds N` | `0` | Manually set number of compaction rounds. Overridden by `--fillrandom_keys`. |
-| `--gds` | off | Enable **Benchmark 4**: GDS I/O + Merge via cuFile. Requires `GDS=1` build; falls back to pinned `cudaHostAlloc` + `fread` + `cudaMemcpy` if cuFile is not compiled in. |
-| `--compat-mode` | off | Force cuFile **Compatibility Mode** before driver open. Use on RTX 3070 / any GPU without native GDS. Implies `--gds`. |
+| `--gds` | off | Enable Benchmark 4: GDS I/O + Merge via cuFile |
+| `--compat-mode` | off | Force cuFile compat mode (recommended on RTX consumer GPUs) |
 | `--help` | — | Print usage |
 
 **Examples:**
@@ -109,6 +94,9 @@ This produces `dataset/sst_0000.bin … sst_000N.bin` and `dataset/dataset.meta`
 
 # manually set compaction rounds
 ./gpcomp_bench --dataset dataset --compaction_rounds 50
+
+# use a smaller restart interval for Pack/Unpack (more restart points, larger output)
+./gpcomp_bench --dataset dataset --restart_interval 8
 ```
 
 ---
@@ -248,116 +236,32 @@ Summary file for the entire sweep. Contains:
 ```
 
 ---
----
 
-## GDS / cuFile Setup (GPUDirect Storage)
-
-### One-time extraction (no root required)
-
-The `gds/` directory already contains the downloaded `.deb` packages. To extract them into a local library tree:
-
-```sh
-bash gds/setup_local.sh
-```
-
-This creates:
-```
-gds/local/include/cufile.h
-gds/local/lib/libcufile.so.0   → libcufile.so.1.4.0
-gds/local/lib/libcufile.so.1   → libcufile.so.1.4.0
-gds/local/lib/libcufile.so     → libcufile.so.1
-```
-
-### If your machine is missing the `.deb` files
-
-For **CUDA 11.8** (matches our `nvcc` version):
-
-```sh
-# Create gds/ directory
-mkdir -p gds && cd gds
-
-# Download runtime and dev packages (Ubuntu 22.04 debs, binary-compatible with Debian 12)
-BASE=https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64
-curl -fsSL -o libcufile.deb     "$BASE/libcufile-11-8_1.4.0.31-1_amd64.deb"
-curl -fsSL -o libcufile-dev.deb "$BASE/libcufile-dev-11-8_1.4.0.31-1_amd64.deb"
-cd ..
-bash gds/setup_local.sh
-```
-
-For **other CUDA versions**, replace `11-8` and `1.4.0.31` with the version matching your `nvcc --version`. Browse available packages at:
-`https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/`
-
-### GPU compatibility
-
-| GPU | GDS support | Recommended flag |
-|---|---|---|
-| RTX 3070, RTX 3080, RTX 4090, any consumer GPU | **Compat Mode** (bounce-buffer via cuFile driver) | `--compat-mode` |
-| A30, A100, H100, data-centre GPUs with local NVMe | **Native GDS** (PCIe DMA direct to VRAM) | `--gds` (no compat flag) |
-
-> **Note on NFS:** GDS bypasses the OS page cache using `O_DIRECT`. On NFS, this eliminates read-ahead and is typically **slower** than POSIX `fread`. GDS gives the best performance on **local NVMe** attached via PCIe. See analysis below.
-
-### Build and run
-
-```sh
-# Build with cuFile
-make GDS=1 gpcomp_bench
-
-# Run Benchmark 4 on RTX 3070 (or any non-GDS GPU)
-./gpcomp_bench --compat-mode
-
-# Run Benchmark 4 on A30 / A100 / H100 (native GDS)
-./gpcomp_bench --gds
-
-# Combined full benchmark including GDS benchmark
-./gpcomp_bench --compat-mode --fillrandom_keys 200M --runs 5
-```
-
-### Benchmark 4 – GDS I/O + Merge
-
-This benchmark loads all SST files **directly into device memory** using `gpcomp_cufile.cuh`, then immediately runs the merge kernel — eliminating the separate POSIX I/O + `cudaMemcpy H2D` step.
-
-| Metric | Meaning |
-|---|---|
-| **GDS I/O (disk→device)** | `cuFileRead` time (compat: via pinned bounce-buffer; native: PCIe DMA) |
-| **GPU merge kernel-only** | CUDA events around `merge_kernel` — data already on device |
-| **GDS wall** | GDS I/O + kernel + D2H end-to-end |
-
-Output also prints a comparison table vs the traditional POSIX I/O + H2D path.
-
-### Performance results (RTX 3070, NFS storage, 8 SSTs × 524K keys)
-
-| Path | Min latency | Throughput |
-|---|---|---|
-| POSIX fread (OS-cached) | 84 ms I/O | 762 MB/s |
-| POSIX fread (cold NFS) | 404 ms I/O | 158 MB/s |
-| cuFile compat (O_DIRECT, NFS) | 630 ms I/O | 102 MB/s |
-
-**Key finding:** On NFS + consumer GPU, POSIX `fread` into `cudaHostAlloc` is the correct I/O path. cuFile compat mode is 1.5–6× slower on NFS because `O_DIRECT` bypasses read-ahead caching. GDS is designed for **local NVMe**, where it delivers meaningful speedups on a GDS-capable GPU (A30+).
-
----
 ## What Each Benchmark Measures
 
-### Benchmark 1 – Merge
+### Benchmark 1 – Merge (with I/O analysis)
 
-| Label | What it times |
-|---|---|
-| **CPU sort** | `std::sort` over all merged keys (no I/O) |
-| **GPU kernel-only** | CUDA events around `merge_kernel` only — pure compute time, no transfers |
-| **GPU wall (H2D+k+D2H)** | Host→Device copy + kernel + Device→Host copy |
+In addition to the heap `cudaMemcpy` path, Benchmark 1 now runs a **pinned
++ async H2D variant**: each SST is loaded into a `cudaMallocHost` buffer and
+transferred on a dedicated per-SST CUDA stream dispatched concurrently, then
+waited with a single `cudaDeviceSynchronize`. This eliminates the driver's
+pageable→staging bounce copy and enables true DMA from pinned memory.
 
-The merge kernel assigns one thread per output key and uses binary search
-to find each key's source SST, so it scales with key count, not SST count.
+```
+CPU I/O (disk read):               2.37 ms
+GPU wall (heap H2D+k+D2H):         1.92 ms
+GPU wall (pinned async H2D+k+D2H): 1.70 ms   (1.13× improvement)
+I/O breakdown:  disk 2.37 | H2D 0.72 | kernel 0.12 | D2H 0.86 ms
+```
 
 ### Benchmark 2 – Bloom Filter
 
-| Label | What it times |
-|---|---|
-| **CPU bloom** | Pure CPU: `cpu_build_byte_vector` + `cpu_pack_bit_vector` for every block |
-| **GPU kernel-only** | CUDA events around kernel only; data pre-transferred once before loop |
-| **GPU batched wall** | 1× H2D for all blocks → `bloom_filter_kernel_batched<<<N,T>>>` → 1× D2H |
-
-The batched kernel processes all data blocks in a single grid launch,
-avoiding any per-block `cudaDeviceSynchronize` overhead.
+Measures the CPU vs GPU Bloom filter construction for the output SST's data
+blocks. The GPU uses a two-phase shared-memory kernel: Phase 1 hashes each key
+into a shared `ByteVector`; Phase 2 packs 8 bytes → 1 byte into the output
+`BitVector`. The benchmark runs both a **per-block** variant (validation) and a
+**batched** variant (one kernel launch for all data blocks — 1× H2D + 1 kernel
++ 1× D2H), and validates false-negative rate = 0.
 
 ### Benchmark 3 – fillrandom compaction simulation
 
@@ -365,6 +269,42 @@ Simulates an entire `db_bench fillrandom` workload spanning multiple compaction
 rounds. Per-round timings (I/O + CPU compute or GPU wall) from Benchmarks 1 & 2
 are scaled by the number of compaction rounds to produce aggregate CPU vs GPU
 totals, speedup, and time saved.
+
+### Benchmark 5 – Pack / Unpack
+
+Measures the GPU Pack kernel (Algorithm Fig. 8 — sorted KVPair array → SST data
+blocks with prefix-compressed keys and restart points) and Unpack kernel
+(Fig. 7 — SST blocks → flat KVPair array). Both CPU and GPU paths are timed;
+results are cross-validated in a round-trip test.
+
+| Metric | val=32B | val=64B | val=128B |
+|---|---|---|---|
+| keys/block | 481 | 327 | 199 |
+| Compression ratio | 0.736 | 0.737 | 0.740 |
+| GPU Pack kernel speedup | 18× | 17× | 19× |
+| GPU Unpack kernel speedup | 25× | 28× | 28× |
+
+### Benchmark 6 – Full Pipeline
+
+Runs the complete L0→L1 compaction pipeline end-to-end and reports:
+- Per-stage CPU vs GPU wall breakdown
+- I/O analysis table (disk / H2D / kernels / D2H as % of round)
+- Pinned H2D improvement for the full pipeline
+- Projected throughput with double-buffered pipelined I/O
+
+```
+Stage                                    CPU(ms)   GPU wall(ms)
+──────────────────────────────────────   -------   ────────────
+1. Unpack  (parse input blocks)             2.13         1.57
+2. Merge   (sort/merge all keys)            8.88         1.92
+3. Bloom   (build per-block filters)       15.44         0.93
+4. Pack    (serialise output blocks)        4.01         1.10
+TOTAL                                      30.46         5.52      → 5.5× speedup
+
+With disk I/O (2.37 ms cached / up to 8.1 ms cold NFS):
+  End-to-end speedup:  3.1–4.3×
+  Pipelined projection (overlap disk+GPU): 1.43× round improvement
+```
 
 Requires `--fillrandom_keys N` (or `--compaction_rounds N`) to be set.
 

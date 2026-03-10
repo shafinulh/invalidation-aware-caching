@@ -131,8 +131,15 @@ int launch_merge(KVPair * const *h_sst_arrays,
     KVPair *d_output;
     cudaMalloc(&d_output, total * sizeof(KVPair));
 
-    /* Launch: one thread per pair. */
-    const int BLOCK = 256;
+    /* Launch: one thread per pair.
+     * Query the device's actual maximum threads-per-block so we use the
+     * GPU's full parallelism on any hardware (RTX 3070 and A30 both allow
+     * up to 1024; the old hardcoded 256 left most cores idle). */
+    int dev = 0;
+    cudaGetDevice(&dev);
+    cudaDeviceProp prop;
+    cudaGetDeviceProperties(&prop, dev);
+    const int BLOCK = prop.maxThreadsPerBlock;   /* e.g. 1024 on SM 8.x */
     int grid = (total + BLOCK - 1) / BLOCK;
     merge_kernel<<<grid, BLOCK>>>(d_sst_arrays, d_sst_sizes, d_sst_offsets,
                                   num_arrays, d_output);
