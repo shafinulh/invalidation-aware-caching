@@ -203,6 +203,7 @@ class CompactionOutputs {
   }
 
  private:
+  friend class GPUCompactionOrchestrator;
   friend class SubcompactionState;
 
   void FillFilesToCutForTtl();

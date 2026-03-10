@@ -705,8 +705,9 @@ set(SOURCES
         db/column_family.cc
         db/compaction/compaction.cc
         db/compaction/compaction_iterator.cc
-        db/compaction/compaction_picker.cc
         db/compaction/compaction_job.cc
+        db/compaction/gpu_compaction_orchestrator.cc
+        db/compaction/compaction_picker.cc
         db/compaction/compaction_picker_fifo.cc
         db/compaction/compaction_picker_level.cc
         db/compaction/compaction_picker_universal.cc

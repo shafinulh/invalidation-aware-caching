@@ -852,6 +852,9 @@ DEFINE_bool(read_cache_direct_read, true,
 
 DEFINE_bool(use_keep_filter, false, "Whether to use a noop compaction filter");
 
+DEFINE_bool(enable_gpu_compaction, false,
+            "Route compactions through GPUCompactionOrchestrator (experimental).");
+
 static bool ValidateCacheNumshardbits(const char* flagname, int32_t value) {
   if (value >= 20) {
     fprintf(stderr, "Invalid value for --%s: %d, must be < 20\n", flagname,
@@ -4701,6 +4704,7 @@ class Benchmark {
     options.max_background_jobs = FLAGS_max_background_jobs;
     options.max_background_compactions = FLAGS_max_background_compactions;
     options.max_subcompactions = static_cast<uint32_t>(FLAGS_subcompactions);
+    options.enable_gpu_compaction = FLAGS_enable_gpu_compaction;
     options.max_background_flushes = FLAGS_max_background_flushes;
     options.compaction_style = FLAGS_compaction_style_e;
     options.compaction_pri = FLAGS_compaction_pri_e;

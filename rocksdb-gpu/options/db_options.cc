@@ -140,6 +140,10 @@ static std::unordered_map<std::string, OptionTypeInfo>
          {offsetof(struct MutableDBOptions, daily_offpeak_time_utc),
           OptionType::kString, OptionVerificationType::kNormal,
           OptionTypeFlags::kMutable}},
+        {"enable_gpu_compaction",
+         {offsetof(struct MutableDBOptions, enable_gpu_compaction),
+          OptionType::kBoolean, OptionVerificationType::kNormal,
+          OptionTypeFlags::kMutable}},
 };
 
 static std::unordered_map<std::string, OptionTypeInfo>
@@ -1045,7 +1049,8 @@ MutableDBOptions::MutableDBOptions(const DBOptions& options)
       max_manifest_file_size(options.max_manifest_file_size),
       max_manifest_space_amp_pct(options.max_manifest_space_amp_pct),
       manifest_preallocation_size(options.manifest_preallocation_size),
-      daily_offpeak_time_utc(options.daily_offpeak_time_utc) {}
+      daily_offpeak_time_utc(options.daily_offpeak_time_utc),
+      enable_gpu_compaction(options.enable_gpu_compaction) {}
 
 void MutableDBOptions::Dump(Logger* log) const {
   ROCKS_LOG_HEADER(log, "            Options.max_background_jobs: %d",
@@ -1100,6 +1105,8 @@ void MutableDBOptions::Dump(Logger* log) const {
       manifest_preallocation_size);
   ROCKS_LOG_HEADER(log, "Options.daily_offpeak_time_utc: %s",
                    daily_offpeak_time_utc.c_str());
+  ROCKS_LOG_HEADER(log, "Options.enable_gpu_compaction: %d",
+                   enable_gpu_compaction);
 }
 
 Status GetMutableDBOptionsFromStrings(

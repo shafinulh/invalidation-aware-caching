@@ -108,6 +108,7 @@ void BuildDBOptions(const ImmutableDBOptions& immutable_db_options,
   options.WAL_size_limit_MB = immutable_db_options.WAL_size_limit_MB;
   options.manifest_preallocation_size =
       mutable_db_options.manifest_preallocation_size;
+  options.enable_gpu_compaction = mutable_db_options.enable_gpu_compaction;
   options.allow_mmap_reads = immutable_db_options.allow_mmap_reads;
   options.allow_mmap_writes = immutable_db_options.allow_mmap_writes;
   options.use_direct_reads = immutable_db_options.use_direct_reads;

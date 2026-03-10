@@ -23,6 +23,7 @@
 #include "db/builder.h"
 #include "db/compaction/clipping_iterator.h"
 #include "db/compaction/compaction_state.h"
+#include "db/compaction/gpu_compaction_orchestrator.h"
 #include "db/db_impl/db_impl.h"
 #include "db/dbformat.h"
 #include "db/error_handler.h"
@@ -1685,7 +1686,7 @@ Status CompactionJob::FinalizeProcessKeyValueStatus(
     status = input_iter->status();
   }
   if (status.ok()) {
-    status = c_iter->status();
+    status = c_iter != nullptr ? c_iter->status() : Status::OK();
   }
 
   return status;
@@ -1774,12 +1775,6 @@ void CompactionJob::ProcessKeyValueCompaction(SubcompactionState* sub_compact) {
       compact_->compaction->level(), db_options_.stats);
   BlobFileResources blob_resources;
 
-  auto c_iter =
-      CreateCompactionIterator(sub_compact, cfd, input_iter, compaction_filter,
-                               merge, blob_resources, write_options);
-  assert(c_iter);
-  c_iter->SeekToFirst();
-
   TEST_SYNC_POINT("CompactionJob::Run():Inprogress");
   TEST_SYNC_POINT_CALLBACK("CompactionJob::Run():PausingManualCompaction:1",
                            static_cast<void*>(const_cast<std::atomic<bool>*>(
@@ -1787,6 +1782,47 @@ void CompactionJob::ProcessKeyValueCompaction(SubcompactionState* sub_compact) {
 
   auto [open_file_func, close_file_func] =
       CreateFileHandlers(sub_compact, boundaries);
+
+  if (mutable_db_options_copy_.enable_gpu_compaction) {
+    std::vector<const FileMetaData*> gpu_compaction_inputs;
+    gpu_compaction_inputs.reserve(
+        sub_compact->compaction->num_input_files(0) +
+        sub_compact->compaction->num_input_files(1));
+    for (size_t level_idx = 0;
+         level_idx < sub_compact->compaction->num_input_levels(); ++level_idx) {
+      const auto* level_inputs = sub_compact->compaction->inputs(level_idx);
+      gpu_compaction_inputs.insert(gpu_compaction_inputs.end(),
+                                   level_inputs->begin(), level_inputs->end());
+    }
+
+    GPUCompactionOrchestrator orchestrator(
+      db_options_, mutable_db_options_copy_, file_options_for_read_, cfd,
+      sub_compact, std::move(gpu_compaction_inputs),
+        open_file_func, close_file_func, proximal_after_seqno_);
+    status = orchestrator.Execute();
+
+    // The GPU orchestrator reads data blocks directly and does not go through
+    // CompactionIterator, so the per-key input record count is not available
+    // in the same form expected by VerifyInputRecordCount(). Mark it
+    // inaccurate so the mismatch check is skipped for GPU-processed
+    // subcompactions.
+    sub_compact->compaction_job_stats.has_accurate_num_input_records = false;
+
+    status = FinalizeProcessKeyValueStatus(cfd, input_iter,
+                                           /*c_iter=*/nullptr, status);
+    FinalizeSubcompaction(sub_compact, status, open_file_func, close_file_func,
+                          blob_resources.blob_file_builder.get(),
+                          /*c_iter=*/nullptr, input_iter, start_cpu_micros,
+                          prev_cpu_micros, io_stats);
+    NotifyOnSubcompactionCompleted(sub_compact);
+    return;
+  }
+
+  auto c_iter =
+      CreateCompactionIterator(sub_compact, cfd, input_iter, compaction_filter,
+                               merge, blob_resources, write_options);
+  assert(c_iter);
+  c_iter->SeekToFirst();
 
   status = ProcessKeyValue(sub_compact, cfd, c_iter.get(), open_file_func,
                            close_file_func, prev_cpu_micros);
@@ -1812,8 +1848,14 @@ void CompactionJob::FinalizeSubcompaction(
                                   close_file_func);
   status = FinalizeBlobFiles(sub_compact, blob_file_builder, status);
 
-  FinalizeSubcompactionJobStats(sub_compact, c_iter, start_cpu_micros,
-                                prev_cpu_micros, io_stats);
+  if (c_iter != nullptr) {
+    FinalizeSubcompactionJobStats(sub_compact, c_iter, start_cpu_micros,
+                                  prev_cpu_micros, io_stats);
+  } else {
+    const uint64_t cur_cpu_micros = db_options_.clock->CPUMicros();
+    sub_compact->compaction_job_stats.cpu_micros =
+        cur_cpu_micros - start_cpu_micros + sub_compact->GetWorkerCPUMicros();
+  }
 
 #ifdef ROCKSDB_ASSERT_STATUS_CHECKED
   if (!status.ok()) {

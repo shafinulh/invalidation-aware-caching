@@ -139,6 +139,28 @@ To override inline:
 NUM_REPS=5 INPUT_SST_MB=64 ./benchmarks/gpu/experiments/rocksdb_hook/hook_replay.sh
 ```
 
+### 4b. Run end-to-end `fillrandom` with GPU compaction
+
+From the repository root:
+
+```bash
+bash benchmarks/gpu/scripts/run_fillrandom_gpu_e2e.sh
+```
+
+This mirrors the CPU `fillrandom` benchmark, but points `db_bench` at the
+integrated GPU compaction path via `--use_gpu_compaction=true` and stores the
+DB/WAL/results under `benchmarks/gpu/`.
+
+Useful inline overrides:
+
+```bash
+NUM_KEYS=50000 VALUE_SIZES="32" GPU_SUBCOMP_THREADS=1 GPU_BG_COMP_THREADS=1 \
+  bash benchmarks/gpu/scripts/run_fillrandom_gpu_e2e.sh
+```
+
+The script reuses the workload defaults from `benchmarks/cpu/config/.env.local`
+so the fillrandom settings stay aligned with the CPU benchmark harness.
+
 ### 5. Analyse results
 
 ```bash
@@ -254,6 +276,17 @@ bench_results/gpu/
       gpu_compaction_hook_per_rep.png   # if --plot
       metadata/
         run_config.env
+  fillrandom_gpu_e2e/
+    value_32/
+      <run_id>/
+        db_bench.log
+        report.csv
+        metrics.csv
+        metadata/
+          db_bench.cmd
+          rocksdb_LOG_after_fillrandom_gpu_e2e.txt
+          rocksdb_options_after_fillrandom_gpu_e2e.ini
+          run_config.env
 ```
 
 ## What to Expect

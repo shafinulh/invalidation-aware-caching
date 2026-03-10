@@ -906,6 +906,10 @@ struct DBOptions {
   // Dynamically changeable through SetDBOptions() API.
   uint32_t max_subcompactions = 1;
 
+  // Experimental: route compaction through GPUCompactionOrchestrator.
+  // Dynamically changeable through SetDBOptions() API.
+  bool enable_gpu_compaction = false;
+
   // DEPRECATED: RocksDB automatically decides this based on the
   // value of max_background_jobs. For backwards compatibility we will set
   // `max_background_jobs = max_background_compactions + max_background_flushes`

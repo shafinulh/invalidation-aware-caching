@@ -148,6 +148,7 @@ struct MutableDBOptions {
   int max_manifest_space_amp_pct;
   size_t manifest_preallocation_size;
   std::string daily_offpeak_time_utc;
+  bool enable_gpu_compaction;
 };
 
 Status GetStringFromMutableDBOptions(const ConfigOptions& config_options,
