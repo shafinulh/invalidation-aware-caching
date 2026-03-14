@@ -27,6 +27,7 @@ for value_size in ${VALUE_SIZES}; do
 
       run_db_bench "${RUN_DIR}/db_bench.log" \
         --benchmarks=fillrandom \
+        --disable_auto_compactions="${DISABLE_AUTO_COMPACTIONS}" \
         --num="${NUM_KEYS}" \
         --writes="${WRITES}" \
         --value_size="${value_size}" \
