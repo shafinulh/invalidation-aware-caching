@@ -9,6 +9,8 @@ All scripts are run from the **repository root** (`invalidation-aware-caching/`)
 experiments/
   fillrandom/          # Write-heavy (FillRandom) workloads
     bounded_l0.sh        - GPComp-style bounded LSM (slowdown=8, stop=12)
+    final_monitored_sweep.sh - Final monitored sweep + no-compaction baseline
+    sample_monitored_pair.sh - Two-run monitored sample (32B, 8 vs 16 subcomp)
     unbounded_l0.sh      - FPGA-style unbounded LSM (no write stalls)
     unbounded_l0_cpu_contention.sh  - Parallel BG compactions + CPU contention
   readwrite/           # Mixed read/write workloads
@@ -40,6 +42,13 @@ cd /path/to/invalidation-aware-caching
 ./benchmarks/cpu/experiments/fillrandom/bounded_l0.sh
 ```
 
+For the new monitored FillRandom runs:
+
+```bash
+./benchmarks/cpu/experiments/fillrandom/sample_monitored_pair.sh
+./benchmarks/cpu/experiments/fillrandom/final_monitored_sweep.sh
+```
+
 ## Cache observation experiments
 
 These experiments enable `METRICS_INTERVAL_MS=100`, which activates the
@@ -61,6 +70,26 @@ python3 benchmarks/cpu/python/plot_cache_metrics.py \
     --metrics-dir /path/to/bench_results/cpu/readwritemix/value_32 \
     --compare
 ```
+
+## Host metrics on monitored runs
+
+Monitored runs also write `host_metrics/` under each run directory:
+
+- `device_io.csv`: per-interval device utilization and throughput
+- `system_cpu.csv`: whole-system CPU busy/user/system/iowait
+- `per_cpu.csv`: per-core CPU utilization
+- `process_cpu.csv`: total `db_bench` CPU summed across its threads
+- `thread_cpu.csv`: per-thread CPU usage for the target `db_bench` process
+- `thread_role_cpu.csv`: per-interval CPU summed by thread role
+- `summary.json`: per-run averages and maxima
+
+The thread-role breakdown is approximate but useful in practice:
+- `foreground`: `db_bench` worker / main threads
+- `rocksdb_compaction`: RocksDB low/bottom priority background threads
+- `rocksdb_flush`: RocksDB high priority flush threads
+
+If you also set `THREAD_STATUS_PER_INTERVAL`, `db_bench.log` will contain
+RocksDB thread snapshots with operation and stage labels for additional context.
 
 ## Compaction profile experiments
 

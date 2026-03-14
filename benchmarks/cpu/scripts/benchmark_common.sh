@@ -60,6 +60,7 @@ CONFIG_KEYS=(
   NUM_KEYS
   NUM_LOADS
   WRITES
+  WRITES_BY_VALUE_SIZE
   WRITE_RATIOS
   MIX_READS
   LOAD_BENCH
@@ -76,6 +77,13 @@ CONFIG_KEYS=(
 
   # Metrics collection knobs
   METRICS_INTERVAL_MS
+  THREAD_STATUS_PER_INTERVAL
+  REPORT_BG_IO_STATS
+  PERF_LEVEL
+  HOST_METRICS_INTERVAL_SEC
+  HOST_METRICS_DEVICE
+  RUN_PAUSE_SECONDS
+  RUN_QUIET
 )
 
 # Preserve caller-provided env so inline overrides used over .env.local
@@ -173,6 +181,13 @@ CACHE_SIZE="${CACHE_SIZE:-134217728}"
 
 # Metrics collection (0 = disabled, value in milliseconds)
 METRICS_INTERVAL_MS="${METRICS_INTERVAL_MS:-0}"
+THREAD_STATUS_PER_INTERVAL="${THREAD_STATUS_PER_INTERVAL:-0}"
+REPORT_BG_IO_STATS="${REPORT_BG_IO_STATS:-0}"
+PERF_LEVEL="${PERF_LEVEL:-0}"
+HOST_METRICS_INTERVAL_SEC="${HOST_METRICS_INTERVAL_SEC:-0}"
+HOST_METRICS_DEVICE="${HOST_METRICS_DEVICE:-}"
+RUN_PAUSE_SECONDS="${RUN_PAUSE_SECONDS:-0}"
+RUN_QUIET="${RUN_QUIET:-0}"
 
 LSM_TREE_ADDITIONAL_FLAGS=(
   --compression_type="${COMPRESSION_TYPE}"
@@ -215,7 +230,13 @@ STATISTICS_FLAGS=(
   --stats_dump_period_sec=60
   --report_interval_seconds=1
   --metrics_interval_ms="${METRICS_INTERVAL_MS}"
+  --report_bg_io_stats="${REPORT_BG_IO_STATS}"
+  --perf_level="${PERF_LEVEL}"
 )
+
+if [[ "${THREAD_STATUS_PER_INTERVAL}" != "0" ]]; then
+  STATISTICS_FLAGS+=(--thread_status_per_interval="${THREAD_STATUS_PER_INTERVAL}")
+fi
 
 COMMON_FLAGS=(
   "${LSM_TREE_ADDITIONAL_FLAGS[@]}"
@@ -278,12 +299,23 @@ RUN_METADATA_KEYS=(
   NUM_KEYS
   NUM_LOADS
   WRITES
+  WRITES_BY_VALUE_SIZE
   WRITE_RATIOS
   MIX_READS
   LOAD_BENCH
   MIX_BENCH
   PRELOAD_DIR_NAME
   COMPACT_PRELOAD_ON_CREATE
+
+  # Metrics / profiling
+  METRICS_INTERVAL_MS
+  THREAD_STATUS_PER_INTERVAL
+  REPORT_BG_IO_STATS
+  PERF_LEVEL
+  HOST_METRICS_INTERVAL_SEC
+  HOST_METRICS_DEVICE
+  RUN_PAUSE_SECONDS
+  RUN_QUIET
 )
 
 write_run_config() {
@@ -332,6 +364,102 @@ copy_rocksdb_log_file() {
   fi
 }
 
+resolve_block_device_for_path() {
+  local target_path="$1"
+  local source_device
+  local physical_device
+
+  if [[ -n "${HOST_METRICS_DEVICE}" ]]; then
+    printf "%s\n" "${HOST_METRICS_DEVICE}"
+    return 0
+  fi
+
+  source_device="$(df --output=source "${target_path}" 2>/dev/null | tail -n 1 | tr -d ' ')"
+  if [[ -z "${source_device}" ]]; then
+    return 1
+  fi
+
+  if [[ "${source_device}" == /dev/* ]] && command -v lsblk >/dev/null 2>&1; then
+    physical_device="$(lsblk -no pkname "${source_device}" 2>/dev/null | head -n 1 | tr -d ' ')"
+    if [[ -n "${physical_device}" ]]; then
+      printf "%s\n" "${physical_device}"
+      return 0
+    fi
+  fi
+
+  printf "%s\n" "$(basename "${source_device}")"
+}
+
+write_kv_metadata() {
+  local target_file="$1"
+  shift
+
+  {
+    echo "# Auto-generated metadata"
+    while (( $# > 0 )); do
+      local key="$1"
+      local value="$2"
+      printf "%s=%q\n" "${key}" "${value}"
+      shift 2
+    done
+  } > "${target_file}"
+}
+
+start_host_metrics_collection() {
+  local bench_pid="$1"
+  local run_dir="$2"
+  local metadata_dir="${run_dir}/metadata"
+  local host_metrics_dir="${run_dir}/host_metrics"
+  local collector_script="${BENCH_ROOT_DIR}/python/collect_host_metrics.py"
+  local device
+  local collector_pid_file="${metadata_dir}/host_metrics.pid"
+
+  if [[ "${HOST_METRICS_INTERVAL_SEC}" == "0" || "${HOST_METRICS_INTERVAL_SEC}" == "0.0" ]]; then
+    return 0
+  fi
+
+  if [[ ! -f "${collector_script}" ]]; then
+    echo "warning: host metrics collector missing: ${collector_script}" >&2
+    return 0
+  fi
+
+  device="$(resolve_block_device_for_path "${DB_BASE_DIR}" || true)"
+  if [[ -z "${device}" ]]; then
+    echo "warning: unable to resolve block device for ${DB_BASE_DIR}; skipping host metrics" >&2
+    return 0
+  fi
+
+  mkdir -p "${metadata_dir}" "${host_metrics_dir}"
+  write_kv_metadata "${metadata_dir}/host_metrics.env" \
+    HOST_METRICS_PID "${bench_pid}" \
+    HOST_METRICS_DEVICE "${device}" \
+    HOST_METRICS_INTERVAL_SEC "${HOST_METRICS_INTERVAL_SEC}" \
+    HOST_METRICS_DIR "${host_metrics_dir}"
+
+  python3 "${collector_script}" \
+    --pid "${bench_pid}" \
+    --device "${device}" \
+    --interval-sec "${HOST_METRICS_INTERVAL_SEC}" \
+    --output-dir "${host_metrics_dir}" &
+  local collector_pid=$!
+  printf "%s\n" "${collector_pid}" > "${collector_pid_file}"
+  HOST_METRICS_COLLECTOR_PID="${collector_pid}"
+}
+
+stop_host_metrics_collection() {
+  local collector_pid="${HOST_METRICS_COLLECTOR_PID:-}"
+
+  if [[ -z "${collector_pid}" ]]; then
+    return 0
+  fi
+
+  if kill -0 "${collector_pid}" 2>/dev/null; then
+    kill -TERM "${collector_pid}" 2>/dev/null || true
+    wait "${collector_pid}" || true
+  fi
+  unset HOST_METRICS_COLLECTOR_PID
+}
+
 run_db_bench() {
   local log_file="$1"
   local run_dir
@@ -352,7 +480,21 @@ run_db_bench() {
     echo
   } > "${cmd_file}"
 
-  "${DB_BENCH}" "$@" 2>&1 | tee "${log_file}"
+  if [[ "${RUN_QUIET}" == "1" ]]; then
+    "${DB_BENCH}" "$@" > "${log_file}" 2>&1 &
+  else
+    "${DB_BENCH}" "$@" > >(tee "${log_file}") 2>&1 &
+  fi
+  local bench_pid=$!
+  local bench_rc=0
+  start_host_metrics_collection "${bench_pid}" "${run_dir}"
+
+  if ! wait "${bench_pid}"; then
+    bench_rc=$?
+  fi
+
+  stop_host_metrics_collection
+  return "${bench_rc}"
 }
 
 safe_remove_dir() {

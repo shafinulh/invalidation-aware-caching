@@ -71,6 +71,13 @@ Or run the underlying shared scripts directly with inline env overrides:
 ./benchmarks/cpu/scripts/run_readwritemix.sh
 ```
 
+New monitored FillRandom entrypoints:
+
+```bash
+./benchmarks/cpu/experiments/fillrandom/final_monitored_sweep.sh
+./benchmarks/cpu/experiments/fillrandom/sample_monitored_pair.sh
+```
+
 ## Results organization
 
 `OUTPUT_DIR` (from `.env.local`) is the root results directory.
@@ -78,6 +85,7 @@ Or run the underlying shared scripts directly with inline env overrides:
 For each run:
 - benchmark data: `*.log`, `*.csv`
 - metadata: `metadata/run_config.env`, `metadata/*.cmd`, `metadata/rocksdb_options_*.ini`
+- optional host metrics: `host_metrics/*.csv`, `host_metrics/summary.json`
 
 ## Plotting
 
@@ -101,6 +109,38 @@ Plot the results:
 python3 benchmarks/cpu/python/plot_cache_metrics.py --metrics-csv /path/to/metrics.csv
 python3 benchmarks/cpu/python/plot_cache_metrics.py --metrics-dir /path/to/base --compare
 ```
+
+## Host IO / CPU metrics collection
+
+Set `HOST_METRICS_INTERVAL_SEC=N` (for example `1`) to enable low-overhead host
+sampling based on `/proc` and `/sys` counters. The runner resolves the block
+device from `DB_BASE_DIR` unless `HOST_METRICS_DEVICE` is set explicitly.
+
+Per run it writes:
+- `host_metrics/device_io.csv`
+- `host_metrics/system_cpu.csv`
+- `host_metrics/per_cpu.csv`
+- `host_metrics/process_cpu.csv`
+- `host_metrics/thread_cpu.csv`
+- `host_metrics/thread_role_cpu.csv`
+- `host_metrics/summary.json`
+
+`summary.json` includes:
+- average / max backing-device utilization
+- average read / write throughput at the device
+- average system CPU busy / user / system / iowait
+- average / max CPU by thread role (`foreground`, `rocksdb_compaction`, `rocksdb_flush`, ...)
+
+Relevant knobs:
+- `HOST_METRICS_INTERVAL_SEC` (default: `0`, disabled)
+- `HOST_METRICS_DEVICE` (default: auto-detect from `DB_BASE_DIR`)
+- `THREAD_STATUS_PER_INTERVAL` (default: `0`, disabled)
+- `REPORT_BG_IO_STATS` (default: `0`, disabled)
+- `RUN_PAUSE_SECONDS` (default: `0`)
+
+`THREAD_STATUS_PER_INTERVAL` causes db_bench to dump RocksDB thread snapshots to
+`db_bench.log`, which is useful for correlating host-side thread CPU with
+foreground writes vs background flush / compaction work.
 
 ## Workload knobs
 
@@ -155,6 +195,10 @@ Statistics/reporting flags (fixed in `scripts/benchmark_common.sh`):
 FillRandom-only settings (`scripts/run_fillrandom.sh`):
 - `NUM_KEYS` (default: `20000000`)
 - `WRITES` (default: `-1`, meaning `--writes` falls back to `--num`)
+- `WRITES_BY_VALUE_SIZE` (optional mappings like `"32:20000000 64:12000000"`)
+  When set, the matching value-size-specific write count overrides `WRITES`.
+  If `SUBCOMP_THREADS_LIST` contains `0`, that run forces
+  `--disable_auto_compactions=1` for the no-compaction baseline.
 
 ReadWriteMix-only settings (`scripts/run_readwritemix.sh`):
 - `WRITE_RATIOS` (default: `"25"`, write percentages)
