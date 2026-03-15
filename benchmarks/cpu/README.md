@@ -55,6 +55,9 @@ experiments/
   cache_observation/   # Block-cache impact during compactions
     bounded_l0_cache_impact.sh
     unbounded_l0_cache_impact.sh
+  compaction_parallelism/  # Isolated manual compaction scaling sweeps
+    sample_compaction_sweep.sh
+    final_compaction_sweep.sh
 ```
 
 Run from the repository root:
@@ -69,6 +72,7 @@ Or run the underlying shared scripts directly with inline env overrides:
 ```bash
 ./benchmarks/cpu/scripts/run_fillrandom.sh
 ./benchmarks/cpu/scripts/run_readwritemix.sh
+./benchmarks/cpu/scripts/run_compaction_parallelism.sh
 ```
 
 New monitored FillRandom entrypoints:
@@ -220,3 +224,37 @@ ReadWriteMix load/cleanup behavior:
 - Mixed phase always runs with auto-compactions enabled.
 - Mixed DB/WAL directories are deleted after each run, and RocksDB `LOG` is copied to run metadata before deletion.
 - To force a fresh load, remove the corresponding preload directories for the selected `PRELOAD_DIR_NAME`.
+
+CompactionParallelism-only settings (`scripts/run_compaction_parallelism.sh`):
+- `INPUT_DATA_MB_LIST` (default: `"32 64 128 256 512 1024 2048"`)
+- `SST_SIZE_MB_LIST` (default: `"8 16 32 64"`)
+- `COMPACTION_BENCH` (default: `compactall`; can also be `compact0` or `compact1`)
+- `PRELOAD_THREADS` (default: `THREADS`)
+- `PRELOAD_KEYSPACE_MULTIPLIER` (default: `20`, widens the fillrandom keyspace so overwrites stay rare)
+- `PRELOAD_MIN_NUM_KEYS` (default: `200000000`)
+- `COMPACTION_BG_THREADS` (default: `1`)
+- `COMPACTION_PERF_LEVEL` (default: `5`)
+- `COMPACTION_METRICS_INTERVAL_MS` (default: `METRICS_INTERVAL_MS`)
+- `COMPACTION_HOST_METRICS_INTERVAL_SEC` (default: `HOST_METRICS_INTERVAL_SEC`)
+- `COMPACTION_THREAD_STATUS_PER_INTERVAL` (default: `THREAD_STATUS_PER_INTERVAL`)
+
+CompactionParallelism flow:
+- Preload once per `(SST size, input data size, value size)` with `fillrandom` and auto-compactions disabled.
+- Reuse that preload across all requested subcompaction settings by copying it into ephemeral run directories.
+- Default to `compactall` because `db_bench compact0` is a no-op on a pure L0-only preload.
+- Force L0 triggers to `1000000` inside this flow so background compactions and write stalls do not interfere with the manual compaction step.
+- The analyzer still reports the actual L0-input compactions from RocksDB's event log, which is the relevant slice for CPU-vs-GPU follow-on analysis.
+
+CompactionParallelism analysis:
+```bash
+python3 benchmarks/cpu/python/analyze_compaction_parallelism.py \
+    /path/to/bench_results/cpu/compaction_parallelism/<RUN_ID>
+```
+
+The analyzer emits:
+- `analysis/summary_metrics.csv`
+- `analysis/best_runs.csv`
+- `analysis/gpu_candidate_runs.csv`
+- `analysis/analysis_summary.txt`
+- `analysis/overview/*.png`
+- per-slice throughput, time-breakdown, scaling, and resource-utilization plots

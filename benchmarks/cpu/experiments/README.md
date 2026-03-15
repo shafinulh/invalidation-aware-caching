@@ -23,6 +23,9 @@ experiments/
   compaction_profile/  # Read / write / compute breakdown for compactions
     fillrandom_compaction_profile.sh - Actual background compactions during fillrandom
     compaction_io_breakdown.sh       - Forced compactall after loading with compactions disabled
+  compaction_parallelism/  # Isolated manual compaction scaling
+    sample_compaction_sweep.sh - Smaller validation matrix
+    final_compaction_sweep.sh  - Full isolated compaction scaling sweep
 ```
 
 ## Bounded vs Unbounded L0
@@ -185,3 +188,75 @@ python3 benchmarks/cpu/python/parse_compaction_profile.py \
     /path/to/bench_results/cpu/compaction_profile/value_32/.../compact-profile \
     --plot
 ```
+
+## Compaction parallelism experiments
+
+These experiments isolate a manual CPU compaction after a preload phase so you
+can study how compaction parallelism scales with:
+
+- input data size
+- value size
+- SST size
+- requested subcompactions
+
+The shared runner is:
+
+```bash
+./benchmarks/cpu/scripts/run_compaction_parallelism.sh
+```
+
+Default flow:
+
+1. Preload with `fillrandom` and `--disable_auto_compactions=1`.
+2. Keep L0 triggers effectively disabled (`1000000`) so background compactions
+   do not interfere.
+3. Copy the preload into an ephemeral DB per subcompaction setting.
+4. Run `compactall,stats` by default with `--report_bg_io_stats=true`.
+
+Why `compactall` is the shipped default:
+
+- `db_bench compact0` is a no-op on a pure L0-only preload because it expects
+  an existing lower level to compact into.
+- `compactall` works on the preload shape produced by this flow and still lets
+  the analyzer recover the actual L0-input compactions from RocksDB's event log.
+- That keeps the sweep runnable while preserving the compaction-pattern detail
+  needed for later CPU-vs-GPU reasoning.
+
+You can still force `COMPACTION_BENCH=compact0`, but the runner will fail fast
+if RocksDB reports that the benchmark was a no-op.
+
+Recommended profiling settings for this study:
+
+- `COMPACTION_PERF_LEVEL=5`
+  This is RocksDB `kEnableTimeAndCPUTimeExceptForMutex`, which captures time
+  and CPU timing without mutex timing noise.
+- `REPORT_BG_IO_STATS=1`
+  Needed for the write-IO timing fields in the RocksDB event log.
+- `HOST_METRICS_INTERVAL_SEC=0.1`
+  Helps capture short compactions that a 1s sampler would miss.
+- `METRICS_INTERVAL_MS=100`
+  Optional db_bench-side interval metrics for extra context.
+
+Entry points:
+
+```bash
+./benchmarks/cpu/experiments/compaction_parallelism/sample_compaction_sweep.sh
+./benchmarks/cpu/experiments/compaction_parallelism/final_compaction_sweep.sh
+```
+
+Analyze a finished sweep:
+
+```bash
+python3 benchmarks/cpu/python/analyze_compaction_parallelism.py \
+    /path/to/bench_results/cpu/compaction_parallelism/<RUN_ID>
+```
+
+The analyzer writes:
+
+- `analysis/summary_metrics.csv`
+- `analysis/best_runs.csv`
+- `analysis/gpu_candidate_runs.csv`
+- `analysis/compaction_events.csv`
+- `analysis/compaction_pattern_counts.csv`
+- `analysis/analysis_summary.txt`
+- overview heatmaps plus per-slice throughput / breakdown figures
