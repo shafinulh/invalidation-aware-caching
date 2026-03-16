@@ -112,6 +112,116 @@ static bool test_target_file_partitioning()
     return ok;
 }
 
+static bool test_device_plan_matches_cpu()
+{
+    std::vector<KVPair> kv = generate_sorted_kv(12000, 0, 111);
+    std::vector<DataBlockPlanEntry> cpu = plan_data_blocks(kv);
+
+    KVPair* d_kv = nullptr;
+    cudaMalloc(&d_kv, kv.size() * sizeof(KVPair));
+    cudaMemcpy(d_kv, kv.data(), kv.size() * sizeof(KVPair), cudaMemcpyHostToDevice);
+    DevicePlanResult gpu = launch_plan_data_blocks_timed_from_device(d_kv, (int)kv.size());
+    copy_device_plans_to_host(gpu);
+    cudaFree(d_kv);
+
+    bool same = cpu.size() == gpu.plans.size();
+    for (size_t i = 0; i < cpu.size() && same; ++i) {
+        same &= cpu[i].first_kv == gpu.plans[i].first_kv;
+        same &= cpu[i].num_kv == gpu.plans[i].num_kv;
+        same &= cpu[i].serialized_size == gpu.plans[i].serialized_size;
+    }
+    if (!same) {
+        std::printf("  [DEBUG] cpu blocks=%zu gpu blocks=%zu\n", cpu.size(), gpu.plans.size());
+        size_t mismatch = 0;
+        size_t limit = std::min(cpu.size(), gpu.plans.size());
+        while (mismatch < limit &&
+               cpu[mismatch].first_kv == gpu.plans[mismatch].first_kv &&
+               cpu[mismatch].num_kv == gpu.plans[mismatch].num_kv &&
+               cpu[mismatch].serialized_size == gpu.plans[mismatch].serialized_size) {
+            ++mismatch;
+        }
+        if (mismatch < limit) {
+            std::printf("  [DEBUG] mismatch at block %zu: cpu=(first=%u num=%u size=%u) gpu=(first=%u num=%u size=%u)\n",
+                        mismatch,
+                        cpu[mismatch].first_kv, cpu[mismatch].num_kv, cpu[mismatch].serialized_size,
+                        gpu.plans[mismatch].first_kv, gpu.plans[mismatch].num_kv, gpu.plans[mismatch].serialized_size);
+        }
+    }
+    bool ok = check(same, "Device plan matches CPU plan exactly");
+    destroy_device_plan_result(gpu);
+    return ok;
+}
+
+static bool test_group_aligned_plan_matches_gpu_group_sizes()
+{
+    std::vector<KVPair> kv = generate_sorted_kv(12000, 0, 211);
+    std::vector<DataBlockPlanEntry> cpu = plan_data_blocks_group_aligned(kv);
+
+    KVPair* d_kv = nullptr;
+    cudaMalloc(&d_kv, kv.size() * sizeof(KVPair));
+    cudaMemcpy(d_kv, kv.data(), kv.size() * sizeof(KVPair), cudaMemcpyHostToDevice);
+    RestartGroupSizeTimedResult group_sizes = launch_restart_group_sizes_timed_from_device(d_kv, (int)kv.size());
+    cudaFree(d_kv);
+
+    std::vector<DataBlockPlanEntry> gpu =
+        plan_data_blocks_group_aligned_from_group_sizes(group_sizes.group_sizes, (uint32_t)kv.size());
+    bool same = cpu.size() == gpu.size();
+    for (size_t i = 0; i < cpu.size() && same; ++i) {
+        same &= cpu[i].first_kv == gpu[i].first_kv;
+        same &= cpu[i].num_kv == gpu[i].num_kv;
+        same &= cpu[i].serialized_size == gpu[i].serialized_size;
+    }
+    return check(same, "Group-aligned plan matches GPU restart-group sizing");
+}
+
+static bool test_streamed_pack_matches_single_grid_pack()
+{
+    std::vector<KVPair> kv = generate_sorted_kv(12000, 0, 123);
+    std::vector<DataBlockPlanEntry> plans = plan_data_blocks(kv);
+
+    PackResult planned_layout;
+    planned_layout.plans = plans;
+    planned_layout.block_sizes.resize(plans.size());
+    std::vector<uint32_t> filter_lengths(plans.size());
+    std::vector<uint32_t> first_kv(plans.size());
+    std::vector<uint32_t> num_kv(plans.size());
+    for (size_t i = 0; i < plans.size(); ++i) {
+        planned_layout.block_sizes[i] = plans[i].serialized_size;
+        first_kv[i] = plans[i].first_kv;
+        num_kv[i] = plans[i].num_kv;
+        uint32_t byte_vector_len = plans[i].num_kv * GP_BLOOM_BITS_PER_KEY;
+        filter_lengths[i] = (byte_vector_len + 7u) / 8u;
+    }
+    std::vector<std::pair<size_t, size_t>> spans =
+        partition_output_blocks(planned_layout, filter_lengths, 64 * 1024);
+
+    KVPair* d_kv = nullptr;
+    uint32_t* d_first_kv = nullptr;
+    uint32_t* d_num_kv = nullptr;
+    cudaMalloc(&d_kv, kv.size() * sizeof(KVPair));
+    cudaMalloc(&d_first_kv, plans.size() * sizeof(uint32_t));
+    cudaMalloc(&d_num_kv, plans.size() * sizeof(uint32_t));
+    cudaMemcpy(d_kv, kv.data(), kv.size() * sizeof(KVPair), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_first_kv, first_kv.data(), plans.size() * sizeof(uint32_t), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_num_kv, num_kv.data(), plans.size() * sizeof(uint32_t), cudaMemcpyHostToDevice);
+
+    PackTimedResult single = launch_pack_timed_from_device_plans(d_kv, d_first_kv, d_num_kv, (int)plans.size());
+    PackTimedResult streamed =
+        launch_pack_timed_from_device_plan_spans(d_kv, d_first_kv, d_num_kv, plans, spans);
+
+    cudaFree(d_num_kv);
+    cudaFree(d_first_kv);
+    cudaFree(d_kv);
+
+    bool ok = check(single.result.block_sizes == streamed.result.block_sizes,
+                    "Streamed pack block sizes match single-grid pack");
+    ok &= check(single.result.block_offsets == streamed.result.block_offsets,
+                "Streamed pack block offsets match single-grid pack");
+    ok &= check(single.result.block_buf == streamed.result.block_buf,
+                "Streamed pack bytes match single-grid pack");
+    return ok;
+}
+
 static bool test_gpu_q_compaction_matches_cpu()
 {
     std::vector<ParsedSST> inputs;
@@ -134,6 +244,66 @@ static bool test_gpu_q_compaction_matches_cpu()
     return ok;
 }
 
+static bool test_gpu_q_compaction_pipeline_matches_cpu()
+{
+    std::vector<ParsedSST> inputs;
+    for (uint32_t sst = 0; sst < GP_NUM_INPUT_SSTS; ++sst) {
+        SSTBuildArtifacts build = build_cpu_sst(1024, sst, 91);
+        inputs.push_back(parse_sst_bytes(build.file_bytes));
+    }
+
+    CPUCompactionResult cpu = cpu_q_compaction_from_parsed(inputs);
+    GPUCompactionResult gpu = gpu_q_compaction_pipeline_from_parsed(inputs);
+
+    bool ok = check(cpu.output.files.size() == gpu.output.files.size(),
+                    "GPU Q-compaction pipeline emits the same number of SST files as CPU");
+    for (size_t i = 0; i < cpu.output.files.size() && ok; ++i) {
+        ok &= check(cpu.output.files[i].file_bytes == gpu.output.files[i].file_bytes,
+                    "GPU Q-compaction pipeline output SST matches CPU output exactly");
+    }
+    return ok;
+}
+
+static bool test_gpu_q_compaction_paper_matches_cpu()
+{
+    std::vector<ParsedSST> inputs;
+    for (uint32_t sst = 0; sst < GP_NUM_INPUT_SSTS; ++sst) {
+        SSTBuildArtifacts build = build_cpu_sst(1024, sst, 141);
+        inputs.push_back(parse_sst_bytes(build.file_bytes));
+    }
+
+    CPUCompactionResult cpu = cpu_q_compaction_paper_from_parsed(inputs);
+    GPUCompactionResult gpu = gpu_q_compaction_paper_from_parsed(inputs);
+
+    bool ok = check(cpu.output.files.size() == gpu.output.files.size(),
+                    "GPU Q-paper compaction emits the same number of SST files as CPU");
+    for (size_t i = 0; i < cpu.output.files.size() && ok; ++i) {
+        ok &= check(cpu.output.files[i].file_bytes == gpu.output.files[i].file_bytes,
+                    "GPU Q-paper compaction output SST matches CPU output exactly");
+    }
+    return ok;
+}
+
+static bool test_gpu_q_compaction_paper_overlap_matches_cpu()
+{
+    std::vector<ParsedSST> inputs;
+    for (uint32_t sst = 0; sst < GP_NUM_INPUT_SSTS; ++sst) {
+        SSTBuildArtifacts build = build_cpu_sst(1024, sst, 151);
+        inputs.push_back(parse_sst_bytes(build.file_bytes));
+    }
+
+    CPUCompactionResult cpu = cpu_q_compaction_paper_from_parsed(inputs);
+    GPUCompactionResult gpu = gpu_q_compaction_paper_overlap_from_parsed(inputs);
+
+    bool ok = check(cpu.output.files.size() == gpu.output.files.size(),
+                    "GPU Q-paper-overlap compaction emits the same number of SST files as CPU");
+    for (size_t i = 0; i < cpu.output.files.size() && ok; ++i) {
+        ok &= check(cpu.output.files[i].file_bytes == gpu.output.files[i].file_bytes,
+                    "GPU Q-paper-overlap compaction output SST matches CPU output exactly");
+    }
+    return ok;
+}
+
 int main()
 {
     cudaFree(0);
@@ -142,7 +312,13 @@ int main()
     test_pack_roundtrip();
     test_sst_roundtrip();
     test_target_file_partitioning();
+    test_device_plan_matches_cpu();
+    test_group_aligned_plan_matches_gpu_group_sizes();
+    test_streamed_pack_matches_single_grid_pack();
     test_gpu_q_compaction_matches_cpu();
+    test_gpu_q_compaction_pipeline_matches_cpu();
+    test_gpu_q_compaction_paper_matches_cpu();
+    test_gpu_q_compaction_paper_overlap_matches_cpu();
     std::printf("\nPassed: %d  Failed: %d\n", g_passed, g_failed);
     return g_failed == 0 ? 0 : 1;
 }

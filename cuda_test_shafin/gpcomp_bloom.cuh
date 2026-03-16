@@ -98,6 +98,25 @@ __global__ void bloom_filter_kernel_batched(const KVPair*  __restrict__ all_keys
     }
 }
 
+__global__ void bloom_filter_layout_kernel(const uint32_t* __restrict__ block_num_kv,
+                                           int                          num_blocks,
+                                           uint32_t* __restrict__       block_bitvec_offsets,
+                                           uint32_t* __restrict__       block_bitvec_lengths,
+                                           uint32_t* __restrict__       total_bytes)
+{
+    if (blockIdx.x != 0 || threadIdx.x != 0) return;
+
+    uint32_t offset = 0;
+    for (int i = 0; i < num_blocks; ++i) {
+        uint32_t byte_vector_len = block_num_kv[i] * GP_BLOOM_BITS_PER_KEY;
+        uint32_t bitvec_len = (byte_vector_len + 7) / 8;
+        block_bitvec_offsets[i] = offset;
+        block_bitvec_lengths[i] = bitvec_len;
+        offset += bitvec_len;
+    }
+    *total_bytes = offset;
+}
+
 static inline int launch_bloom_filter(const KVPair* h_array,
                                       int           array_size,
                                       int           K,
@@ -206,5 +225,140 @@ static inline BloomBatchResult launch_bloom_filter_batched(const std::vector<KVP
     cudaFree(d_num_kv);
     cudaFree(d_first_kv);
     cudaFree(d_kv);
+    return result;
+}
+
+static inline BloomBatchResult
+launch_bloom_filter_batched_from_device(const KVPair*                         d_kv,
+                                        const std::vector<DataBlockPlanEntry>& plans)
+{
+    BloomBatchResult result;
+    if (plans.empty()) return result;
+
+    uint32_t max_num_kv = 0;
+    result.bitvec_offsets.resize(plans.size());
+    result.bitvec_lengths.resize(plans.size());
+
+    uint32_t total_bytes = 0;
+    std::vector<uint32_t> first_kv(plans.size()), num_kv(plans.size());
+    for (size_t i = 0; i < plans.size(); ++i) {
+        first_kv[i] = plans[i].first_kv;
+        num_kv[i] = plans[i].num_kv;
+        max_num_kv = std::max(max_num_kv, plans[i].num_kv);
+        result.bitvec_offsets[i] = total_bytes;
+        uint32_t byte_vector_len = plans[i].num_kv * GP_BLOOM_BITS_PER_KEY;
+        uint32_t bitvec_len = (byte_vector_len + 7) / 8;
+        result.bitvec_lengths[i] = bitvec_len;
+        total_bytes += bitvec_len;
+    }
+    result.filter_bytes.resize(total_bytes);
+
+    uint32_t* d_first_kv = nullptr;
+    uint32_t* d_num_kv = nullptr;
+    uint32_t* d_offsets = nullptr;
+    uint8_t*  d_filter = nullptr;
+    cudaMalloc(&d_first_kv, plans.size() * sizeof(uint32_t));
+    cudaMalloc(&d_num_kv, plans.size() * sizeof(uint32_t));
+    cudaMalloc(&d_offsets, plans.size() * sizeof(uint32_t));
+    cudaMalloc(&d_filter, total_bytes);
+
+    auto wall_start = std::chrono::steady_clock::now();
+    cudaMemcpy(d_first_kv, first_kv.data(), plans.size() * sizeof(uint32_t), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_num_kv, num_kv.data(), plans.size() * sizeof(uint32_t), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_offsets, result.bitvec_offsets.data(), plans.size() * sizeof(uint32_t), cudaMemcpyHostToDevice);
+
+    int max_byte_vector_len = (int)(max_num_kv * GP_BLOOM_BITS_PER_KEY);
+    int max_bitvec_len = (max_byte_vector_len + 7) / 8;
+    int block_dim = ((std::max((int)max_num_kv, max_bitvec_len) + 31) / 32) * 32;
+    if (block_dim < 32) block_dim = 32;
+
+    cudaEvent_t ev0, ev1;
+    cudaEventCreate(&ev0);
+    cudaEventCreate(&ev1);
+    cudaEventRecord(ev0, 0);
+    bloom_filter_kernel_batched<<<(int)plans.size(), block_dim, (size_t)max_byte_vector_len>>>(
+        d_kv, d_first_kv, d_num_kv, d_offsets, GP_BLOOM_BITS_PER_KEY, GP_BLOOM_HASHES,
+        max_byte_vector_len, d_filter);
+    cudaEventRecord(ev1, 0);
+    cudaEventSynchronize(ev1);
+    cudaEventElapsedTime(&result.kernel_ms, ev0, ev1);
+
+    cudaMemcpy(result.filter_bytes.data(), d_filter, total_bytes, cudaMemcpyDeviceToHost);
+    auto wall_end = std::chrono::steady_clock::now();
+    result.wall_ms = (float)std::chrono::duration<double, std::milli>(wall_end - wall_start).count();
+
+    cudaEventDestroy(ev0);
+    cudaEventDestroy(ev1);
+    cudaFree(d_filter);
+    cudaFree(d_offsets);
+    cudaFree(d_num_kv);
+    cudaFree(d_first_kv);
+    return result;
+}
+
+static inline BloomBatchResult
+launch_bloom_filter_batched_from_device_plans(const KVPair*      d_kv,
+                                              const uint32_t*    d_first_kv,
+                                              const uint32_t*    d_num_kv,
+                                              int                num_blocks)
+{
+    BloomBatchResult result;
+    if (num_blocks <= 0) return result;
+
+    std::vector<uint32_t> host_num_kv((size_t)num_blocks);
+    cudaMemcpy(host_num_kv.data(), d_num_kv, (size_t)num_blocks * sizeof(uint32_t), cudaMemcpyDeviceToHost);
+
+    uint32_t max_num_kv = 0;
+    for (uint32_t n : host_num_kv) max_num_kv = std::max(max_num_kv, n);
+
+    uint32_t* d_offsets = nullptr;
+    uint32_t* d_lengths = nullptr;
+    uint32_t* d_total_bytes = nullptr;
+    cudaMalloc(&d_offsets, (size_t)num_blocks * sizeof(uint32_t));
+    cudaMalloc(&d_lengths, (size_t)num_blocks * sizeof(uint32_t));
+    cudaMalloc(&d_total_bytes, sizeof(uint32_t));
+
+    bloom_filter_layout_kernel<<<1, 1>>>(d_num_kv, num_blocks, d_offsets, d_lengths, d_total_bytes);
+
+    uint32_t total_bytes = 0;
+    cudaMemcpy(&total_bytes, d_total_bytes, sizeof(uint32_t), cudaMemcpyDeviceToHost);
+    result.filter_bytes.resize(total_bytes);
+    result.bitvec_offsets.resize((size_t)num_blocks);
+    result.bitvec_lengths.resize((size_t)num_blocks);
+
+    uint8_t* d_filter = nullptr;
+    cudaMalloc(&d_filter, (size_t)std::max(total_bytes, 1u));
+
+    int max_byte_vector_len = (int)(max_num_kv * GP_BLOOM_BITS_PER_KEY);
+    int max_bitvec_len = (max_byte_vector_len + 7) / 8;
+    int block_dim = ((std::max((int)max_num_kv, max_bitvec_len) + 31) / 32) * 32;
+    if (block_dim < 32) block_dim = 32;
+
+    auto wall_start = std::chrono::steady_clock::now();
+    cudaEvent_t ev0, ev1;
+    cudaEventCreate(&ev0);
+    cudaEventCreate(&ev1);
+    cudaEventRecord(ev0, 0);
+    bloom_filter_kernel_batched<<<num_blocks, block_dim, (size_t)max_byte_vector_len>>>(
+        d_kv, d_first_kv, d_num_kv, d_offsets, GP_BLOOM_BITS_PER_KEY, GP_BLOOM_HASHES,
+        max_byte_vector_len, d_filter);
+    cudaEventRecord(ev1, 0);
+    cudaEventSynchronize(ev1);
+    cudaEventElapsedTime(&result.kernel_ms, ev0, ev1);
+
+    cudaMemcpy(result.filter_bytes.data(), d_filter, total_bytes, cudaMemcpyDeviceToHost);
+    cudaMemcpy(result.bitvec_offsets.data(), d_offsets,
+               (size_t)num_blocks * sizeof(uint32_t), cudaMemcpyDeviceToHost);
+    cudaMemcpy(result.bitvec_lengths.data(), d_lengths,
+               (size_t)num_blocks * sizeof(uint32_t), cudaMemcpyDeviceToHost);
+    auto wall_end = std::chrono::steady_clock::now();
+    result.wall_ms = (float)std::chrono::duration<double, std::milli>(wall_end - wall_start).count();
+
+    cudaEventDestroy(ev0);
+    cudaEventDestroy(ev1);
+    cudaFree(d_filter);
+    cudaFree(d_total_bytes);
+    cudaFree(d_lengths);
+    cudaFree(d_offsets);
     return result;
 }

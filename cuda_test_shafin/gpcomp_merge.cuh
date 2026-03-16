@@ -123,6 +123,14 @@ struct MergeTimedResult {
     float               wall_ms = 0.0f;
 };
 
+struct DeviceMergeTimedResult {
+    std::vector<KVPair> merged;
+    KVPair*             d_output = nullptr;
+    int                 total = 0;
+    float               kernel_ms = 0.0f;
+    float               wall_ms = 0.0f;
+};
+
 static inline MergeTimedResult launch_merge_timed(const std::vector<std::vector<KVPair>>& arrays)
 {
     MergeTimedResult result;
@@ -187,5 +195,63 @@ static inline MergeTimedResult launch_merge_timed(const std::vector<std::vector<
     cudaFree(d_sst_sizes);
     cudaFree(d_sst_arrays);
     for (KVPair* ptr : d_host_ptrs) cudaFree(ptr);
+    return result;
+}
+
+static inline DeviceMergeTimedResult
+launch_merge_timed_from_device(const std::vector<KVPair*>& d_arrays,
+                               const std::vector<int>&     sizes,
+                               bool                        copy_to_host = true)
+{
+    DeviceMergeTimedResult result;
+    int num_arrays = (int)d_arrays.size();
+    std::vector<int> h_offsets((size_t)num_arrays + 1, 0);
+    for (int i = 0; i < num_arrays; ++i) {
+        h_offsets[i + 1] = h_offsets[i] + sizes[i];
+    }
+    result.total = h_offsets[num_arrays];
+    if (copy_to_host) result.merged.resize((size_t)result.total);
+
+    KVPair** d_sst_arrays = nullptr;
+    int*     d_sst_sizes = nullptr;
+    int*     d_sst_offsets = nullptr;
+
+    cudaMalloc(&d_sst_arrays, (size_t)std::max(num_arrays, 1) * sizeof(KVPair*));
+    cudaMalloc(&d_sst_sizes, (size_t)std::max(num_arrays, 1) * sizeof(int));
+    cudaMalloc(&d_sst_offsets, ((size_t)std::max(num_arrays, 1) + 1) * sizeof(int));
+    cudaMalloc(&result.d_output, (size_t)std::max(result.total, 1) * sizeof(KVPair));
+
+    auto wall_start = std::chrono::steady_clock::now();
+    if (num_arrays > 0) {
+        cudaMemcpy(d_sst_arrays, d_arrays.data(), (size_t)num_arrays * sizeof(KVPair*), cudaMemcpyHostToDevice);
+        cudaMemcpy(d_sst_sizes, sizes.data(), (size_t)num_arrays * sizeof(int), cudaMemcpyHostToDevice);
+    }
+    cudaMemcpy(d_sst_offsets, h_offsets.data(), ((size_t)num_arrays + 1) * sizeof(int), cudaMemcpyHostToDevice);
+
+    cudaEvent_t ev0, ev1;
+    cudaEventCreate(&ev0);
+    cudaEventCreate(&ev1);
+    int block = 256;
+    int grid = (result.total + block - 1) / block;
+    cudaEventRecord(ev0, 0);
+    if (result.total > 0) {
+        merge_kernel<<<grid, block>>>(d_sst_arrays, d_sst_sizes, d_sst_offsets, num_arrays, result.d_output);
+    }
+    cudaEventRecord(ev1, 0);
+    cudaEventSynchronize(ev1);
+    cudaEventElapsedTime(&result.kernel_ms, ev0, ev1);
+
+    if (copy_to_host && result.total > 0) {
+        cudaMemcpy(result.merged.data(), result.d_output,
+                   (size_t)result.total * sizeof(KVPair), cudaMemcpyDeviceToHost);
+    }
+    auto wall_end = std::chrono::steady_clock::now();
+    result.wall_ms = (float)std::chrono::duration<double, std::milli>(wall_end - wall_start).count();
+
+    cudaEventDestroy(ev1);
+    cudaEventDestroy(ev0);
+    cudaFree(d_sst_offsets);
+    cudaFree(d_sst_sizes);
+    cudaFree(d_sst_arrays);
     return result;
 }

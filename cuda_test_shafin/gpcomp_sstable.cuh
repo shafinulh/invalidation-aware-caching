@@ -272,6 +272,129 @@ static inline SSTBuildArtifacts assemble_sst_file_range(const std::vector<KVPair
     return assemble_sst_file(local_kv, local_pack, local_filter_bytes, local_filter_offsets, local_filter_lengths);
 }
 
+static inline SSTBuildArtifacts assemble_sst_file_range_fast(const std::vector<KVPair>&            kv_array,
+                                                             const PackResult&                      pack_result,
+                                                             const std::vector<uint8_t>&           filter_bytes,
+                                                             const std::vector<uint32_t>&          filter_offsets,
+                                                             const std::vector<uint32_t>&          filter_lengths,
+                                                             size_t                                 block_begin,
+                                                             size_t                                 block_end)
+{
+    gp_fail_if(block_begin >= block_end, "invalid SST block range");
+
+    SSTBuildArtifacts artifacts;
+    size_t block_count = block_end - block_begin;
+    size_t kv_begin = pack_result.plans[block_begin].first_kv;
+    size_t kv_end = pack_result.plans[block_end - 1].first_kv + pack_result.plans[block_end - 1].num_kv;
+
+    size_t data_region_size = 0;
+    size_t filter_region_size = 0;
+    for (size_t i = block_begin; i < block_end; ++i) {
+        data_region_size += pack_result.block_sizes[i];
+        filter_region_size += sizeof(FilterBlockHeader) + filter_lengths[i];
+    }
+
+    size_t index_region_size = block_count * sizeof(IndexEntry);
+    size_t filter_meta_size = block_count * sizeof(FilterBlockMeta);
+    size_t data_meta_size = block_count * sizeof(DataBlockMeta);
+    size_t total_size = data_region_size + filter_region_size + index_region_size
+                      + filter_meta_size + data_meta_size + sizeof(SSTFooter);
+
+    artifacts.data_meta.resize(block_count);
+    artifacts.filter_meta.resize(block_count);
+    artifacts.index_entries.resize(block_count);
+    artifacts.file_bytes.resize(total_size);
+
+    size_t running_offset = 0;
+    uint8_t* file_bytes = artifacts.file_bytes.data();
+
+    for (size_t local = 0; local < block_count; ++local) {
+        size_t global = block_begin + local;
+        const DataBlockPlanEntry& plan = pack_result.plans[global];
+        uint32_t local_first_kv = (uint32_t)(plan.first_kv - kv_begin);
+        uint32_t block_size = pack_result.block_sizes[global];
+
+        artifacts.data_meta[local].offset = running_offset;
+        artifacts.data_meta[local].size = block_size;
+        artifacts.data_meta[local].first_kv = local_first_kv;
+        artifacts.data_meta[local].num_kv = plan.num_kv;
+
+        std::memcpy(file_bytes + running_offset,
+                    pack_result.block_buf.data() + pack_result.block_offsets[global],
+                    block_size);
+        running_offset += block_size;
+
+        artifacts.index_entries[local].largest_key = kv_array[plan.first_kv + plan.num_kv - 1].key;
+        artifacts.index_entries[local].data_offset = artifacts.data_meta[local].offset;
+        artifacts.index_entries[local].data_size = block_size;
+        artifacts.index_entries[local].num_kv = plan.num_kv;
+    }
+
+    uint64_t filter_region_offset = running_offset;
+    for (size_t local = 0; local < block_count; ++local) {
+        size_t global = block_begin + local;
+        const DataBlockPlanEntry& plan = pack_result.plans[global];
+        FilterBlockHeader hdr{};
+        hdr.num_keys = plan.num_kv;
+        hdr.byte_vector_len = plan.num_kv * GP_BLOOM_BITS_PER_KEY;
+        hdr.bitvec_len = filter_lengths[global];
+
+        artifacts.filter_meta[local].offset = running_offset;
+        artifacts.filter_meta[local].size = (uint32_t)(sizeof(FilterBlockHeader) + filter_lengths[global]);
+        artifacts.filter_meta[local].byte_vector_len = hdr.byte_vector_len;
+        artifacts.filter_meta[local].num_keys = hdr.num_keys;
+
+        std::memcpy(file_bytes + running_offset, &hdr, sizeof(FilterBlockHeader));
+        running_offset += sizeof(FilterBlockHeader);
+        std::memcpy(file_bytes + running_offset,
+                    filter_bytes.data() + filter_offsets[global],
+                    filter_lengths[global]);
+        running_offset += filter_lengths[global];
+    }
+
+    uint32_t computed_filter_region_size = (uint32_t)(running_offset - filter_region_offset);
+    uint64_t index_region_offset = running_offset;
+    if (!artifacts.index_entries.empty()) {
+        std::memcpy(file_bytes + running_offset, artifacts.index_entries.data(), index_region_size);
+        running_offset += index_region_size;
+    }
+
+    uint64_t filter_meta_offset = running_offset;
+    if (!artifacts.filter_meta.empty()) {
+        std::memcpy(file_bytes + running_offset, artifacts.filter_meta.data(), filter_meta_size);
+        running_offset += filter_meta_size;
+    }
+
+    uint64_t data_meta_offset = running_offset;
+    if (!artifacts.data_meta.empty()) {
+        std::memcpy(file_bytes + running_offset, artifacts.data_meta.data(), data_meta_size);
+        running_offset += data_meta_size;
+    }
+
+    SSTFooter footer{};
+    footer.magic = GP_SST_MAGIC;
+    footer.version = GP_SST_VERSION;
+    footer.key_bytes = GP_KEY_BYTES;
+    footer.value_bytes = GP_VALUE_BYTES;
+    footer.restart_interval = GP_RESTART_INTERVAL;
+    footer.data_block_size = GP_DATA_BLOCK_BYTES;
+    footer.bloom_bits_per_key = GP_BLOOM_BITS_PER_KEY;
+    footer.bloom_hashes = GP_BLOOM_HASHES;
+    footer.num_data_blocks = (uint32_t)block_count;
+    footer.total_kv = (uint32_t)(kv_end - kv_begin);
+    footer.filter_meta_offset = filter_meta_offset;
+    footer.filter_meta_size = (uint32_t)filter_meta_size;
+    footer.data_meta_offset = data_meta_offset;
+    footer.data_meta_size = (uint32_t)data_meta_size;
+    footer.filter_region_offset = filter_region_offset;
+    footer.filter_region_size = computed_filter_region_size;
+    footer.index_region_offset = index_region_offset;
+    footer.index_region_size = (uint32_t)index_region_size;
+    std::memcpy(file_bytes + running_offset, &footer, sizeof(SSTFooter));
+
+    return artifacts;
+}
+
 static inline SSTBuildSet assemble_sst_files_targeted(const std::vector<KVPair>&            kv_array,
                                                       const PackResult&                      pack_result,
                                                       const std::vector<uint8_t>&           filter_bytes,
@@ -287,6 +410,168 @@ static inline SSTBuildSet assemble_sst_files_targeted(const std::vector<KVPair>&
         out.files.push_back(assemble_sst_file_range(kv_array, pack_result, filter_bytes,
                                                     filter_offsets, filter_lengths,
                                                     span.first, span.second));
+    }
+    return out;
+}
+
+static inline SSTBuildSet assemble_sst_files_targeted_gpu_fast(const std::vector<KVPair>&            kv_array,
+                                                               const PackResult&                      pack_result,
+                                                               const std::vector<uint8_t>&           filter_bytes,
+                                                               const std::vector<uint32_t>&          filter_offsets,
+                                                               const std::vector<uint32_t>&          filter_lengths,
+                                                               size_t                                 target_file_bytes = GP_TARGET_FILE_BYTES)
+{
+    SSTBuildSet out;
+    std::vector<std::pair<size_t, size_t>> spans =
+        partition_output_blocks(pack_result, filter_lengths, target_file_bytes);
+    out.files.reserve(spans.size());
+    for (const auto& span : spans) {
+        out.files.push_back(assemble_sst_file_range_fast(kv_array, pack_result, filter_bytes,
+                                                         filter_offsets, filter_lengths,
+                                                         span.first, span.second));
+    }
+    return out;
+}
+
+static inline SSTBuildArtifacts assemble_sst_file_range_from_largest_keys(
+    const std::vector<Key128>&            largest_keys,
+    const PackResult&                     pack_result,
+    const std::vector<uint8_t>&           filter_bytes,
+    const std::vector<uint32_t>&          filter_offsets,
+    const std::vector<uint32_t>&          filter_lengths,
+    size_t                                block_begin,
+    size_t                                block_end)
+{
+    gp_fail_if(block_begin >= block_end, "invalid SST block range");
+
+    SSTBuildArtifacts artifacts;
+    size_t block_count = block_end - block_begin;
+    size_t kv_begin = pack_result.plans[block_begin].first_kv;
+    size_t kv_end = pack_result.plans[block_end - 1].first_kv + pack_result.plans[block_end - 1].num_kv;
+
+    size_t data_region_size = 0;
+    size_t filter_region_size = 0;
+    for (size_t i = block_begin; i < block_end; ++i) {
+        data_region_size += pack_result.block_sizes[i];
+        filter_region_size += sizeof(FilterBlockHeader) + filter_lengths[i];
+    }
+
+    size_t index_region_size = block_count * sizeof(IndexEntry);
+    size_t filter_meta_size = block_count * sizeof(FilterBlockMeta);
+    size_t data_meta_size = block_count * sizeof(DataBlockMeta);
+    size_t total_size = data_region_size + filter_region_size + index_region_size
+                      + filter_meta_size + data_meta_size + sizeof(SSTFooter);
+
+    artifacts.data_meta.resize(block_count);
+    artifacts.filter_meta.resize(block_count);
+    artifacts.index_entries.resize(block_count);
+    artifacts.file_bytes.resize(total_size);
+
+    size_t running_offset = 0;
+    uint8_t* file_bytes_out = artifacts.file_bytes.data();
+
+    for (size_t local = 0; local < block_count; ++local) {
+        size_t global = block_begin + local;
+        const DataBlockPlanEntry& plan = pack_result.plans[global];
+        uint32_t local_first_kv = (uint32_t)(plan.first_kv - kv_begin);
+        uint32_t block_size = pack_result.block_sizes[global];
+
+        artifacts.data_meta[local].offset = running_offset;
+        artifacts.data_meta[local].size = block_size;
+        artifacts.data_meta[local].first_kv = local_first_kv;
+        artifacts.data_meta[local].num_kv = plan.num_kv;
+
+        std::memcpy(file_bytes_out + running_offset,
+                    pack_result.block_buf.data() + pack_result.block_offsets[global],
+                    block_size);
+        running_offset += block_size;
+
+        artifacts.index_entries[local].largest_key = largest_keys[global];
+        artifacts.index_entries[local].data_offset = artifacts.data_meta[local].offset;
+        artifacts.index_entries[local].data_size = block_size;
+        artifacts.index_entries[local].num_kv = plan.num_kv;
+    }
+
+    uint64_t filter_region_offset = running_offset;
+    for (size_t local = 0; local < block_count; ++local) {
+        size_t global = block_begin + local;
+        const DataBlockPlanEntry& plan = pack_result.plans[global];
+        FilterBlockHeader hdr{};
+        hdr.num_keys = plan.num_kv;
+        hdr.byte_vector_len = plan.num_kv * GP_BLOOM_BITS_PER_KEY;
+        hdr.bitvec_len = filter_lengths[global];
+
+        artifacts.filter_meta[local].offset = running_offset;
+        artifacts.filter_meta[local].size = (uint32_t)(sizeof(FilterBlockHeader) + filter_lengths[global]);
+        artifacts.filter_meta[local].byte_vector_len = hdr.byte_vector_len;
+        artifacts.filter_meta[local].num_keys = hdr.num_keys;
+
+        std::memcpy(file_bytes_out + running_offset, &hdr, sizeof(FilterBlockHeader));
+        running_offset += sizeof(FilterBlockHeader);
+        std::memcpy(file_bytes_out + running_offset,
+                    filter_bytes.data() + filter_offsets[global],
+                    filter_lengths[global]);
+        running_offset += filter_lengths[global];
+    }
+
+    uint32_t computed_filter_region_size = (uint32_t)(running_offset - filter_region_offset);
+    uint64_t index_region_offset = running_offset;
+    if (!artifacts.index_entries.empty()) {
+        std::memcpy(file_bytes_out + running_offset, artifacts.index_entries.data(), index_region_size);
+        running_offset += index_region_size;
+    }
+
+    uint64_t filter_meta_offset = running_offset;
+    if (!artifacts.filter_meta.empty()) {
+        std::memcpy(file_bytes_out + running_offset, artifacts.filter_meta.data(), filter_meta_size);
+        running_offset += filter_meta_size;
+    }
+
+    uint64_t data_meta_offset = running_offset;
+    if (!artifacts.data_meta.empty()) {
+        std::memcpy(file_bytes_out + running_offset, artifacts.data_meta.data(), data_meta_size);
+        running_offset += data_meta_size;
+    }
+
+    SSTFooter footer{};
+    footer.magic = GP_SST_MAGIC;
+    footer.version = GP_SST_VERSION;
+    footer.key_bytes = GP_KEY_BYTES;
+    footer.value_bytes = GP_VALUE_BYTES;
+    footer.restart_interval = GP_RESTART_INTERVAL;
+    footer.data_block_size = GP_DATA_BLOCK_BYTES;
+    footer.bloom_bits_per_key = GP_BLOOM_BITS_PER_KEY;
+    footer.bloom_hashes = GP_BLOOM_HASHES;
+    footer.num_data_blocks = (uint32_t)block_count;
+    footer.total_kv = (uint32_t)(kv_end - kv_begin);
+    footer.filter_meta_offset = filter_meta_offset;
+    footer.filter_meta_size = (uint32_t)filter_meta_size;
+    footer.data_meta_offset = data_meta_offset;
+    footer.data_meta_size = (uint32_t)data_meta_size;
+    footer.filter_region_offset = filter_region_offset;
+    footer.filter_region_size = computed_filter_region_size;
+    footer.index_region_offset = index_region_offset;
+    footer.index_region_size = (uint32_t)index_region_size;
+    std::memcpy(file_bytes_out + running_offset, &footer, sizeof(SSTFooter));
+
+    return artifacts;
+}
+
+static inline SSTBuildSet assemble_sst_files_targeted_from_largest_keys(
+    const std::vector<Key128>&            largest_keys,
+    const PackResult&                     pack_result,
+    const std::vector<uint8_t>&           filter_bytes,
+    const std::vector<uint32_t>&          filter_offsets,
+    const std::vector<uint32_t>&          filter_lengths,
+    size_t                                target_file_bytes = GP_TARGET_FILE_BYTES)
+{
+    SSTBuildSet out;
+    std::vector<std::pair<size_t, size_t>> spans =
+        partition_output_blocks(pack_result, filter_lengths, target_file_bytes);
+    out.files.reserve(spans.size());
+    for (const auto& span : spans) {
+        out.files.push_back(assemble_sst_file_range_from_largest_keys(
+            largest_keys, pack_result, filter_bytes, filter_offsets, filter_lengths, span.first, span.second));
     }
     return out;
 }

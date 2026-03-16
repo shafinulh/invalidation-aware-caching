@@ -139,13 +139,18 @@ static std::vector<ParsedSST> load_inputs_with_timing(const std::vector<std::str
 }
 
 static RunSummary run_cpu_once(const std::vector<std::string>& input_paths,
-                               const std::string&               output_dir)
+                               const std::string&               output_dir,
+                               const std::string&               gpu_mode)
 {
     RunSummary summary;
     auto total_start = std::chrono::steady_clock::now();
 
     std::vector<ParsedSST> inputs = load_inputs_with_timing(input_paths, summary.read_parse_ms);
-    CPUCompactionResult cpu = cpu_q_compaction_from_parsed(inputs);
+    CPUCompactionResult cpu;
+    if (gpu_mode == "q_paper" || gpu_mode == "q_paper_overlap") {
+        cpu = cpu_q_compaction_paper_from_parsed(inputs);
+    }
+    else cpu = cpu_q_compaction_from_parsed(inputs);
 
     auto write_start = std::chrono::steady_clock::now();
     write_output_set(cpu.output, output_dir, "cpu_compacted");
@@ -162,13 +167,18 @@ static RunSummary run_cpu_once(const std::vector<std::string>& input_paths,
 }
 
 static RunSummary run_gpu_once(const std::vector<std::string>& input_paths,
-                               const std::string&               output_dir)
+                               const std::string&               output_dir,
+                               const std::string&               gpu_mode)
 {
     RunSummary summary;
     auto total_start = std::chrono::steady_clock::now();
 
     std::vector<ParsedSST> inputs = load_inputs_with_timing(input_paths, summary.read_parse_ms);
-    GPUCompactionResult gpu = gpu_q_compaction_from_parsed(inputs);
+    GPUCompactionResult gpu;
+    if (gpu_mode == "q_pipeline") gpu = gpu_q_compaction_pipeline_from_parsed(inputs);
+    else if (gpu_mode == "q_paper") gpu = gpu_q_compaction_paper_from_parsed(inputs);
+    else if (gpu_mode == "q_paper_overlap") gpu = gpu_q_compaction_paper_overlap_from_parsed(inputs);
+    else gpu = gpu_q_compaction_from_parsed(inputs);
 
     auto write_start = std::chrono::steady_clock::now();
     write_output_set(gpu.output, output_dir, "gpu_compacted");
@@ -192,6 +202,7 @@ int main(int argc, char** argv)
 {
     std::string dataset_dir = "dataset";
     std::string out_dir = "results";
+    std::string gpu_mode = "legacy";
     int runs = 3;
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -202,8 +213,10 @@ int main(int argc, char** argv)
         if (arg == "--dataset") dataset_dir = next();
         else if (arg == "--out_dir") out_dir = next();
         else if (arg == "--runs") runs = std::stoi(next());
+        else if (arg == "--gpu_mode") gpu_mode = next();
         else if (arg == "--help") {
-            std::printf("Usage: %s [--dataset DIR] [--out_dir DIR] [--runs N]\n", argv[0]);
+            std::printf("Usage: %s [--dataset DIR] [--out_dir DIR] [--runs N] [--gpu_mode legacy|q_pipeline|q_paper|q_paper_overlap]\n",
+                        argv[0]);
             return 0;
         } else {
             throw std::runtime_error("unknown option: " + arg);
@@ -220,6 +233,7 @@ int main(int argc, char** argv)
     std::printf("  key bytes: %d  value bytes: %d  restart interval: %d  block size: %d\n",
                 GP_KEY_BYTES, GP_VALUE_BYTES, GP_RESTART_INTERVAL, GP_DATA_BLOCK_BYTES);
     std::printf("  runs: %d  (timed)\n", runs);
+    std::printf("  gpu mode: %s\n", gpu_mode.c_str());
     std::printf("  garbage collection: disabled (Q-compaction only)\n\n");
 
     std::vector<RunSummary> cpu_runs, gpu_runs;
@@ -233,8 +247,8 @@ int main(int argc, char** argv)
         std::snprintf(gpu_dir, sizeof(gpu_dir), "%s/gpu_run%d", out_dir.c_str(), r);
         ensure_dir(cpu_dir);
         ensure_dir(gpu_dir);
-        cpu_runs.push_back(run_cpu_once(input_paths, cpu_dir));
-        gpu_runs.push_back(run_gpu_once(input_paths, gpu_dir));
+        cpu_runs.push_back(run_cpu_once(input_paths, cpu_dir, gpu_mode));
+        gpu_runs.push_back(run_gpu_once(input_paths, gpu_dir, gpu_mode));
     }
 
     std::vector<double> cpu_totals, gpu_totals, cpu_reads, gpu_reads;
@@ -268,17 +282,17 @@ int main(int argc, char** argv)
     std::printf("Output identical: %s\n\n", outputs_match ? "PASS" : "FAIL");
 
     std::printf("Best CPU run breakdown (ms):\n");
-    std::printf("  read+parse %.2f  unpack %.2f  merge %.2f  plan %.2f  bloom %.2f  pack+assemble %.2f  write %.2f\n",
+    std::printf("  read+parse %.2f  unpack %.2f  sort(merge) %.2f  plan %.2f  bloom %.2f  pack+assemble %.2f  write %.2f\n",
                 cpu_best.read_parse_ms, cpu_best.stage.unpack_ms, cpu_best.stage.merge_ms,
                 cpu_best.stage.planning_ms, cpu_best.stage.bloom_ms, cpu_best.stage.pack_ms, cpu_best.write_ms);
     std::printf("  output bytes %zu  data blocks %zu  output files %zu\n\n",
                 cpu_best.output_bytes, cpu_best.output_blocks, cpu_best.output_files);
 
     std::printf("Best GPU run breakdown (ms):\n");
-    std::printf("  read+parse %.2f  unpack %.2f  merge %.2f  plan %.2f  bloom %.2f  pack+assemble %.2f  write %.2f\n",
+    std::printf("  read+parse %.2f  unpack %.2f  sort(merge) %.2f  plan %.2f  bloom %.2f  pack+assemble %.2f  write %.2f\n",
                 gpu_best.read_parse_ms, gpu_best.stage.unpack_ms, gpu_best.stage.merge_ms,
                 gpu_best.stage.planning_ms, gpu_best.stage.bloom_ms, gpu_best.stage.pack_ms, gpu_best.write_ms);
-    std::printf("  kernel-only: unpack %.2f  merge %.2f  bloom %.2f  pack %.2f\n",
+    std::printf("  kernel-only: unpack %.2f  sort(merge) %.2f  bloom %.2f  pack %.2f\n",
                 gpu_best.unpack_kernel_ms, gpu_best.merge_kernel_ms, gpu_best.bloom_kernel_ms, gpu_best.pack_kernel_ms);
     std::printf("  output bytes %zu  data blocks %zu  output files %zu\n",
                 gpu_best.output_bytes, gpu_best.output_blocks, gpu_best.output_files);

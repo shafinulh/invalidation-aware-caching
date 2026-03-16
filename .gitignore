@@ -18,6 +18,7 @@ cuda_test_shafin/dataset/
 cuda_test_shafin/dataset_shafin/
 cuda_test_shafin/results/
 cuda_test_shafin/results_shafin/
+cuda_test_shafin/results_bench*/
 cuda_test_shafin/gpcomp_bench
 cuda_test_shafin/gpcomp_datagen
 cuda_test_shafin/gpcomp_unit_tests

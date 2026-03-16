@@ -55,16 +55,42 @@ Run the end-to-end benchmark:
 ./gpcomp_bench --dataset dataset_shafin --out_dir results_shafin --runs 3
 ```
 
-Current benchmark result on this machine (`RTX 3070`, 4 x ~8 MiB input SSTs):
+Run the stricter Q-compaction pipeline experiment that keeps the merged KV array on device and only materializes host output state near the end:
 
-- CPU total: `135.29 ms` min
-- GPU total: `117.97 ms` min
-- speedup: `1.15x`
-- output SST match: `PASS`
+```bash
+./gpcomp_bench --dataset dataset_shafin --out_dir results_shafin --runs 3 --gpu_mode q_pipeline
+```
+
+Run the paper-shaped Q-compaction mode that plans at restart-group granularity, packs one output SST span per CUDA stream, and preserves CPU/GPU output identity under that layout:
+
+```bash
+./gpcomp_bench --dataset dataset_shafin --out_dir results_shafin --runs 3 --gpu_mode q_paper
+```
+
+Run the experimental overlap variant that precompresses restart groups on a separate GPU stream while restart-group sizes are copied back for CPU planning:
+
+```bash
+./gpcomp_bench --dataset dataset_shafin --out_dir results_shafin --runs 3 --gpu_mode q_paper_overlap
+```
+
+Benchmark snapshots on this machine (`RTX 3070`, 4 x ~8 MiB input SSTs):
+
+- legacy path: CPU `141.27 ms`, GPU `62.28 ms`, speedup `2.27x`, `PASS`
+- strict Q-pipeline path: CPU `136.65 ms`, GPU `98.21 ms`, speedup `1.39x`, `PASS`
+- paper-shaped Q path: CPU `133.83 ms`, GPU `43.77 ms`, speedup `3.06x`, `PASS`
+
+Preserved baseline and current logs:
+
+- baseline: `results_shafin/gpcomp_bench_baseline_20260315.log`
+- current legacy benchmark: `results_shafin/gpcomp_bench.log`
+- legacy snapshot: `results_shafin/gpcomp_bench_legacy_20260315.log`
+- Q-pipeline snapshot: `results_shafin/gpcomp_bench_q_pipeline_20260315.log`
+- Q-paper snapshot: `results_shafin/gpcomp_bench_q_paper_20260315.log`
+- Q-paper overlap snapshot: `results_shafin/gpcomp_bench_q_paper_overlap_20260315.log`
 
 Main remaining optimization gap relative to the paper:
 
-- block planning is still CPU-side and sequential
-- SST assembly is still mostly host-side
-- unpack is launched file-by-file instead of with streams
-- GPU kernels are fast, but host orchestration now dominates the total wall time
+- block planning and output-file partitioning are still CPU-side and sequential
+- index/meta/footer assembly is still host-side rather than GPU-generated
+- unpack still materializes full values instead of key + value references as described in the paper
+- disk I/O is still staged through host memory; the pipeline/GDS path is not wired into the benchmarked Q-compaction flow yet
