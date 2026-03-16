@@ -99,6 +99,7 @@ if (WITH_WINDOWS_UTF8_FILENAMES)
   add_definitions(-DROCKSDB_WINDOWS_UTF8_FILENAMES)
 endif()
 option(ROCKSDB_BUILD_SHARED "Build shared versions of the RocksDB libraries" ON)
+option(USE_GPCOMP "Build GPU compaction bridge/service support" OFF)
 
 if( NOT DEFINED CMAKE_CXX_STANDARD )
   set(CMAKE_CXX_STANDARD 20)
@@ -1018,6 +1019,39 @@ list(APPEND SOURCES
   utilities/transactions/lock/range/range_tree/lib/util/dbt.cc
   utilities/transactions/lock/range/range_tree/lib/util/memarena.cc)
 
+if(USE_GPCOMP)
+  set(GPCOMP_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../cuda_test_shafin")
+  find_program(GPCOMP_NVCC_EXECUTABLE nvcc REQUIRED)
+  find_package(CUDAToolkit REQUIRED)
+
+  set(GPCOMP_BRIDGE_OBJECT "${CMAKE_CURRENT_BINARY_DIR}/gpcomp_rocksdb_bridge.o")
+  set(GPCOMP_BRIDGE_LIB "${CMAKE_CURRENT_BINARY_DIR}/libgpcomp_rocksdb_bridge.a")
+  add_custom_command(
+    OUTPUT ${GPCOMP_BRIDGE_LIB}
+    COMMAND ${GPCOMP_NVCC_EXECUTABLE}
+            -O2
+            -std=c++17
+            -ccbin ${CMAKE_CXX_COMPILER}
+            -allow-unsupported-compiler
+            -Xcompiler -fPIC
+            -Xcompiler -U_FORTIFY_SOURCE
+            -Xcompiler -D_FORTIFY_SOURCE=0
+            -c
+            -o ${GPCOMP_BRIDGE_OBJECT}
+            ${GPCOMP_SOURCE_DIR}/gpcomp_rocksdb_bridge.cu
+    COMMAND ${CMAKE_AR} rcs ${GPCOMP_BRIDGE_LIB} ${GPCOMP_BRIDGE_OBJECT}
+    DEPENDS
+      ${GPCOMP_SOURCE_DIR}/gpcomp_rocksdb_bridge.cu
+      ${GPCOMP_SOURCE_DIR}/gpcomp_rocksdb_bridge.h
+      ${GPCOMP_SOURCE_DIR}/gpcomp_common.cuh
+      ${GPCOMP_SOURCE_DIR}/gpcomp_merge.cuh
+    VERBATIM)
+  add_custom_target(gpcomp_bridge_build DEPENDS ${GPCOMP_BRIDGE_LIB})
+  list(APPEND SOURCES db/compaction/gpu_compaction_service.cc)
+else()
+  list(APPEND SOURCES db/compaction/gpu_compaction_service_stub.cc)
+endif()
+
 message(STATUS "ROCKSDB_PLUGINS: ${ROCKSDB_PLUGINS}")
 if ( ROCKSDB_PLUGINS )
   string(REPLACE " " ";" PLUGINS ${ROCKSDB_PLUGINS})
@@ -1191,6 +1225,13 @@ target_include_directories(${ROCKSDB_STATIC_LIB} PUBLIC
   $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>)
 target_link_libraries(${ROCKSDB_STATIC_LIB} PRIVATE
   ${THIRDPARTY_LIBS} ${SYSTEM_LIBS})
+if(USE_GPCOMP)
+  add_dependencies(${ROCKSDB_STATIC_LIB} gpcomp_bridge_build)
+  target_include_directories(${ROCKSDB_STATIC_LIB} PRIVATE ${GPCOMP_SOURCE_DIR})
+  target_link_libraries(${ROCKSDB_STATIC_LIB} PUBLIC
+    ${GPCOMP_BRIDGE_LIB}
+    CUDA::cudart)
+endif()
 
 if(ROCKSDB_BUILD_SHARED)
   add_library(${ROCKSDB_SHARED_LIB} SHARED ${SOURCES} ${BUILD_VERSION_CC})
@@ -1198,6 +1239,13 @@ if(ROCKSDB_BUILD_SHARED)
     $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>)
   target_link_libraries(${ROCKSDB_SHARED_LIB} PRIVATE
     ${THIRDPARTY_LIBS} ${SYSTEM_LIBS})
+  if(USE_GPCOMP)
+    add_dependencies(${ROCKSDB_SHARED_LIB} gpcomp_bridge_build)
+    target_include_directories(${ROCKSDB_SHARED_LIB} PRIVATE ${GPCOMP_SOURCE_DIR})
+    target_link_libraries(${ROCKSDB_SHARED_LIB} PUBLIC
+      ${GPCOMP_BRIDGE_LIB}
+      CUDA::cudart)
+  endif()
 
   if(WIN32)
     set_target_properties(${ROCKSDB_SHARED_LIB} PROPERTIES
@@ -1371,6 +1419,7 @@ if(WITH_TESTS)
         db/compaction/compaction_iterator_test.cc
         db/compaction/compaction_picker_test.cc
         db/compaction/compaction_service_test.cc
+        db/compaction/gpu_compaction_hook_benchmark_test.cc
         db/compaction/tiered_compaction_test.cc
         db/comparator_db_test.cc
         db/corruption_test.cc
@@ -1555,6 +1604,9 @@ if(WITH_TESTS)
         utilities/write_batch_with_index/write_batch_with_index_test.cc
 	${PLUGIN_TESTS}
     )
+    if(USE_GPCOMP)
+      list(APPEND TESTS db/compaction/gpu_compaction_service_test.cc)
+    endif()
   endif()
 
   set(TESTUTIL_SOURCE

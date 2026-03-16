@@ -41,6 +41,7 @@ LIB_SOURCES =                                                   \
   db/compaction/compaction_picker_level.cc                      \
   db/compaction/compaction_picker_universal.cc                  \
   db/compaction/compaction_service_job.cc                       \
+  db/compaction/gpu_compaction_service_stub.cc                  \
   db/compaction/compaction_state.cc                             \
   db/compaction/compaction_outputs.cc                           \
   db/compaction/sst_partitioner.cc                              \
@@ -482,6 +483,7 @@ TEST_MAIN_SOURCES =                                                     \
   db/compaction/compaction_job_stats_test.cc                            \
   db/compaction/compaction_picker_test.cc                               \
   db/compaction/compaction_service_test.cc                              \
+  db/compaction/gpu_compaction_hook_benchmark_test.cc                   \
   db/compaction/tiered_compaction_test.cc                               \
   db/comparator_db_test.cc                                              \
   db/corruption_test.cc                                                 \
@@ -665,6 +667,12 @@ TEST_MAIN_SOURCES =                                                     \
   utilities/types_util_test.cc                                          \
   utilities/util_merge_operators_test.cc                                \
   utilities/write_batch_with_index/write_batch_with_index_test.cc       \
+
+ifeq ($(USE_GPCOMP),1)
+LIB_SOURCES := $(filter-out db/compaction/gpu_compaction_service_stub.cc,$(LIB_SOURCES))
+LIB_SOURCES += db/compaction/gpu_compaction_service.cc
+TEST_MAIN_SOURCES += db/compaction/gpu_compaction_service_test.cc
+endif
 
 TEST_MAIN_SOURCES_C =                                                   \
   db/c_test.c                                                           \

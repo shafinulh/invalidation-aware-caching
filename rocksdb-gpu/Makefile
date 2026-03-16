@@ -221,6 +221,24 @@ endif
 #-----------------------------------------------
 include src.mk
 
+GPCOMP_LINK_DEPS :=
+ifeq ($(USE_GPCOMP),1)
+GPCOMP_DIR ?= $(abspath ../cuda_test_shafin)
+GPCOMP_LIB := $(GPCOMP_DIR)/libgpcomp_rocksdb_bridge.a
+CUDA_HOME ?= $(patsubst %/bin/nvcc,%,$(shell command -v nvcc 2>/dev/null))
+ifeq ($(CUDA_HOME),)
+CUDA_HOME := /usr/local/cuda
+endif
+GPCOMP_CUDA_LIBDIR ?= $(if $(wildcard $(CUDA_HOME)/lib64/libcudart.so),$(CUDA_HOME)/lib64,$(CUDA_HOME)/targets/x86_64-linux/lib)
+GPCOMP_LINK_DEPS := $(GPCOMP_LIB)
+CXXFLAGS += -I$(GPCOMP_DIR)
+CFLAGS += -I$(GPCOMP_DIR)
+LDFLAGS += $(GPCOMP_LIB) -L$(GPCOMP_CUDA_LIBDIR) -Wl,-rpath,$(GPCOMP_CUDA_LIBDIR) -lcudart
+
+$(GPCOMP_LIB):
+	$(MAKE) -C $(GPCOMP_DIR) libgpcomp_rocksdb_bridge.a
+endif
+
 AM_DEFAULT_VERBOSITY ?= 0
 
 AM_V_GEN = $(am__v_GEN_$(V))
@@ -839,7 +857,7 @@ $(SHARED3): $(SHARED4)
 	ln -fs $(SHARED4) $(SHARED3)
 
 endif   # PLATFORM_SHARED_VERSIONED
-$(SHARED4): $(LIB_OBJECTS)
+$(SHARED4): $(LIB_OBJECTS) $(GPCOMP_LINK_DEPS)
 	$(AM_V_CCLD) $(CXX) $(PLATFORM_SHARED_LDFLAGS)$(SHARED3) $(LIB_OBJECTS) $(LDFLAGS) -o $@
 endif  # PLATFORM_SHARED_EXT
 
@@ -1628,6 +1646,12 @@ compaction_job_stats_test: $(OBJ_DIR)/db/compaction/compaction_job_stats_test.o 
 	$(AM_LINK)
 
 compaction_service_test: $(OBJ_DIR)/db/compaction/compaction_service_test.o $(TEST_LIBRARY) $(LIBRARY)
+	$(AM_LINK)
+
+gpu_compaction_service_test: $(OBJ_DIR)/db/compaction/gpu_compaction_service_test.o $(TEST_LIBRARY) $(LIBRARY) $(GPCOMP_LINK_DEPS)
+	$(AM_LINK)
+
+gpu_compaction_hook_benchmark_test: $(OBJ_DIR)/db/compaction/gpu_compaction_hook_benchmark_test.o $(TEST_LIBRARY) $(LIBRARY)
 	$(AM_LINK)
 
 compact_for_tiering_collector_test: $(OBJ_DIR)/utilities/table_properties_collectors/compact_for_tiering_collector_test.o $(TEST_LIBRARY) $(LIBRARY)

@@ -70,6 +70,7 @@
 #include "rocksdb/utilities/options_util.h"
 #include "rocksdb/utilities/replayer.h"
 #include "rocksdb/utilities/sim_cache.h"
+#include "rocksdb/utilities/gpu_compaction_service.h"
 #include "rocksdb/utilities/transaction.h"
 #include "rocksdb/utilities/transaction_db.h"
 #include "rocksdb/write_batch.h"
@@ -863,6 +864,10 @@ static bool ValidateCacheNumshardbits(const char* flagname, int32_t value) {
 
 DEFINE_bool(verify_checksum, true,
             "Verify checksum for every block read from storage");
+DEFINE_bool(compaction_verify_record_count,
+            ROCKSDB_NAMESPACE::Options().compaction_verify_record_count,
+            "Verify that the compaction input record count matches the number "
+            "of records processed.");
 
 DEFINE_int32(checksum_type,
              ROCKSDB_NAMESPACE::BlockBasedTableOptions().checksum,
@@ -1673,6 +1678,16 @@ DEFINE_bool(print_malloc_stats, false,
             "Print malloc stats to stdout after benchmarks finish.");
 
 DEFINE_bool(disable_auto_compactions, false, "Do not auto trigger compactions");
+DEFINE_bool(use_gpu_compaction_service, false,
+            "Install the in-process GPU compaction service for eligible "
+            "L0/L1 -> L1 compactions.");
+DEFINE_int32(gpu_compaction_cuda_device, 0,
+             "CUDA device index for the GPU compaction service.");
+DEFINE_string(gpu_compaction_scratch_root, "",
+              "Optional scratch root for GPU compaction service outputs.");
+DEFINE_bool(gpu_compaction_fallback_on_unsupported_input, true,
+            "If true, unsupported GPU compaction inputs fall back to the "
+            "local CPU compaction path instead of failing.");
 
 DEFINE_uint64(wal_ttl_seconds, 0, "Set the TTL for the WAL Files in seconds.");
 DEFINE_uint64(wal_size_limit_MB, 0,
@@ -5115,6 +5130,8 @@ class Benchmark {
     options.table_cache_numshardbits = FLAGS_table_cache_numshardbits;
     options.max_compaction_bytes = FLAGS_max_compaction_bytes;
     options.disable_auto_compactions = FLAGS_disable_auto_compactions;
+    options.compaction_verify_record_count =
+        FLAGS_compaction_verify_record_count;
     options.optimize_filters_for_hits = FLAGS_optimize_filters_for_hits;
     options.paranoid_checks = FLAGS_paranoid_checks;
     options.force_consistency_checks = FLAGS_force_consistency_checks;
@@ -5236,6 +5253,8 @@ class Benchmark {
     // a guaranteed failure when they are needed.
     options.create_missing_column_families = true;
     options.create_if_missing = true;
+    options.compaction_verify_record_count =
+        FLAGS_compaction_verify_record_count;
 
     if (options.statistics == nullptr) {
       options.statistics = dbstats;
@@ -5286,6 +5305,24 @@ class Benchmark {
     if (FLAGS_enable_cpu_prio) {
       options.env->LowerThreadPoolCPUPriority(Env::LOW);
       options.env->LowerThreadPoolCPUPriority(Env::HIGH);
+    }
+
+    if (FLAGS_use_gpu_compaction_service) {
+      GpuCompactionServiceOptions gpu_service_options;
+      gpu_service_options.cuda_device = FLAGS_gpu_compaction_cuda_device;
+      gpu_service_options.scratch_root = FLAGS_gpu_compaction_scratch_root;
+      gpu_service_options.fallback_on_unsupported_input =
+          FLAGS_gpu_compaction_fallback_on_unsupported_input;
+
+      std::shared_ptr<CompactionService> gpu_compaction_service;
+      Status s = NewGpuCompactionService(options, gpu_service_options,
+                                         &gpu_compaction_service);
+      if (!s.ok()) {
+        fprintf(stderr, "Failed to initialize GPU compaction service: %s\n",
+                s.ToString().c_str());
+        db_bench_exit(1);
+      }
+      options.compaction_service = gpu_compaction_service;
     }
 
     if (FLAGS_sine_write_rate) {

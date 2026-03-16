@@ -31,6 +31,9 @@ PRELOAD_THREADS="${PRELOAD_THREADS:-${THREADS}}"
 PRELOAD_KEYSPACE_MULTIPLIER="${PRELOAD_KEYSPACE_MULTIPLIER:-20}"
 PRELOAD_MIN_NUM_KEYS="${PRELOAD_MIN_NUM_KEYS:-200000000}"
 COMPACTION_BG_THREADS="${COMPACTION_BG_THREADS:-1}"
+DB_BENCH_EXTRA_FLAGS="${DB_BENCH_EXTRA_FLAGS:-}"
+LOAD_DB_BENCH_EXTRA_FLAGS="${LOAD_DB_BENCH_EXTRA_FLAGS:-${DB_BENCH_EXTRA_FLAGS}}"
+COMPACTION_DB_BENCH_EXTRA_FLAGS="${COMPACTION_DB_BENCH_EXTRA_FLAGS:-${DB_BENCH_EXTRA_FLAGS}}"
 
 LOAD_PERF_LEVEL="${LOAD_PERF_LEVEL:-0}"
 LOAD_METRICS_INTERVAL_MS="${LOAD_METRICS_INTERVAL_MS:-0}"
@@ -65,6 +68,16 @@ ceil_div() {
   local numerator="$1"
   local denominator="$2"
   printf "%s\n" "$(( (numerator + denominator - 1) / denominator ))"
+}
+
+split_flag_string() {
+  local flag_string="$1"
+  local -n out_ref="$2"
+  out_ref=()
+  if [[ -n "${flag_string}" ]]; then
+    # Deliberately split on shell whitespace for simple extra-flag injection.
+    read -r -a out_ref <<< "${flag_string}"
+  fi
 }
 
 compute_target_bytes() {
@@ -220,6 +233,11 @@ run_with_host_metrics_interval() {
 
 EXPERIMENT_ROOT="${OUTPUT_DIR}/compaction_parallelism/${RUN_ID}"
 mkdir -p "${EXPERIMENT_ROOT}/metadata"
+load_db_bench_extra_flags=()
+compaction_db_bench_extra_flags=()
+split_flag_string "${LOAD_DB_BENCH_EXTRA_FLAGS}" load_db_bench_extra_flags
+split_flag_string "${COMPACTION_DB_BENCH_EXTRA_FLAGS}" \
+  compaction_db_bench_extra_flags
 write_kv_metadata "${EXPERIMENT_ROOT}/metadata/experiment.env" \
   RUN_ID "${RUN_ID}" \
   COMPACTION_BENCH "${COMPACTION_BENCH}" \
@@ -228,6 +246,8 @@ write_kv_metadata "${EXPERIMENT_ROOT}/metadata/experiment.env" \
   PRELOAD_KEYSPACE_MULTIPLIER "${PRELOAD_KEYSPACE_MULTIPLIER}" \
   PRELOAD_MIN_NUM_KEYS "${PRELOAD_MIN_NUM_KEYS}" \
   COMPACTION_BG_THREADS "${COMPACTION_BG_THREADS}" \
+  LOAD_DB_BENCH_EXTRA_FLAGS "${LOAD_DB_BENCH_EXTRA_FLAGS}" \
+  COMPACTION_DB_BENCH_EXTRA_FLAGS "${COMPACTION_DB_BENCH_EXTRA_FLAGS}" \
   COMPACTION_PERF_LEVEL "${COMPACTION_PERF_LEVEL}" \
   COMPACTION_METRICS_INTERVAL_MS "${COMPACTION_METRICS_INTERVAL_MS}" \
   COMPACTION_HOST_METRICS_INTERVAL_SEC "${COMPACTION_HOST_METRICS_INTERVAL_SEC}" \
@@ -326,6 +346,7 @@ for sst_size_mb in ${SST_SIZE_MB_LIST}; do
             --use_existing_db=0 \
             --subcompactions=1 \
             --max_background_compactions=1 \
+            "${load_db_bench_extra_flags[@]}" \
             "${load_common_flags[@]}"
 
         copy_latest_rocksdb_options "${preload_db_dir}" "${preload_run_dir}" "after_load"
@@ -411,6 +432,7 @@ for sst_size_mb in ${SST_SIZE_MB_LIST}; do
             --subcompactions="${subcomp_threads}" \
             --max_background_compactions="${COMPACTION_BG_THREADS}" \
             "${metrics_file_flag[@]}" \
+            "${compaction_db_bench_extra_flags[@]}" \
             "${compact_common_flags[@]}"
 
         if [[ "${COMPACTION_BENCH}" == "compact0" || "${COMPACTION_BENCH}" == "compact1" ]]; then
