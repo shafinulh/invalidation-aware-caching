@@ -147,7 +147,7 @@ static RunSummary run_cpu_once(const std::vector<std::string>& input_paths,
 
     std::vector<ParsedSST> inputs = load_inputs_with_timing(input_paths, summary.read_parse_ms);
     CPUCompactionResult cpu;
-    if (gpu_mode == "q_paper" || gpu_mode == "q_paper_overlap") {
+    if (gpu_mode == "q_paper_with_plan") {
         cpu = cpu_q_compaction_paper_from_parsed(inputs);
     }
     else cpu = cpu_q_compaction_from_parsed(inputs);
@@ -175,9 +175,8 @@ static RunSummary run_gpu_once(const std::vector<std::string>& input_paths,
 
     std::vector<ParsedSST> inputs = load_inputs_with_timing(input_paths, summary.read_parse_ms);
     GPUCompactionResult gpu;
-    if (gpu_mode == "q_pipeline") gpu = gpu_q_compaction_pipeline_from_parsed(inputs);
-    else if (gpu_mode == "q_paper") gpu = gpu_q_compaction_paper_from_parsed(inputs);
-    else if (gpu_mode == "q_paper_overlap") gpu = gpu_q_compaction_paper_overlap_from_parsed(inputs);
+    if (gpu_mode == "q_plan_on_gpu_slow") gpu = gpu_q_compaction_pipeline_from_parsed(inputs);
+    else if (gpu_mode == "q_paper_with_plan") gpu = gpu_q_compaction_paper_from_parsed(inputs);
     else gpu = gpu_q_compaction_from_parsed(inputs);
 
     auto write_start = std::chrono::steady_clock::now();
@@ -202,7 +201,7 @@ int main(int argc, char** argv)
 {
     std::string dataset_dir = "dataset";
     std::string out_dir = "results";
-    std::string gpu_mode = "legacy";
+    std::string gpu_mode = "baseline";
     int runs = 3;
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -215,7 +214,7 @@ int main(int argc, char** argv)
         else if (arg == "--runs") runs = std::stoi(next());
         else if (arg == "--gpu_mode") gpu_mode = next();
         else if (arg == "--help") {
-            std::printf("Usage: %s [--dataset DIR] [--out_dir DIR] [--runs N] [--gpu_mode legacy|q_pipeline|q_paper|q_paper_overlap]\n",
+            std::printf("Usage: %s [--dataset DIR] [--out_dir DIR] [--runs N] [--gpu_mode baseline|q_plan_on_gpu_slow|q_paper_with_plan]\n",
                         argv[0]);
             return 0;
         } else {
