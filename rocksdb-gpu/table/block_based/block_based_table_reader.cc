@@ -2948,6 +2948,38 @@ bool BlockBasedTable::EraseFromCache(const BlockHandle& handle) const {
   return cache->Release(cache_handle, /*erase_if_last_ref=*/true);
 }
 
+size_t BlockBasedTable::CountBlocksInCache() const {
+  assert(rep_ != nullptr);
+
+  Cache* const cache = rep_->table_options.block_cache.get();
+  if (cache == nullptr || !rep_->index_reader) {
+    return 0;
+  }
+
+  size_t count = 0;
+  IndexBlockIter iiter_on_stack;
+  ReadOptions ropts;
+  ropts.read_tier = kBlockCacheTier;  // No I/O
+  auto iiter = NewIndexIterator(ropts, /*disable_prefix_seek=*/false,
+                                &iiter_on_stack, /*get_context=*/nullptr,
+                                /*lookup_context=*/nullptr);
+  std::unique_ptr<InternalIteratorBase<IndexValue>> iiter_unique_ptr;
+  if (iiter != &iiter_on_stack) {
+    iiter_unique_ptr.reset(iiter);
+  }
+
+  for (iiter->SeekToFirst(); iiter->Valid(); iiter->Next()) {
+    CacheKey key = GetCacheKey(rep_->base_cache_key, iiter->value().handle);
+    Cache::Handle* h = cache->Lookup(key.AsSlice());
+    if (h != nullptr) {
+      cache->Release(h);
+      count++;
+    }
+  }
+  iiter->status().PermitUncheckedError();
+  return count;
+}
+
 bool BlockBasedTable::TEST_BlockInCache(const BlockHandle& handle) const {
   assert(rep_ != nullptr);
 

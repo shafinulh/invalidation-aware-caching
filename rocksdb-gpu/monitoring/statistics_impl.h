@@ -70,6 +70,11 @@ class StatisticsImpl : public Statistics {
 
   const Customizable* Inner() const override { return stats_.get(); }
 
+ // Returns a merged snapshot of the histogram for the given type.
+  // The returned HistogramImpl aggregates all per-core data.
+  std::unique_ptr<HistogramImpl> getHistogramImplLocked(
+      uint32_t histogram_type) const;
+
  private:
   // If non-nullptr, forwards updates to the object pointed to by `stats_`.
   std::shared_ptr<Statistics> stats_;
@@ -106,8 +111,6 @@ class StatisticsImpl : public Statistics {
   CoreLocalArray<StatisticsData> per_core_stats_;
 
   uint64_t getTickerCountLocked(uint32_t ticker_type) const;
-  std::unique_ptr<HistogramImpl> getHistogramImplLocked(
-      uint32_t histogram_type) const;
   void setTickerCountLocked(uint32_t ticker_type, uint64_t count);
 };
 

@@ -217,6 +217,10 @@ class BlockBasedTable : public TableReader {
 
   void MarkObsolete(uint32_t uncache_aggressiveness) override;
 
+  // Count how many data blocks belonging to this table are currently
+  // present in the block cache (no I/O, cache-only lookup).
+  size_t CountBlocksInCache() const override;
+
   ~BlockBasedTable();
 
   bool TEST_FilterBlockInCache() const;

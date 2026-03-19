@@ -13,12 +13,14 @@
 #include "db/db_impl/db_impl.h"
 #include "db/event_helpers.h"
 #include "db/memtable_list.h"
+#include "db/table_cache.h"
 #include "file/file_util.h"
 #include "file/filename.h"
 #include "file/sst_file_manager_impl.h"
 #include "logging/logging.h"
 #include "port/port.h"
 #include "rocksdb/options.h"
+#include "table/block_based/block_based_table_reader.h"
 #include "util/autovector.h"
 #include "util/defer.h"
 
@@ -444,6 +446,81 @@ void DBImpl::PurgeObsoleteFiles(JobContext& state, bool schedule_only) {
       candidate_files.size() + state.sst_delete_files.size() +
       state.blob_delete_files.size() + state.log_delete_files.size() +
       state.manifest_delete_files.size());
+  // === INSTRUMENTATION: Count block cache entries about to be evicted ===
+  {
+    // Collect files that are actually being deleted (not metadata-only)
+    size_t total_blocks_to_evict = 0;
+    size_t files_with_cached_blocks = 0;
+    size_t total_obsolete_files = 0;
+    Cache* block_cache = nullptr;
+
+    for (const auto& file : state.sst_delete_files) {
+      if (file.only_delete_metadata) {
+        continue;
+      }
+      total_obsolete_files++;
+
+      auto number = file.metadata->fd.GetNumber();
+      auto* h = file.metadata->table_reader_handle;
+
+      // Look up the TableReader in table cache
+      Cache::Handle* table_handle = h;
+      bool did_own_lookup = false;
+      if (table_handle == nullptr) {
+        table_handle = TableCache::Lookup(table_cache_.get(), number);
+        did_own_lookup = true;
+      }
+      if (table_handle != nullptr) {
+        auto* reader = static_cast<TableReader*>(
+            table_cache_->Value(table_handle));
+        size_t cached_blocks = reader->CountBlocksInCache();
+
+        // Get block cache pointer from the reader if we haven't yet
+        if (block_cache == nullptr) {
+          auto* bbt = dynamic_cast<BlockBasedTable*>(reader);
+          if (bbt && bbt->get_rep()) {
+            block_cache = bbt->get_rep()->table_options.block_cache.get();
+          }
+        }
+
+        if (cached_blocks > 0) {
+          files_with_cached_blocks++;
+          total_blocks_to_evict += cached_blocks;
+          ROCKS_LOG_INFO(
+              immutable_db_options_.info_log,
+              "[CACHE-EVICT] File #%" PRIu64 ": %zu data blocks in cache",
+              number, cached_blocks);
+        }
+
+        // Release handle only if we did our own lookup
+        if (did_own_lookup) {
+          table_cache_->Release(table_handle);
+        }
+      }
+    }
+
+    // Get total block cache stats and log summary
+    if (block_cache != nullptr && total_obsolete_files > 0) {
+      size_t total_cache_entries = block_cache->GetOccupancyCount();
+      size_t cache_usage = block_cache->GetUsage();
+      size_t cache_capacity = block_cache->GetCapacity();
+      double evict_pct = total_cache_entries > 0
+                             ? (100.0 * total_blocks_to_evict /
+                                total_cache_entries)
+                             : 0.0;
+      ROCKS_LOG_WARN(
+          immutable_db_options_.info_log,
+          "[CACHE-EVICT] Compaction purge: %zu blocks from %zu/%zu obsolete "
+          "files will be evicted from block cache. "
+          "Total cache entries: %zu, eviction%%: %.2f%%, "
+          "cache usage: %zu / %zu bytes (%.1f%%)",
+          total_blocks_to_evict, files_with_cached_blocks, total_obsolete_files,
+          total_cache_entries, evict_pct, cache_usage, cache_capacity,
+          cache_capacity > 0 ? (100.0 * cache_usage / cache_capacity) : 0.0);
+    }
+  }
+  // === END INSTRUMENTATION ===
+
   // We may ignore the dbname when generating the file names.
   for (auto& file : state.sst_delete_files) {
     auto* handle = file.metadata->table_reader_handle;

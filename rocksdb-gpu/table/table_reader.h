@@ -199,6 +199,11 @@ class TableReader {
   virtual void MarkObsolete(uint32_t /*uncache_aggressiveness*/) {
     // no-op as default
   }
+
+  // Count how many data blocks belonging to this table are currently
+  // present in the block cache. Used for compaction cache-eviction
+  // instrumentation. Returns 0 by default (unsupported).
+  virtual size_t CountBlocksInCache() const { return 0; }
 };
 
 }  // namespace ROCKSDB_NAMESPACE

@@ -2421,6 +2421,52 @@ class MetricsCollectorAgent {
   static constexpr size_t kNumTickers =
       sizeof(kTickers) / sizeof(kTickers[0]);
 
+  static constexpr size_t kNumBuckets = 109;
+
+  // Compute a percentile from a delta-bucket array using the same algorithm
+  // as HistogramStat::Percentile(), but without min/max clamping.
+  static double PercentileFromBuckets(const uint64_t (&buckets)[kNumBuckets],
+                                      uint64_t total_count, double p) {
+    if (total_count == 0) return 0.0;
+    static const HistogramBucketMapper mapper;
+    double threshold = total_count * (p / 100.0);
+    uint64_t cumulative = 0;
+    for (size_t b = 0; b < kNumBuckets; b++) {
+      cumulative += buckets[b];
+      if (cumulative >= threshold) {
+        uint64_t left_point = (b == 0) ? 0 : mapper.BucketLimit(b - 1);
+        uint64_t right_point = mapper.BucketLimit(b);
+        uint64_t left_sum = cumulative - buckets[b];
+        uint64_t right_left_diff = cumulative - left_sum;
+        double pos = 0;
+        if (right_left_diff != 0) {
+          pos = (threshold - left_sum) / right_left_diff;
+        }
+        return left_point + (right_point - left_point) * pos;
+      }
+    }
+    return 0.0;
+  }
+
+  // Snapshot bucket counts from a merged histogram into an output array.
+  // Returns the total count across all buckets.
+  uint64_t SnapshotBuckets(uint32_t hist_type,
+                           uint64_t (&out)[kNumBuckets]) const {
+    auto* impl = dynamic_cast<StatisticsImpl*>(stats_.get());
+    if (!impl) {
+      memset(out, 0, sizeof(out));
+      return 0;
+    }
+    auto hist = impl->getHistogramImplLocked(hist_type);
+    auto& st = hist->TEST_GetStats();
+    uint64_t total = 0;
+    for (size_t b = 0; b < kNumBuckets; b++) {
+      out[b] = st.bucket_at(b);
+      total += out[b];
+    }
+    return total;
+  }
+
   std::string Header() const {
     return "secs_elapsed"
            ",cache_hit,cache_miss,cache_hit_rate"
@@ -2472,14 +2518,41 @@ class MetricsCollectorAgent {
       double hit_rate =
           (hit + miss > 0) ? static_cast<double>(hit) / (hit + miss) : 0.0;
 
-      // --- histogram snapshots (cumulative p50/p95/p99, interval deltas) ---
+      // --- per-interval histogram percentiles via bucket deltas ---
+      // Snapshot current cumulative bucket counts.
+      uint64_t cur_get_buckets[kNumBuckets];
+      uint64_t cur_write_buckets[kNumBuckets];
+      SnapshotBuckets(DB_GET, cur_get_buckets);
+      SnapshotBuckets(DB_WRITE, cur_write_buckets);
+
+      // Compute delta buckets for this interval.
+      uint64_t delta_get_buckets[kNumBuckets];
+      uint64_t delta_write_buckets[kNumBuckets];
+      uint64_t get_interval_count = 0;
+      uint64_t write_interval_count = 0;
+      for (size_t b = 0; b < kNumBuckets; b++) {
+        delta_get_buckets[b] = cur_get_buckets[b] - prev_get_buckets_[b];
+        get_interval_count += delta_get_buckets[b];
+        delta_write_buckets[b] = cur_write_buckets[b] - prev_write_buckets_[b];
+        write_interval_count += delta_write_buckets[b];
+      }
+      memcpy(prev_get_buckets_, cur_get_buckets, sizeof(prev_get_buckets_));
+      memcpy(prev_write_buckets_, cur_write_buckets, sizeof(prev_write_buckets_));
+
+      // Per-interval percentiles.
+      double get_p50 = PercentileFromBuckets(delta_get_buckets, get_interval_count, 50.0);
+      double get_p95 = PercentileFromBuckets(delta_get_buckets, get_interval_count, 95.0);
+      double get_p99 = PercentileFromBuckets(delta_get_buckets, get_interval_count, 99.0);
+      double write_p50 = PercentileFromBuckets(delta_write_buckets, write_interval_count, 50.0);
+      double write_p95 = PercentileFromBuckets(delta_write_buckets, write_interval_count, 95.0);
+      double write_p99 = PercentileFromBuckets(delta_write_buckets, write_interval_count, 99.0);
+
+      // Per-interval avg from cumulative sum/count.
       HistogramData get_hist, write_hist, rb_hist;
       stats_->histogramData(DB_GET, &get_hist);
       stats_->histogramData(DB_WRITE, &write_hist);
       stats_->histogramData(READ_BLOCK_GET_MICROS, &rb_hist);
 
-      // Compute interval-delta counts/avg for each histogram.
-      uint64_t get_interval_count = get_hist.count - prev_get_count_;
       uint64_t get_interval_sum =
           static_cast<uint64_t>(get_hist.sum) - prev_get_sum_;
       double get_interval_avg =
@@ -2489,7 +2562,6 @@ class MetricsCollectorAgent {
       prev_get_count_ = get_hist.count;
       prev_get_sum_ = static_cast<uint64_t>(get_hist.sum);
 
-      uint64_t write_interval_count = write_hist.count - prev_write_count_;
       uint64_t write_interval_sum =
           static_cast<uint64_t>(write_hist.sum) - prev_write_sum_;
       double write_interval_avg =
@@ -2523,9 +2595,9 @@ class MetricsCollectorAgent {
           deltas[8], deltas[9],   // bytes
           deltas[10],             // stall_micros
           deltas[11], deltas[12], // compact bytes
-          get_hist.median, get_hist.percentile95, get_hist.percentile99,
+          get_p50, get_p95, get_p99,
           get_interval_avg, get_interval_count,
-          write_hist.median, write_hist.percentile95, write_hist.percentile99,
+          write_p50, write_p95, write_p99,
           write_interval_avg, write_interval_count,
           rb_hist.percentile95);
 
@@ -2552,6 +2624,8 @@ class MetricsCollectorAgent {
   uint64_t prev_get_sum_ = 0;
   uint64_t prev_write_count_ = 0;
   uint64_t prev_write_sum_ = 0;
+  uint64_t prev_get_buckets_[kNumBuckets]{};
+  uint64_t prev_write_buckets_[kNumBuckets]{};
 };
 
 constexpr uint32_t MetricsCollectorAgent::kTickers[];
