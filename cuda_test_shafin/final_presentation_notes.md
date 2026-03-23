@@ -19,14 +19,28 @@ KV Groups (groups of KV pairs) = 4 KV pairs (restart interval)
 Data blocks (groups of KV groups) = 32KB
 
 
-************************Q-COMPACTION WITHOUT PLAN = TODO***************************************************
+************************Q-COMPACTION WITHOUT PLAN***************************************************
 
-KV Pairs: AAAA AAAA AAAB AAAC SYBS MFLK SLDJ SDNK
-KV groups = (AAAA AAAA AAAB AAAC) (SYBS MFLK DLDJ XDNK)
-with prefix compression = (AAAA _ B C)=10 (SYBS MFLK DLDJ XDNK)=16
-PLAN = Datablock size/(KV pair size * KV group len) = 1
-GPU can now split up KV groups statically into data blocks without needing to do any planning on CPU
-1 data block is max of 12 Bytes: [(AAAA _ B C)] [(SYBS MFLK DLDJ XDNK)]
+KV Pairs: AAAA0001 AAAA0002 AAAA0003 AAAA0004
+KV groups = (AAAA0001 AAAA0002 AAAA0003 AAAA0004)
+with prefix compression = (AAAA0001, +2(02), +2(03), +2(04))
+------------------------------------
+NO TRANSFER TO CPU
+----------------------------
+GPU can now split up KV groups statically into data blocks without needing to do any planning on CPU.
+HOWEVER, to avoid index memory overflow/segmentation faults, we must enforce a safe static limit.
+Current Implementation = Stop filling blocks when they hit 75% of their raw UNCOMPRESSED max limit.
+
+THE PROBLEM WITH STATIC PLANNING (Why CPU usage is higher here!):
+If keys share a heavy prefix (e.g. "AAAA..."), prefix-compression shrinks them drastically.
+- Uncompressed: 300 keys * 80 Bytes = 24,000 Bytes (Hits the ~75% safety limit of 32KB)
+- Compressed: 300 keys shrink down to maybe 5,000 Bytes actually stored!
+- Result: The block is strictly cut off at 5KB, leaving the 32KB data block mostly empty. 
+
+This forces the GPU to generate WAY more chunks/data blocks (e.g., 2,381 blocks vs 1,755 blocks in our 128B benchmark).
+More blocks = More index block entries, more filter offsets, and more file trailers.
+The CPU has to step in at the very end to format all these extra index bounds, increasing the `pack+assemble` CPU time natively. 
+So skipping the CPU Plan up front accidentally makes the CPU work harder at the end!
 
 *****************************************************************************************************
 
