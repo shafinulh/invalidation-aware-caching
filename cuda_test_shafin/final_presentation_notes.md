@@ -29,7 +29,9 @@ NO TRANSFER TO CPU
 ----------------------------
 GPU can now split up KV groups statically into data blocks without needing to do any planning on CPU.
 HOWEVER, to avoid index memory overflow/segmentation faults, we must enforce a safe static limit.
-Current Implementation = Stop filling blocks when they hit 75% of their raw UNCOMPRESSED max limit.
+Current Implementation (updated) = Use a safe WORST-CASE block-capacity model based on pack encoding overhead,
+then align to restart groups (4 KV per group).
+Old rule (75% raw uncompressed cap) was too conservative and created too many tiny blocks.
 
 THE PROBLEM WITH STATIC PLANNING (Why CPU usage is higher here!):
 If keys share a heavy prefix (e.g. "AAAA..."), prefix-compression shrinks them drastically.
@@ -41,6 +43,18 @@ This forces the GPU to generate WAY more chunks/data blocks (e.g., 2,381 blocks 
 More blocks = More index block entries, more filter offsets, and more file trailers.
 The CPU has to step in at the very end to format all these extra index bounds, increasing the `pack+assemble` CPU time natively. 
 So skipping the CPU Plan up front accidentally makes the CPU work harder at the end!
+
+How this relates to the updated implementation:
+- Yes, this is the main motivation for the update.
+- We replaced the old 75% static cap with a safer worst-case encoding-based cap (restart-group aligned), which reduces over-fragmentation.
+- Result: fewer data blocks and modest end-to-end speedup improvements.
+
+Why speedup still looks limited and CPU utilization does not drop dramatically:
+- Write stage is still the dominant wall-time cost in many runs.
+- Final SST assembly/index/filter metadata work is still host-side.
+- CPU-Time includes orchestration + file output overhead, not just planning.
+- So reducing planning/block-fragmentation helps, but total wall-time is still constrained by I/O and final assembly.
+
 
 *****************************************************************************************************
 

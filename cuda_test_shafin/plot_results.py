@@ -55,6 +55,107 @@ def parse_log(file_path):
 
     return val_bytes, cpu_throughput, gpu_throughput, cpu_util, gpu_util
 
+
+def parse_log_metrics(file_path):
+    with open(file_path, 'r') as f:
+        content = f.read()
+
+    val_match = re.search(r'value bytes:\s*(\d+)', content)
+    val_bytes = int(val_match.group(1)) if val_match else 0
+
+    gpu_wall = re.search(r'GPU total \(Wall\):\s*min=([\d.]+)\s*ms', content)
+    speedup = re.search(r'Speedup:\s*([\d.]+)x', content)
+    blocks = re.search(r'data blocks\s*(\d+)', content)
+
+    gpu_pack = 0.0
+    m_gpu = re.search(r'Best GPU run breakdown \(ms\):\s*\n\s*read\+parse[^\n]*pack\+assemble\s*([\d.]+)', content)
+    if m_gpu:
+        gpu_pack = float(m_gpu.group(1))
+
+    return {
+        'val': val_bytes,
+        'gpu_wall_min_ms': float(gpu_wall.group(1)) if gpu_wall else 0.0,
+        'speedup': float(speedup.group(1)) if speedup else 0.0,
+        'data_blocks': int(blocks.group(1)) if blocks else 0,
+        'gpu_pack_assemble_ms': gpu_pack,
+    }
+
+
+def collect_without_plan_metrics(sweep_dir):
+    metrics = {}
+    files = glob.glob(os.path.join(sweep_dir, '*without_plan.txt'))
+    for file_path in files:
+        m = parse_log_metrics(file_path)
+        if m['val'] > 0:
+            metrics[m['val']] = m
+    return metrics
+
+
+def plot_without_plan_comparison(base_sweep, opt_sweep, out_dir):
+    base = collect_without_plan_metrics(base_sweep)
+    opt = collect_without_plan_metrics(opt_sweep)
+    vals = sorted(set(base.keys()) & set(opt.keys()))
+    if not vals:
+        print('No overlapping WITHOUT PLAN value sizes between sweeps.')
+        return
+
+    x = np.arange(len(vals))
+    width = 0.36
+
+    base_wall = [base[v]['gpu_wall_min_ms'] for v in vals]
+    opt_wall = [opt[v]['gpu_wall_min_ms'] for v in vals]
+    base_spd = [base[v]['speedup'] for v in vals]
+    opt_spd = [opt[v]['speedup'] for v in vals]
+    base_blocks = [base[v]['data_blocks'] for v in vals]
+    opt_blocks = [opt[v]['data_blocks'] for v in vals]
+    base_pack = [base[v]['gpu_pack_assemble_ms'] for v in vals]
+    opt_pack = [opt[v]['gpu_pack_assemble_ms'] for v in vals]
+
+    ts_base, human_base = extract_sweep_timestamp(base_sweep)
+    ts_opt, human_opt = extract_sweep_timestamp(opt_sweep)
+    stamp = f'{ts_base}_vs_{ts_opt}'
+
+    fig, axes = plt.subplots(2, 2, figsize=(12, 8))
+
+    axes[0, 0].bar(x - width / 2, base_wall, width, label='Baseline', color='#d9c8b4', edgecolor='black')
+    axes[0, 0].bar(x + width / 2, opt_wall, width, label='Optimized', color='#98b4d4', edgecolor='black')
+    axes[0, 0].set_title('GPU Total Wall (min)')
+    axes[0, 0].set_ylabel('ms')
+
+    axes[0, 1].bar(x - width / 2, base_spd, width, label='Baseline', color='#d9c8b4', edgecolor='black')
+    axes[0, 1].bar(x + width / 2, opt_spd, width, label='Optimized', color='#98b4d4', edgecolor='black')
+    axes[0, 1].set_title('Speedup (CPU/GPU)')
+    axes[0, 1].set_ylabel('x')
+
+    axes[1, 0].bar(x - width / 2, base_blocks, width, label='Baseline', color='#d9c8b4', edgecolor='black')
+    axes[1, 0].bar(x + width / 2, opt_blocks, width, label='Optimized', color='#98b4d4', edgecolor='black')
+    axes[1, 0].set_title('Output Data Blocks')
+    axes[1, 0].set_ylabel('count')
+
+    axes[1, 1].bar(x - width / 2, base_pack, width, label='Baseline', color='#d9c8b4', edgecolor='black')
+    axes[1, 1].bar(x + width / 2, opt_pack, width, label='Optimized', color='#98b4d4', edgecolor='black')
+    axes[1, 1].set_title('GPU Pack+Assemble (best run)')
+    axes[1, 1].set_ylabel('ms')
+
+    for ax in axes.flat:
+        ax.set_xticks(x)
+        ax.set_xticklabels(vals)
+        ax.set_xlabel('Value Size (Bytes)')
+        ax.grid(True, axis='y', linestyle='--', alpha=0.6)
+
+    handles, labels = axes[0, 0].get_legend_handles_labels()
+    fig.legend(handles, labels, loc='upper center', ncol=2, frameon=True)
+    if human_base and human_opt:
+        fig.suptitle(f'WITHOUT PLAN: Baseline vs Optimized\n{human_base} vs {human_opt}')
+    else:
+        fig.suptitle('WITHOUT PLAN: Baseline vs Optimized')
+
+    plt.tight_layout(rect=[0, 0, 1, 0.93])
+    out_path = os.path.join(out_dir, f'without_plan_compare_{stamp}.png')
+    plt.savefig(out_path)
+    plt.close()
+    print(f'Comparison graph saved to: {out_path}')
+
 def main():
     base_dir = '/nfs/ug/groups/ece1755_w26_group1/rocksdb/cuda_test_shafin/results'
     # Find the latest sweep directory
@@ -159,6 +260,8 @@ def main():
     plt.savefig(util_out_path)
     print(f"Utilization graph saved to: {util_out_path}")
     plt.close()
+
+    # Intentionally disabled: no standalone WITHOUT PLAN comparison graph generation.
 
 if __name__ == '__main__':
     main()

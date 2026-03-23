@@ -2,7 +2,16 @@
 set -euo pipefail
 
 OUTDIR="./results/sweep_$(date '+%Y-%m-%d_%H-%M-%S')"
+TEMP_WITH_PLAN="$OUTDIR/temp_with_plan"
+TEMP_WITHOUT_PLAN="$OUTDIR/temp_without_plan"
 mkdir -p "$OUTDIR"
+
+cleanup() {
+    rm -rf "$TEMP_WITH_PLAN" "$TEMP_WITHOUT_PLAN"
+    sed -i -E "s/static constexpr int GP_VALUE_BYTES        = [0-9]+;/static constexpr int GP_VALUE_BYTES        = 32;/g" gpcomp_common.cuh
+}
+
+trap cleanup EXIT
 
 echo "========================================================="
 echo " GPComp Execution Sweep"
@@ -30,12 +39,12 @@ for VAL in 32 64 128; do
     # Run with_plan
     LOG_WITH_PLAN="$OUTDIR/result_val${VAL}B_with_plan.txt"
     echo "Running q_paper_with_plan..."
-    ./gpcomp_bench --dataset "$DATASET_DIR" --out_dir "$OUTDIR/temp_with_plan" --runs 5 --gpu_mode q_paper_with_plan > "$LOG_WITH_PLAN"
+    ./gpcomp_bench --dataset "$DATASET_DIR" --out_dir "$TEMP_WITH_PLAN" --runs 5 --gpu_mode q_paper_with_plan > "$LOG_WITH_PLAN"
 
     # Run without_plan
     LOG_WITHOUT_PLAN="$OUTDIR/result_val${VAL}B_without_plan.txt"
     echo "Running q_paper_without_plan..."
-    ./gpcomp_bench --dataset "$DATASET_DIR" --out_dir "$OUTDIR/temp_without_plan" --runs 5 --gpu_mode q_paper_without_plan > "$LOG_WITHOUT_PLAN"
+    ./gpcomp_bench --dataset "$DATASET_DIR" --out_dir "$TEMP_WITHOUT_PLAN" --runs 5 --gpu_mode q_paper_without_plan > "$LOG_WITHOUT_PLAN"
 
     # Print summary to terminal
     echo "  Value Size  : ${VAL} B"
@@ -64,10 +73,8 @@ for VAL in 32 64 128; do
     echo "  [With Plan]     Speedup: $WITH_SPD  CPU-run Utils (CPU_Time/Wall): $WITH_CPU_PCT,  GPU-run Utils: $WITH_GPU_PCT"
     echo "  [Without Plan]  Speedup: $WITHOUT_SPD  CPU-run Utils (CPU_Time/Wall): $WITHOUT_CPU_PCT,  GPU-run Utils: $WITHOUT_GPU_PCT"
 
-    rm -rf "$OUTDIR/temp_with_plan" "$OUTDIR/temp_without_plan"
+    rm -rf "$TEMP_WITH_PLAN" "$TEMP_WITHOUT_PLAN"
 done
 
 echo ""
 echo "Done! All results saved in $OUTDIR"
-# Restore standard 32B just in case
-sed -i -E "s/static constexpr int GP_VALUE_BYTES        = [0-9]+;/static constexpr int GP_VALUE_BYTES        = 32;/g" gpcomp_common.cuh
