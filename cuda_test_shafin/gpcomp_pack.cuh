@@ -84,9 +84,26 @@ static inline std::vector<DataBlockPlanEntry> plan_data_blocks_static(uint32_t t
     std::vector<DataBlockPlanEntry> plans;
     if (total_kv == 0) return plans;
 
-    // 660 keys * 31 (max uncompressed size: ~20KB) fitting perfectly into 32KB bounds
-    uint32_t fixed_kvs_per_block = (GP_DATA_BLOCK_BYTES * 0.75) / (GP_KEY_BYTES + GP_VALUE_BYTES);
-    fixed_kvs_per_block = (fixed_kvs_per_block / GP_RESTART_INTERVAL) * GP_RESTART_INTERVAL;  
+    // Compute a static, group-aligned cap that is always safe in the worst case
+    // (no prefix sharing), so we can pack denser than the old 75% heuristic.
+    uint32_t worst_entry_size = (uint32_t)(2 + GP_KEY_BYTES + GP_VALUE_BYTES);
+    uint32_t fixed_kvs_per_block = 0;
+    uint32_t data_size = 0;
+    uint32_t num_restarts = 0;
+    while (true) {
+        uint32_t group_pos = fixed_kvs_per_block % (uint32_t)GP_RESTART_INTERVAL;
+        uint32_t candidate_data_size = data_size + worst_entry_size;
+        uint32_t candidate_restarts = num_restarts + (group_pos == 0 ? 1u : 0u);
+        uint32_t candidate_total = PACK_HEADER_BYTES + candidate_data_size
+                                 + candidate_restarts * (uint32_t)sizeof(uint32_t);
+        if (candidate_total > GP_DATA_BLOCK_BYTES) break;
+        data_size = candidate_data_size;
+        num_restarts = candidate_restarts;
+        ++fixed_kvs_per_block;
+    }
+    fixed_kvs_per_block =
+        (fixed_kvs_per_block / (uint32_t)GP_RESTART_INTERVAL) * (uint32_t)GP_RESTART_INTERVAL;
+    if (fixed_kvs_per_block == 0) fixed_kvs_per_block = (uint32_t)GP_RESTART_INTERVAL;
 
     uint32_t first_kv = 0;
     while (first_kv < total_kv) {
@@ -94,8 +111,10 @@ static inline std::vector<DataBlockPlanEntry> plan_data_blocks_static(uint32_t t
         DataBlockPlanEntry entry;
         entry.first_kv = first_kv;
         entry.num_kv = num_kv;
-        // Approximation, since we bypass actual sizing
-        entry.serialized_size = GP_DATA_BLOCK_BYTES; 
+        // Conservative worst-case estimate for metadata/planning use only.
+        uint32_t num_restarts = (num_kv + (uint32_t)GP_RESTART_INTERVAL - 1u) / (uint32_t)GP_RESTART_INTERVAL;
+        entry.serialized_size = PACK_HEADER_BYTES + num_kv * worst_entry_size
+                              + num_restarts * (uint32_t)sizeof(uint32_t);
         plans.push_back(entry);
         first_kv += num_kv;
     }

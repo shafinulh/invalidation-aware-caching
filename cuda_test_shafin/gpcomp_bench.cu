@@ -190,7 +190,9 @@ static RunSummary run_gpu_once(const std::vector<std::string>& input_paths,
 
     std::vector<ParsedSST> inputs = load_inputs_with_timing(input_paths, summary.read_parse_ms);
     GPUCompactionResult gpu;
-    if (gpu_mode == "q_plan_on_gpu_slow") gpu = gpu_q_compaction_pipeline_from_parsed(inputs);
+    if (gpu_mode == "q_plan_on_gpu_slow") {
+        gpu = gpu_q_compaction_pipeline_from_parsed(inputs);
+    }
     else if (gpu_mode == "q_paper_with_plan") gpu = gpu_q_compaction_paper_from_parsed(inputs);
     else if (gpu_mode == "q_paper_without_plan") gpu = gpu_q_compaction_without_plan_from_parsed(inputs);
     else gpu = gpu_q_compaction_from_parsed(inputs);
@@ -231,7 +233,7 @@ int main(int argc, char** argv)
         else if (arg == "--runs") runs = std::stoi(next());
         else if (arg == "--gpu_mode") gpu_mode = next();
         else if (arg == "--help") {
-            std::printf("Usage: %s [--dataset DIR] [--out_dir DIR] [--runs N] [--gpu_mode baseline|q_plan_on_gpu_slow|q_paper_with_plan]\n",
+            std::printf("Usage: %s [--dataset DIR] [--out_dir DIR] [--runs N] [--gpu_mode baseline|q_plan_on_gpu_slow|q_paper_with_plan|q_paper_without_plan]\n",
                         argv[0]);
             return 0;
         } else {

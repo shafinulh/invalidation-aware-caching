@@ -652,21 +652,13 @@ static inline GPUCompactionResult gpu_q_compaction_without_plan_from_parsed(cons
     result.stage.bloom_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
     result.bloom_kernel_ms = bloom.kernel_ms;
 
-    PackResult planned_layout;
-    planned_layout.plans = plans;
-    planned_layout.block_sizes.resize(plans.size());
-    std::vector<uint32_t> predicted_filter_lengths(plans.size());
-    for (size_t i = 0; i < plans.size(); ++i) {
-        planned_layout.block_sizes[i] = plans[i].serialized_size;
-        uint32_t byte_vector_len = plans[i].num_kv * GP_BLOOM_BITS_PER_KEY;
-        predicted_filter_lengths[i] = (byte_vector_len + 7u) / 8u;
-    }
-    std::vector<std::pair<size_t, size_t>> pack_spans =
-        partition_output_blocks(planned_layout, predicted_filter_lengths, GP_TARGET_FILE_BYTES);
-
     t0 = std::chrono::steady_clock::now();
-    PackTimedResult pack = launch_pack_timed_from_device_plan_spans(
-        merged.d_output, device_plans.d_first_kv, device_plans.d_num_kv, plans, pack_spans);
+    PackTimedResult pack =
+        launch_pack_timed_from_device_plans(merged.d_output,
+                                            device_plans.d_first_kv,
+                                            device_plans.d_num_kv,
+                                            device_plans.num_blocks);
+    pack.result.plans = plans;
     std::vector<Key128> largest_keys =
         copy_largest_keys_from_device(merged.d_output, device_plans.d_first_kv, device_plans.d_num_kv,
                                       device_plans.num_blocks);

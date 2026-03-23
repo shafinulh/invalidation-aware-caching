@@ -24,6 +24,7 @@ for VAL in 32 64 128; do
     # Generate dataset for this value size
     DATASET_DIR="dataset_shafin_V${VAL}"
     echo "Generating dataset in $DATASET_DIR..."
+    rm -rf "$DATASET_DIR"
     ./gpcomp_datagen --out_dir "$DATASET_DIR" --seed 42 > /dev/null
 
     # Run with_plan

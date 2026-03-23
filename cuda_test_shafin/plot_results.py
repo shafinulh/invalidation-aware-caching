@@ -5,6 +5,16 @@ import matplotlib.pyplot as plt
 import numpy as np
 from datetime import datetime
 
+
+def extract_sweep_timestamp(sweep_path):
+    name = os.path.basename(os.path.normpath(sweep_path))
+    m = re.match(r'sweep_(\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})$', name)
+    if not m:
+        return datetime.now().strftime('%Y%m%d_%H%M%S'), None
+    raw = m.group(1)
+    dt = datetime.strptime(raw, '%Y-%m-%d_%H-%M-%S')
+    return dt.strftime('%Y%m%d_%H%M%S'), dt.strftime('%Y-%m-%d %H:%M:%S')
+
 def parse_log(file_path):
     with open(file_path, 'r') as f:
         content = f.read()
@@ -100,7 +110,7 @@ def main():
     x = np.arange(len(sorted_vals))
     width = 0.25
     
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    timestamp, human_ts = extract_sweep_timestamp(latest_sweep)
     out_dir = '/nfs/ug/groups/ece1755_w26_group1/rocksdb/cuda_test_shafin/graphs'
     os.makedirs(out_dir, exist_ok=True)
     
@@ -112,7 +122,10 @@ def main():
     
     ax.set_ylabel('Throughput (Ops/s)')
     ax.set_xlabel('Value Size (Bytes)')
-    ax.set_title('Throughput vs Value Size')
+    title_tp = 'Throughput vs Value Size'
+    if human_ts:
+        title_tp += f' ({human_ts})'
+    ax.set_title(title_tp)
     ax.set_xticks(x)
     ax.set_xticklabels(sorted_vals)
     ax.grid(True, axis='y', linestyle='--', alpha=0.7)
@@ -132,7 +145,10 @@ def main():
     
     ax2.set_ylabel('CPU Utilization (%)')
     ax2.set_xlabel('Value Size (Bytes)')
-    ax2.set_title('Actual System CPU Thread Utilization vs Time')
+    title_util = 'Actual System CPU Thread Utilization vs Time'
+    if human_ts:
+        title_util += f' ({human_ts})'
+    ax2.set_title(title_util)
     ax2.set_xticks(x)
     ax2.set_xticklabels(sorted_vals)
     ax2.grid(True, axis='y', linestyle='--', alpha=0.7)
