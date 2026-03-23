@@ -1,5 +1,13 @@
 #include "gpcomp_pipeline.cuh"
 
+#include <sys/resource.h>
+static double get_cpu_time_ms() {
+    struct rusage ru;
+    getrusage(RUSAGE_SELF, &ru);
+    return (ru.ru_utime.tv_sec + ru.ru_stime.tv_sec) * 1000.0 +
+           (ru.ru_utime.tv_usec + ru.ru_stime.tv_usec) / 1000.0;
+}
+
 #include <chrono>
 #include <cmath>
 #include <cerrno>
@@ -10,6 +18,7 @@
 
 struct RunSummary {
     double total_ms = 0.0;
+    double cpu_time_ms = 0.0;
     double read_parse_ms = 0.0;
     double write_ms = 0.0;
     CompactionStageTimes stage;
@@ -144,11 +153,15 @@ static RunSummary run_cpu_once(const std::vector<std::string>& input_paths,
 {
     RunSummary summary;
     auto total_start = std::chrono::steady_clock::now();
+    double cpu_time_start = get_cpu_time_ms();
 
     std::vector<ParsedSST> inputs = load_inputs_with_timing(input_paths, summary.read_parse_ms);
     CPUCompactionResult cpu;
     if (gpu_mode == "q_paper_with_plan") {
         cpu = cpu_q_compaction_paper_from_parsed(inputs);
+    }
+    else if (gpu_mode == "q_paper_without_plan") {
+        cpu = cpu_q_compaction_without_plan_from_parsed(inputs);
     }
     else cpu = cpu_q_compaction_from_parsed(inputs);
 
@@ -158,6 +171,7 @@ static RunSummary run_cpu_once(const std::vector<std::string>& input_paths,
 
     auto total_end = std::chrono::steady_clock::now();
     summary.total_ms = std::chrono::duration<double, std::milli>(total_end - total_start).count();
+    summary.cpu_time_ms = get_cpu_time_ms() - cpu_time_start;
     summary.write_ms = std::chrono::duration<double, std::milli>(write_end - write_start).count();
     summary.stage = cpu.stage;
     summary.output_bytes = total_output_bytes(cpu.output);
@@ -172,11 +186,13 @@ static RunSummary run_gpu_once(const std::vector<std::string>& input_paths,
 {
     RunSummary summary;
     auto total_start = std::chrono::steady_clock::now();
+    double cpu_time_start = get_cpu_time_ms();
 
     std::vector<ParsedSST> inputs = load_inputs_with_timing(input_paths, summary.read_parse_ms);
     GPUCompactionResult gpu;
     if (gpu_mode == "q_plan_on_gpu_slow") gpu = gpu_q_compaction_pipeline_from_parsed(inputs);
     else if (gpu_mode == "q_paper_with_plan") gpu = gpu_q_compaction_paper_from_parsed(inputs);
+    else if (gpu_mode == "q_paper_without_plan") gpu = gpu_q_compaction_without_plan_from_parsed(inputs);
     else gpu = gpu_q_compaction_from_parsed(inputs);
 
     auto write_start = std::chrono::steady_clock::now();
@@ -185,6 +201,7 @@ static RunSummary run_gpu_once(const std::vector<std::string>& input_paths,
 
     auto total_end = std::chrono::steady_clock::now();
     summary.total_ms = std::chrono::duration<double, std::milli>(total_end - total_start).count();
+    summary.cpu_time_ms = get_cpu_time_ms() - cpu_time_start;
     summary.write_ms = std::chrono::duration<double, std::milli>(write_end - write_start).count();
     summary.stage = gpu.stage;
     summary.unpack_kernel_ms = gpu.unpack_kernel_ms;
@@ -273,10 +290,12 @@ int main(int argc, char** argv)
     const RunSummary& cpu_best = cpu_runs[cpu_best_idx];
     const RunSummary& gpu_best = gpu_runs[gpu_best_idx];
 
-    std::printf("CPU total: min=%.2f ms  mean=%.2f +- %.2f ms\n",
+    std::printf("CPU total (Wall): min=%.2f ms  mean=%.2f +- %.2f ms\n",
                 cpu_total_stats.min, cpu_total_stats.mean, cpu_total_stats.stddev);
-    std::printf("GPU total: min=%.2f ms  mean=%.2f +- %.2f ms\n",
+    std::printf("CPU total (CPU-Time): %.2f ms\n", cpu_best.cpu_time_ms);
+    std::printf("GPU total (Wall): min=%.2f ms  mean=%.2f +- %.2f ms\n",
                 gpu_total_stats.min, gpu_total_stats.mean, gpu_total_stats.stddev);
+    std::printf("GPU total (CPU-Time): %.2f ms\n", gpu_best.cpu_time_ms);
     std::printf("Speedup: %.2fx (min totals)\n", cpu_total_stats.min / gpu_total_stats.min);
     std::printf("Output identical: %s\n\n", outputs_match ? "PASS" : "FAIL");
 

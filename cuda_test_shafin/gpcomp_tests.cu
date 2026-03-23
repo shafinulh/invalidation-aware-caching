@@ -284,7 +284,7 @@ static bool test_gpu_q_compaction_paper_matches_cpu()
     return ok;
 }
 
-static bool test_gpu_q_compaction_paper_overlap_matches_cpu()
+static bool test_gpu_q_compaction_without_plan_matches_cpu()
 {
     std::vector<ParsedSST> inputs;
     for (uint32_t sst = 0; sst < GP_NUM_INPUT_SSTS; ++sst) {
@@ -292,14 +292,14 @@ static bool test_gpu_q_compaction_paper_overlap_matches_cpu()
         inputs.push_back(parse_sst_bytes(build.file_bytes));
     }
 
-    CPUCompactionResult cpu = cpu_q_compaction_paper_from_parsed(inputs);
-    GPUCompactionResult gpu = gpu_q_compaction_paper_overlap_from_parsed(inputs);
+    CPUCompactionResult cpu = cpu_q_compaction_without_plan_from_parsed(inputs);
+    GPUCompactionResult gpu = gpu_q_compaction_without_plan_from_parsed(inputs);
 
     bool ok = check(cpu.output.files.size() == gpu.output.files.size(),
-                    "GPU Q-paper-overlap compaction emits the same number of SST files as CPU");
+                    "GPU Q-compaction without plan emits the same number of SST files as CPU");
     for (size_t i = 0; i < cpu.output.files.size() && ok; ++i) {
         ok &= check(cpu.output.files[i].file_bytes == gpu.output.files[i].file_bytes,
-                    "GPU Q-paper-overlap compaction output SST matches CPU output exactly");
+                    "GPU Q-compaction without plan output SST matches CPU output exactly");
     }
     return ok;
 }
@@ -318,7 +318,7 @@ int main()
     test_gpu_q_compaction_matches_cpu();
     test_gpu_q_compaction_pipeline_matches_cpu();
     test_gpu_q_compaction_paper_matches_cpu();
-    test_gpu_q_compaction_paper_overlap_matches_cpu();
+    test_gpu_q_compaction_without_plan_matches_cpu();
     std::printf("\nPassed: %d  Failed: %d\n", g_passed, g_failed);
     return g_failed == 0 ? 0 : 1;
 }

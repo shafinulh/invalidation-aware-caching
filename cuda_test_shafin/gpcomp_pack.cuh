@@ -79,6 +79,29 @@ static inline std::vector<uint32_t> compute_restart_group_sizes_cpu(const std::v
     return group_sizes;
 }
 
+static inline std::vector<DataBlockPlanEntry> plan_data_blocks_static(uint32_t total_kv)
+{
+    std::vector<DataBlockPlanEntry> plans;
+    if (total_kv == 0) return plans;
+
+    // 660 keys * 31 (max uncompressed size: ~20KB) fitting perfectly into 32KB bounds
+    uint32_t fixed_kvs_per_block = (GP_DATA_BLOCK_BYTES * 0.75) / (GP_KEY_BYTES + GP_VALUE_BYTES);
+    fixed_kvs_per_block = (fixed_kvs_per_block / GP_RESTART_INTERVAL) * GP_RESTART_INTERVAL;  
+
+    uint32_t first_kv = 0;
+    while (first_kv < total_kv) {
+        uint32_t num_kv = std::min(fixed_kvs_per_block, total_kv - first_kv);
+        DataBlockPlanEntry entry;
+        entry.first_kv = first_kv;
+        entry.num_kv = num_kv;
+        // Approximation, since we bypass actual sizing
+        entry.serialized_size = GP_DATA_BLOCK_BYTES; 
+        plans.push_back(entry);
+        first_kv += num_kv;
+    }
+    return plans;
+}
+
 static inline std::vector<DataBlockPlanEntry>
 plan_data_blocks_group_aligned_from_group_sizes(const std::vector<uint32_t>& group_sizes,
                                                 uint32_t                     total_kv)
