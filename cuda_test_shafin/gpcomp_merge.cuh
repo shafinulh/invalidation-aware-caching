@@ -121,6 +121,10 @@ struct MergeTimedResult {
     std::vector<KVPair> merged;
     float               kernel_ms = 0.0f;
     float               wall_ms = 0.0f;
+    float               h2d_ms = 0.0f;
+    float               d2h_ms = 0.0f;
+    size_t              h2d_bytes = 0;
+    size_t              d2h_bytes = 0;
 };
 
 struct DeviceMergeTimedResult {
@@ -129,6 +133,10 @@ struct DeviceMergeTimedResult {
     int                 total = 0;
     float               kernel_ms = 0.0f;
     float               wall_ms = 0.0f;
+    float               h2d_ms = 0.0f;
+    float               d2h_ms = 0.0f;
+    size_t              h2d_bytes = 0;
+    size_t              d2h_bytes = 0;
 };
 
 static inline MergeTimedResult launch_merge_timed(const std::vector<std::vector<KVPair>>& arrays)
@@ -167,9 +175,14 @@ static inline MergeTimedResult launch_merge_timed(const std::vector<std::vector<
     cudaMalloc(&d_output, (size_t)std::max(total, 1) * sizeof(KVPair));
 
     auto wall_start = std::chrono::steady_clock::now();
+    auto h2d_start = std::chrono::steady_clock::now();
     cudaMemcpy(d_sst_arrays, d_host_ptrs.data(), (size_t)num_arrays * sizeof(KVPair*), cudaMemcpyHostToDevice);
     cudaMemcpy(d_sst_sizes, sizes.data(), (size_t)num_arrays * sizeof(int), cudaMemcpyHostToDevice);
     cudaMemcpy(d_sst_offsets, h_offsets.data(), ((size_t)num_arrays + 1) * sizeof(int), cudaMemcpyHostToDevice);
+    auto h2d_end = std::chrono::steady_clock::now();
+    result.h2d_ms = (float)std::chrono::duration<double, std::milli>(h2d_end - h2d_start).count();
+    result.h2d_bytes = (size_t)num_arrays * (sizeof(KVPair*) + sizeof(int))
+                     + ((size_t)num_arrays + 1) * sizeof(int);
 
     cudaEvent_t ev0, ev1;
     cudaEventCreate(&ev0);
@@ -183,7 +196,11 @@ static inline MergeTimedResult launch_merge_timed(const std::vector<std::vector<
     cudaEventElapsedTime(&result.kernel_ms, ev0, ev1);
 
     if (total > 0) {
+        auto d2h_start = std::chrono::steady_clock::now();
         cudaMemcpy(result.merged.data(), d_output, (size_t)total * sizeof(KVPair), cudaMemcpyDeviceToHost);
+        auto d2h_end = std::chrono::steady_clock::now();
+        result.d2h_ms = (float)std::chrono::duration<double, std::milli>(d2h_end - d2h_start).count();
+        result.d2h_bytes = (size_t)total * sizeof(KVPair);
     }
     auto wall_end = std::chrono::steady_clock::now();
     result.wall_ms = (float)std::chrono::duration<double, std::milli>(wall_end - wall_start).count();
@@ -222,11 +239,16 @@ launch_merge_timed_from_device(const std::vector<KVPair*>& d_arrays,
     cudaMalloc(&result.d_output, (size_t)std::max(result.total, 1) * sizeof(KVPair));
 
     auto wall_start = std::chrono::steady_clock::now();
+    auto h2d_start = std::chrono::steady_clock::now();
     if (num_arrays > 0) {
         cudaMemcpy(d_sst_arrays, d_arrays.data(), (size_t)num_arrays * sizeof(KVPair*), cudaMemcpyHostToDevice);
         cudaMemcpy(d_sst_sizes, sizes.data(), (size_t)num_arrays * sizeof(int), cudaMemcpyHostToDevice);
     }
     cudaMemcpy(d_sst_offsets, h_offsets.data(), ((size_t)num_arrays + 1) * sizeof(int), cudaMemcpyHostToDevice);
+    auto h2d_end = std::chrono::steady_clock::now();
+    result.h2d_ms = (float)std::chrono::duration<double, std::milli>(h2d_end - h2d_start).count();
+    result.h2d_bytes = (size_t)num_arrays * (sizeof(KVPair*) + sizeof(int))
+                     + ((size_t)num_arrays + 1) * sizeof(int);
 
     cudaEvent_t ev0, ev1;
     cudaEventCreate(&ev0);
@@ -242,8 +264,12 @@ launch_merge_timed_from_device(const std::vector<KVPair*>& d_arrays,
     cudaEventElapsedTime(&result.kernel_ms, ev0, ev1);
 
     if (copy_to_host && result.total > 0) {
+        auto d2h_start = std::chrono::steady_clock::now();
         cudaMemcpy(result.merged.data(), result.d_output,
                    (size_t)result.total * sizeof(KVPair), cudaMemcpyDeviceToHost);
+        auto d2h_end = std::chrono::steady_clock::now();
+        result.d2h_ms = (float)std::chrono::duration<double, std::milli>(d2h_end - d2h_start).count();
+        result.d2h_bytes = (size_t)result.total * sizeof(KVPair);
     }
     auto wall_end = std::chrono::steady_clock::now();
     result.wall_ms = (float)std::chrono::duration<double, std::milli>(wall_end - wall_start).count();

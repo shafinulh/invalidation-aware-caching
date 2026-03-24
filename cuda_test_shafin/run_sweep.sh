@@ -1,7 +1,21 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-OUTDIR="./results/sweep_$(date '+%Y-%m-%d_%H-%M-%S')"
+RUNS="${RUNS:-5}"
+VALUES_STR="${VALUES:-32 64 128}"
+DATASET_PREFIX="${DATASET_PREFIX:-dataset_shafin_V}"
+OUTDIR="${OUTDIR:-./results/sweep_$(date '+%Y-%m-%d_%H-%M-%S')}"
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --out_dir) OUTDIR="$2"; shift 2 ;;
+        --runs) RUNS="$2"; shift 2 ;;
+        --values) VALUES_STR="$2"; shift 2 ;;
+        --dataset_prefix) DATASET_PREFIX="$2"; shift 2 ;;
+        *) echo "Unknown argument: $1"; exit 1 ;;
+    esac
+done
+
 TEMP_WITH_PLAN="$OUTDIR/temp_with_plan"
 TEMP_WITHOUT_PLAN="$OUTDIR/temp_without_plan"
 mkdir -p "$OUTDIR"
@@ -18,10 +32,12 @@ echo " GPComp Execution Sweep"
 echo " comparing with_plan vs without_plan"
 echo " measuring CPU utilization alongside speedup"
 echo " output saved to: $OUTDIR"
+echo " runs per mode: $RUNS"
+echo " value sizes: $VALUES_STR"
 echo "========================================================="
 
 # Loop over value sizes
-for VAL in 32 64 128; do
+for VAL in $VALUES_STR; do
     echo ""
     echo "--- Building for Value Size: ${VAL} B ---"
     
@@ -31,7 +47,7 @@ for VAL in 32 64 128; do
     make gpcomp_datagen gpcomp_bench -j > /dev/null
 
     # Generate dataset for this value size
-    DATASET_DIR="dataset_shafin_V${VAL}"
+    DATASET_DIR="${DATASET_PREFIX}${VAL}"
     echo "Generating dataset in $DATASET_DIR..."
     rm -rf "$DATASET_DIR"
     ./gpcomp_datagen --out_dir "$DATASET_DIR" --seed 42 > /dev/null
@@ -39,12 +55,12 @@ for VAL in 32 64 128; do
     # Run with_plan
     LOG_WITH_PLAN="$OUTDIR/result_val${VAL}B_with_plan.txt"
     echo "Running q_paper_with_plan..."
-    ./gpcomp_bench --dataset "$DATASET_DIR" --out_dir "$TEMP_WITH_PLAN" --runs 5 --gpu_mode q_paper_with_plan > "$LOG_WITH_PLAN"
+    ./gpcomp_bench --dataset "$DATASET_DIR" --out_dir "$TEMP_WITH_PLAN" --runs "$RUNS" --gpu_mode q_paper_with_plan > "$LOG_WITH_PLAN"
 
     # Run without_plan
     LOG_WITHOUT_PLAN="$OUTDIR/result_val${VAL}B_without_plan.txt"
     echo "Running q_paper_without_plan..."
-    ./gpcomp_bench --dataset "$DATASET_DIR" --out_dir "$TEMP_WITHOUT_PLAN" --runs 5 --gpu_mode q_paper_without_plan > "$LOG_WITHOUT_PLAN"
+    ./gpcomp_bench --dataset "$DATASET_DIR" --out_dir "$TEMP_WITHOUT_PLAN" --runs "$RUNS" --gpu_mode q_paper_without_plan > "$LOG_WITHOUT_PLAN"
 
     # Print summary to terminal
     echo "  Value Size  : ${VAL} B"

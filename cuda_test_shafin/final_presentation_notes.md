@@ -1,3 +1,24 @@
+## QUICK RUN INSTRUCTIONS
+
+Set your working directory and run the sweep (portable, no hardcoded host path):
+
+DIR="/path/to/cuda_test_shafin"
+cd "$DIR"
+./run_sweep.sh --runs 5 --values "32 64 128"
+
+Optional custom output/dataset prefix:
+
+./run_sweep.sh --out_dir "$DIR/results/my_sweep" --dataset_prefix dataset_shafin_V --runs 3 --values "32 64"
+
+Optional plotting (portable paths):
+
+python3 plot_results.py --results_dir "$DIR/results" --graphs_dir "$DIR/graphs"
+python3 plot_profile_metrics.py --results_dir "$DIR/results" --graphs_dir "$DIR/graphs"
+
+Optional Nsight profiling:
+
+./nsight_profile.sh --tool nsys --dataset dataset_shafin_V32 --gpu_mode q_paper_with_plan --out_dir results/nsight
+
 # TODO:
 1. presentation slides for the GPCOMP compaction kernels + the modifications we made (PLAN for Q-compaction to properly pack blocks)
   - slides for the microbenchmarking results (comparing q_paper_with_plan, q_paper, c_paper)

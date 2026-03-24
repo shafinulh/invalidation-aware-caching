@@ -29,6 +29,33 @@ struct RunSummary {
     size_t output_bytes = 0;
     size_t output_blocks = 0;
     size_t output_files = 0;
+    size_t input_bytes = 0;
+    size_t h2d_lower_bound_bytes = 0;
+    size_t d2h_lower_bound_bytes = 0;
+    double unpack_h2d_ms = 0.0;
+    double unpack_d2h_ms = 0.0;
+    size_t unpack_h2d_bytes = 0;
+    size_t unpack_d2h_bytes = 0;
+    double merge_h2d_ms = 0.0;
+    double merge_d2h_ms = 0.0;
+    size_t merge_h2d_bytes = 0;
+    size_t merge_d2h_bytes = 0;
+    double planning_h2d_ms = 0.0;
+    double planning_d2h_ms = 0.0;
+    size_t planning_h2d_bytes = 0;
+    size_t planning_d2h_bytes = 0;
+    double bloom_h2d_ms = 0.0;
+    double bloom_d2h_ms = 0.0;
+    size_t bloom_h2d_bytes = 0;
+    size_t bloom_d2h_bytes = 0;
+    double pack_h2d_ms = 0.0;
+    double pack_d2h_ms = 0.0;
+    size_t pack_h2d_bytes = 0;
+    size_t pack_d2h_bytes = 0;
+    double unpack_non_kernel_ms = 0.0;
+    double merge_non_kernel_ms = 0.0;
+    double bloom_non_kernel_ms = 0.0;
+    double pack_non_kernel_ms = 0.0;
 };
 
 struct Stats {
@@ -147,6 +174,38 @@ static std::vector<ParsedSST> load_inputs_with_timing(const std::vector<std::str
     return parsed;
 }
 
+static size_t total_input_bytes(const std::vector<ParsedSST>& inputs)
+{
+    size_t total = 0;
+    for (const auto& input : inputs) total += input.file_bytes.size();
+    return total;
+}
+
+static size_t lower_bound_unpack_h2d_bytes(const std::vector<ParsedSST>& inputs)
+{
+    size_t total = 0;
+    for (const auto& parsed : inputs) {
+        std::vector<DataBlockPlanEntry> plans = plans_from_parsed(parsed);
+        std::vector<uint32_t> offsets = block_offsets_from_parsed(parsed);
+        total += parsed.file_bytes.size();
+        total += offsets.size() * sizeof(uint32_t);
+        total += plans.size() * sizeof(uint32_t) * 2;
+    }
+    return total;
+}
+
+static double clamp_non_kernel(double stage_ms, float kernel_ms)
+{
+    double v = stage_ms - (double)kernel_ms;
+    return v > 0.0 ? v : 0.0;
+}
+
+static double mb_per_sec(size_t bytes, double ms)
+{
+    if (ms <= 0.0) return 0.0;
+    return ((double)bytes / (1024.0 * 1024.0)) / (ms / 1000.0);
+}
+
 static RunSummary run_cpu_once(const std::vector<std::string>& input_paths,
                                const std::string&               output_dir,
                                const std::string&               gpu_mode)
@@ -156,6 +215,7 @@ static RunSummary run_cpu_once(const std::vector<std::string>& input_paths,
     double cpu_time_start = get_cpu_time_ms();
 
     std::vector<ParsedSST> inputs = load_inputs_with_timing(input_paths, summary.read_parse_ms);
+    summary.input_bytes = total_input_bytes(inputs);
     CPUCompactionResult cpu;
     if (gpu_mode == "q_paper_with_plan") {
         cpu = cpu_q_compaction_paper_from_parsed(inputs);
@@ -189,6 +249,8 @@ static RunSummary run_gpu_once(const std::vector<std::string>& input_paths,
     double cpu_time_start = get_cpu_time_ms();
 
     std::vector<ParsedSST> inputs = load_inputs_with_timing(input_paths, summary.read_parse_ms);
+    summary.input_bytes = total_input_bytes(inputs);
+    summary.h2d_lower_bound_bytes = lower_bound_unpack_h2d_bytes(inputs);
     GPUCompactionResult gpu;
     if (gpu_mode == "q_plan_on_gpu_slow") {
         gpu = gpu_q_compaction_pipeline_from_parsed(inputs);
@@ -213,6 +275,36 @@ static RunSummary run_gpu_once(const std::vector<std::string>& input_paths,
     summary.output_bytes = total_output_bytes(gpu.output);
     summary.output_blocks = total_output_blocks(gpu.output);
     summary.output_files = gpu.output.files.size();
+    summary.unpack_h2d_ms = gpu.unpack_h2d_ms;
+    summary.unpack_d2h_ms = gpu.unpack_d2h_ms;
+    summary.unpack_h2d_bytes = gpu.unpack_h2d_bytes;
+    summary.unpack_d2h_bytes = gpu.unpack_d2h_bytes;
+    summary.merge_h2d_ms = gpu.merge_h2d_ms;
+    summary.merge_d2h_ms = gpu.merge_d2h_ms;
+    summary.merge_h2d_bytes = gpu.merge_h2d_bytes;
+    summary.merge_d2h_bytes = gpu.merge_d2h_bytes;
+    summary.planning_h2d_ms = gpu.planning_h2d_ms;
+    summary.planning_d2h_ms = gpu.planning_d2h_ms;
+    summary.planning_h2d_bytes = gpu.planning_h2d_bytes;
+    summary.planning_d2h_bytes = gpu.planning_d2h_bytes;
+    summary.bloom_h2d_ms = gpu.bloom_h2d_ms;
+    summary.bloom_d2h_ms = gpu.bloom_d2h_ms;
+    summary.bloom_h2d_bytes = gpu.bloom_h2d_bytes;
+    summary.bloom_d2h_bytes = gpu.bloom_d2h_bytes;
+    summary.pack_h2d_ms = gpu.pack_h2d_ms;
+    summary.pack_d2h_ms = gpu.pack_d2h_ms;
+    summary.pack_h2d_bytes = gpu.pack_h2d_bytes;
+    summary.pack_d2h_bytes = gpu.pack_d2h_bytes;
+    summary.h2d_lower_bound_bytes = summary.unpack_h2d_bytes + summary.merge_h2d_bytes
+                                  + summary.planning_h2d_bytes + summary.bloom_h2d_bytes
+                                  + summary.pack_h2d_bytes;
+    summary.d2h_lower_bound_bytes = summary.unpack_d2h_bytes + summary.merge_d2h_bytes
+                                  + summary.planning_d2h_bytes + summary.bloom_d2h_bytes
+                                  + summary.pack_d2h_bytes;
+    summary.unpack_non_kernel_ms = clamp_non_kernel(summary.stage.unpack_ms, summary.unpack_kernel_ms);
+    summary.merge_non_kernel_ms = clamp_non_kernel(summary.stage.merge_ms, summary.merge_kernel_ms);
+    summary.bloom_non_kernel_ms = clamp_non_kernel(summary.stage.bloom_ms, summary.bloom_kernel_ms);
+    summary.pack_non_kernel_ms = clamp_non_kernel(summary.stage.pack_ms, summary.pack_kernel_ms);
     return summary;
 }
 
@@ -307,6 +399,17 @@ int main(int argc, char** argv)
                 cpu_best.stage.planning_ms, cpu_best.stage.bloom_ms, cpu_best.stage.pack_ms, cpu_best.write_ms);
     std::printf("  output bytes %zu  data blocks %zu  output files %zu\n\n",
                 cpu_best.output_bytes, cpu_best.output_blocks, cpu_best.output_files);
+    std::printf("  I/O profile: input bytes %zu  estimated SSD read BW %.2f MB/s  estimated SSD write BW %.2f MB/s\n\n",
+                cpu_best.input_bytes,
+                mb_per_sec(cpu_best.input_bytes, cpu_best.read_parse_ms),
+                mb_per_sec(cpu_best.output_bytes, cpu_best.write_ms));
+    std::printf("  SSD<->CPU (estimated): SSD->CPU %.2f ms (%zu B, %.2f MB/s)  CPU->SSD %.2f ms (%zu B, %.2f MB/s)\n\n",
+                cpu_best.read_parse_ms,
+                cpu_best.input_bytes,
+                mb_per_sec(cpu_best.input_bytes, cpu_best.read_parse_ms),
+                cpu_best.write_ms,
+                cpu_best.output_bytes,
+                mb_per_sec(cpu_best.output_bytes, cpu_best.write_ms));
 
     std::printf("Best GPU run breakdown (ms):\n");
     std::printf("  read+parse %.2f  unpack %.2f  sort(merge) %.2f  plan %.2f  bloom %.2f  pack+assemble %.2f  write %.2f\n",
@@ -314,8 +417,60 @@ int main(int argc, char** argv)
                 gpu_best.stage.planning_ms, gpu_best.stage.bloom_ms, gpu_best.stage.pack_ms, gpu_best.write_ms);
     std::printf("  kernel-only: unpack %.2f  sort(merge) %.2f  bloom %.2f  pack %.2f\n",
                 gpu_best.unpack_kernel_ms, gpu_best.merge_kernel_ms, gpu_best.bloom_kernel_ms, gpu_best.pack_kernel_ms);
+    std::printf("  non-kernel overhead (ms): unpack %.2f  sort(merge) %.2f  bloom %.2f  pack %.2f\n",
+                gpu_best.unpack_non_kernel_ms, gpu_best.merge_non_kernel_ms,
+                gpu_best.bloom_non_kernel_ms, gpu_best.pack_non_kernel_ms);
+    std::printf("  transfer stage detail (measured):\n");
+    std::printf("    unpack  H2D %.2f ms (%zu B)  D2H %.2f ms (%zu B)\n",
+                gpu_best.unpack_h2d_ms, gpu_best.unpack_h2d_bytes,
+                gpu_best.unpack_d2h_ms, gpu_best.unpack_d2h_bytes);
+    std::printf("    merge   H2D %.2f ms (%zu B)  D2H %.2f ms (%zu B)\n",
+                gpu_best.merge_h2d_ms, gpu_best.merge_h2d_bytes,
+                gpu_best.merge_d2h_ms, gpu_best.merge_d2h_bytes);
+    std::printf("    plan    H2D %.2f ms (%zu B)  D2H %.2f ms (%zu B)\n",
+                gpu_best.planning_h2d_ms, gpu_best.planning_h2d_bytes,
+                gpu_best.planning_d2h_ms, gpu_best.planning_d2h_bytes);
+    std::printf("    bloom   H2D %.2f ms (%zu B)  D2H %.2f ms (%zu B)\n",
+                gpu_best.bloom_h2d_ms, gpu_best.bloom_h2d_bytes,
+                gpu_best.bloom_d2h_ms, gpu_best.bloom_d2h_bytes);
+    std::printf("    pack    H2D %.2f ms (%zu B)  D2H %.2f ms (%zu B)\n",
+                gpu_best.pack_h2d_ms, gpu_best.pack_h2d_bytes,
+                gpu_best.pack_d2h_ms, gpu_best.pack_d2h_bytes);
+    double gpu_h2d_ms = gpu_best.unpack_h2d_ms + gpu_best.merge_h2d_ms + gpu_best.planning_h2d_ms
+                      + gpu_best.bloom_h2d_ms + gpu_best.pack_h2d_ms;
+    double gpu_d2h_ms = gpu_best.unpack_d2h_ms + gpu_best.merge_d2h_ms + gpu_best.planning_d2h_ms
+                      + gpu_best.bloom_d2h_ms + gpu_best.pack_d2h_ms;
+    std::printf("  measured transfer totals: H2D %.2f ms (%zu B, %.2f MB/s)  D2H %.2f ms (%zu B, %.2f MB/s)\n",
+                gpu_h2d_ms, gpu_best.h2d_lower_bound_bytes,
+                mb_per_sec(gpu_best.h2d_lower_bound_bytes, gpu_h2d_ms),
+                gpu_d2h_ms, gpu_best.d2h_lower_bound_bytes,
+                mb_per_sec(gpu_best.d2h_lower_bound_bytes, gpu_d2h_ms));
+    double gpu_non_kernel_total = gpu_best.unpack_non_kernel_ms + gpu_best.merge_non_kernel_ms
+                                + gpu_best.bloom_non_kernel_ms + gpu_best.pack_non_kernel_ms;
+    std::printf("  transfer lower-bound bytes: H2D %zu  D2H %zu\n",
+                gpu_best.h2d_lower_bound_bytes, gpu_best.d2h_lower_bound_bytes);
+    std::printf("  estimated transfer+sync BW (lower-bound): %.2f MB/s\n",
+                mb_per_sec(gpu_best.h2d_lower_bound_bytes + gpu_best.d2h_lower_bound_bytes,
+                           gpu_non_kernel_total));
+    std::printf("  CPU<->GPU (lower-bound): CPU->GPU H2D %zu B  GPU->CPU D2H %zu B\n",
+                gpu_best.h2d_lower_bound_bytes, gpu_best.d2h_lower_bound_bytes);
+    std::printf("  CPU<->GPU envelope: non-kernel total %.2f ms  estimated BW %.2f MB/s\n",
+                gpu_non_kernel_total,
+                mb_per_sec(gpu_best.h2d_lower_bound_bytes + gpu_best.d2h_lower_bound_bytes,
+                           gpu_non_kernel_total));
     std::printf("  output bytes %zu  data blocks %zu  output files %zu\n",
                 gpu_best.output_bytes, gpu_best.output_blocks, gpu_best.output_files);
+    std::printf("  I/O profile: input bytes %zu  estimated SSD read BW %.2f MB/s  estimated SSD write BW %.2f MB/s\n",
+                gpu_best.input_bytes,
+                mb_per_sec(gpu_best.input_bytes, gpu_best.read_parse_ms),
+                mb_per_sec(gpu_best.output_bytes, gpu_best.write_ms));
+    std::printf("  SSD<->CPU (estimated): SSD->CPU %.2f ms (%zu B, %.2f MB/s)  CPU->SSD %.2f ms (%zu B, %.2f MB/s)\n",
+                gpu_best.read_parse_ms,
+                gpu_best.input_bytes,
+                mb_per_sec(gpu_best.input_bytes, gpu_best.read_parse_ms),
+                gpu_best.write_ms,
+                gpu_best.output_bytes,
+                mb_per_sec(gpu_best.output_bytes, gpu_best.write_ms));
 
     return outputs_match ? 0 : 1;
 }

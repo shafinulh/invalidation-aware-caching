@@ -1,9 +1,14 @@
 import os
 import glob
 import re
+import argparse
 import matplotlib.pyplot as plt
 import numpy as np
 from datetime import datetime
+
+
+DEFAULT_BASE_DIR = os.environ.get('GPCOMP_RESULTS_DIR', 'results')
+DEFAULT_GRAPH_DIR = os.environ.get('GPCOMP_GRAPHS_DIR', 'graphs')
 
 
 def extract_sweep_timestamp(sweep_path):
@@ -156,8 +161,7 @@ def plot_without_plan_comparison(base_sweep, opt_sweep, out_dir):
     plt.close()
     print(f'Comparison graph saved to: {out_path}')
 
-def main():
-    base_dir = '/nfs/ug/groups/ece1755_w26_group1/rocksdb/cuda_test_shafin/results'
+def main(base_dir, graph_dir):
     # Find the latest sweep directory
     sweep_dirs = sorted(glob.glob(os.path.join(base_dir, 'sweep_*')))[-1:]
     if not sweep_dirs:
@@ -212,7 +216,7 @@ def main():
     width = 0.25
     
     timestamp, human_ts = extract_sweep_timestamp(latest_sweep)
-    out_dir = '/nfs/ug/groups/ece1755_w26_group1/rocksdb/cuda_test_shafin/graphs'
+    out_dir = graph_dir
     os.makedirs(out_dir, exist_ok=True)
     
     # --- PLOT 1: THROUGHPUT ---
@@ -264,4 +268,10 @@ def main():
     # Intentionally disabled: no standalone WITHOUT PLAN comparison graph generation.
 
 if __name__ == '__main__':
-    main()
+    parser = argparse.ArgumentParser(description='Plot GPComp benchmark results.')
+    parser.add_argument('--results_dir', default=DEFAULT_BASE_DIR,
+                        help='Directory containing sweep_* result folders')
+    parser.add_argument('--graphs_dir', default=DEFAULT_GRAPH_DIR,
+                        help='Directory for output graphs')
+    args = parser.parse_args()
+    main(args.results_dir, args.graphs_dir)

@@ -29,6 +29,26 @@ struct GPUCompactionResult {
     float                            merge_kernel_ms = 0.0f;
     float                            bloom_kernel_ms = 0.0f;
     float                            pack_kernel_ms = 0.0f;
+    double                           unpack_h2d_ms = 0.0;
+    double                           unpack_d2h_ms = 0.0;
+    size_t                           unpack_h2d_bytes = 0;
+    size_t                           unpack_d2h_bytes = 0;
+    double                           merge_h2d_ms = 0.0;
+    double                           merge_d2h_ms = 0.0;
+    size_t                           merge_h2d_bytes = 0;
+    size_t                           merge_d2h_bytes = 0;
+    double                           planning_h2d_ms = 0.0;
+    double                           planning_d2h_ms = 0.0;
+    size_t                           planning_h2d_bytes = 0;
+    size_t                           planning_d2h_bytes = 0;
+    double                           bloom_h2d_ms = 0.0;
+    double                           bloom_d2h_ms = 0.0;
+    size_t                           bloom_h2d_bytes = 0;
+    size_t                           bloom_d2h_bytes = 0;
+    double                           pack_h2d_ms = 0.0;
+    double                           pack_d2h_ms = 0.0;
+    size_t                           pack_h2d_bytes = 0;
+    size_t                           pack_d2h_bytes = 0;
 };
 
 struct GPUUnpackStreamState {
@@ -43,12 +63,18 @@ struct GPUUnpackStreamState {
     uint32_t              total_kv = 0;
     int                   num_blocks = 0;
     cudaStream_t          stream = nullptr;
+    cudaEvent_t           h2d_start = nullptr;
+    cudaEvent_t           h2d_stop = nullptr;
     cudaEvent_t           kernel_start = nullptr;
     cudaEvent_t           kernel_stop = nullptr;
+    float                 h2d_ms = 0.0f;
+    size_t                h2d_bytes = 0;
 };
 
 static inline void destroy_unpack_stream_state(GPUUnpackStreamState& state)
 {
+    if (state.h2d_stop) cudaEventDestroy(state.h2d_stop);
+    if (state.h2d_start) cudaEventDestroy(state.h2d_start);
     if (state.kernel_stop) cudaEventDestroy(state.kernel_stop);
     if (state.kernel_start) cudaEventDestroy(state.kernel_start);
     if (state.stream) cudaStreamDestroy(state.stream);
@@ -75,7 +101,9 @@ __global__ static void gather_largest_keys_kernel(const KVPair* __restrict__   k
 static inline std::vector<Key128> copy_largest_keys_from_device(const KVPair*   d_kv,
                                                                 const uint32_t* d_first_kv,
                                                                 const uint32_t* d_num_kv,
-                                                                int             num_blocks)
+                                                                int             num_blocks,
+                                                                float*          d2h_ms_out = nullptr,
+                                                                size_t*         d2h_bytes_out = nullptr)
 {
     std::vector<Key128> largest_keys((size_t)num_blocks);
     if (num_blocks <= 0) return largest_keys;
@@ -85,8 +113,16 @@ static inline std::vector<Key128> copy_largest_keys_from_device(const KVPair*   
     int block = 256;
     int grid = (num_blocks + block - 1) / block;
     gather_largest_keys_kernel<<<grid, block>>>(d_kv, d_first_kv, d_num_kv, num_blocks, d_largest_keys);
+    auto d2h_start = std::chrono::steady_clock::now();
     cudaMemcpy(largest_keys.data(), d_largest_keys,
                (size_t)num_blocks * sizeof(Key128), cudaMemcpyDeviceToHost);
+    auto d2h_end = std::chrono::steady_clock::now();
+    if (d2h_ms_out) {
+        *d2h_ms_out += (float)std::chrono::duration<double, std::milli>(d2h_end - d2h_start).count();
+    }
+    if (d2h_bytes_out) {
+        *d2h_bytes_out += (size_t)num_blocks * sizeof(Key128);
+    }
     cudaFree(d_largest_keys);
     return largest_keys;
 }
@@ -189,6 +225,8 @@ static inline GPUCompactionResult gpu_q_compaction_from_parsed(const std::vector
         if (block_dim < 32) block_dim = 32;
 
         cudaStreamCreate(&state.stream);
+        cudaEventCreate(&state.h2d_start);
+        cudaEventCreate(&state.h2d_stop);
         cudaEventCreate(&state.kernel_start);
         cudaEventCreate(&state.kernel_stop);
         cudaMalloc(&state.d_buf, inputs[i].file_bytes.size());
@@ -197,6 +235,11 @@ static inline GPUCompactionResult gpu_q_compaction_from_parsed(const std::vector
         cudaMalloc(&state.d_num_kv, state.num_kv.size() * sizeof(uint32_t));
         cudaMalloc(&state.d_out, (size_t)state.total_kv * sizeof(KVPair));
 
+        state.h2d_bytes = inputs[i].file_bytes.size()
+                + state.block_offsets.size() * sizeof(uint32_t)
+                + state.first_kv.size() * sizeof(uint32_t)
+                + state.num_kv.size() * sizeof(uint32_t);
+        cudaEventRecord(state.h2d_start, state.stream);
         cudaMemcpyAsync(state.d_buf, inputs[i].file_bytes.data(), inputs[i].file_bytes.size(),
                         cudaMemcpyHostToDevice, state.stream);
         cudaMemcpyAsync(state.d_offsets, state.block_offsets.data(),
@@ -208,6 +251,7 @@ static inline GPUCompactionResult gpu_q_compaction_from_parsed(const std::vector
         cudaMemcpyAsync(state.d_num_kv, state.num_kv.data(),
                         state.num_kv.size() * sizeof(uint32_t),
                         cudaMemcpyHostToDevice, state.stream);
+        cudaEventRecord(state.h2d_stop, state.stream);
 
         cudaEventRecord(state.kernel_start, state.stream);
         unpack_kernel<<<state.num_blocks, block_dim, 0, state.stream>>>(
@@ -217,9 +261,12 @@ static inline GPUCompactionResult gpu_q_compaction_from_parsed(const std::vector
     for (auto& state : unpack_states) {
         if (!state.stream) continue;
         cudaStreamSynchronize(state.stream);
+        cudaEventElapsedTime(&state.h2d_ms, state.h2d_start, state.h2d_stop);
         float kernel_ms = 0.0f;
         cudaEventElapsedTime(&kernel_ms, state.kernel_start, state.kernel_stop);
         result.unpack_kernel_ms += kernel_ms;
+        result.unpack_h2d_ms += state.h2d_ms;
+        result.unpack_h2d_bytes += state.h2d_bytes;
     }
     auto t1 = std::chrono::steady_clock::now();
     result.stage.unpack_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
@@ -238,6 +285,10 @@ static inline GPUCompactionResult gpu_q_compaction_from_parsed(const std::vector
     t1 = std::chrono::steady_clock::now();
     result.stage.merge_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
     result.merge_kernel_ms = merged.kernel_ms;
+    result.merge_h2d_ms = merged.h2d_ms;
+    result.merge_d2h_ms = merged.d2h_ms;
+    result.merge_h2d_bytes = merged.h2d_bytes;
+    result.merge_d2h_bytes = merged.d2h_bytes;
     result.merged = std::move(merged.merged);
     for (auto& state : unpack_states) destroy_unpack_stream_state(state);
 
@@ -251,6 +302,10 @@ static inline GPUCompactionResult gpu_q_compaction_from_parsed(const std::vector
     t1 = std::chrono::steady_clock::now();
     result.stage.bloom_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
     result.bloom_kernel_ms = bloom.kernel_ms;
+    result.bloom_h2d_ms = bloom.h2d_ms;
+    result.bloom_d2h_ms = bloom.d2h_ms;
+    result.bloom_h2d_bytes = bloom.h2d_bytes;
+    result.bloom_d2h_bytes = bloom.d2h_bytes;
 
     t0 = std::chrono::steady_clock::now();
     PackTimedResult pack = launch_pack_timed_from_device(merged.d_output, plans);
@@ -262,6 +317,10 @@ static inline GPUCompactionResult gpu_q_compaction_from_parsed(const std::vector
     t1 = std::chrono::steady_clock::now();
     result.stage.pack_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
     result.pack_kernel_ms = pack.kernel_ms;
+    result.pack_h2d_ms = pack.h2d_ms;
+    result.pack_d2h_ms = pack.d2h_ms;
+    result.pack_h2d_bytes = pack.h2d_bytes;
+    result.pack_d2h_bytes = pack.d2h_bytes;
     cudaFree(merged.d_output);
     return result;
 }
@@ -296,6 +355,8 @@ static inline GPUCompactionResult gpu_q_compaction_pipeline_from_parsed(const st
         if (block_dim < 32) block_dim = 32;
 
         cudaStreamCreate(&state.stream);
+        cudaEventCreate(&state.h2d_start);
+        cudaEventCreate(&state.h2d_stop);
         cudaEventCreate(&state.kernel_start);
         cudaEventCreate(&state.kernel_stop);
         cudaMalloc(&state.d_buf, inputs[i].file_bytes.size());
@@ -304,6 +365,11 @@ static inline GPUCompactionResult gpu_q_compaction_pipeline_from_parsed(const st
         cudaMalloc(&state.d_num_kv, state.num_kv.size() * sizeof(uint32_t));
         cudaMalloc(&state.d_out, (size_t)state.total_kv * sizeof(KVPair));
 
+        state.h2d_bytes = inputs[i].file_bytes.size()
+                + state.block_offsets.size() * sizeof(uint32_t)
+                + state.first_kv.size() * sizeof(uint32_t)
+                + state.num_kv.size() * sizeof(uint32_t);
+        cudaEventRecord(state.h2d_start, state.stream);
         cudaMemcpyAsync(state.d_buf, inputs[i].file_bytes.data(), inputs[i].file_bytes.size(),
                         cudaMemcpyHostToDevice, state.stream);
         cudaMemcpyAsync(state.d_offsets, state.block_offsets.data(),
@@ -315,6 +381,7 @@ static inline GPUCompactionResult gpu_q_compaction_pipeline_from_parsed(const st
         cudaMemcpyAsync(state.d_num_kv, state.num_kv.data(),
                         state.num_kv.size() * sizeof(uint32_t),
                         cudaMemcpyHostToDevice, state.stream);
+        cudaEventRecord(state.h2d_stop, state.stream);
 
         cudaEventRecord(state.kernel_start, state.stream);
         unpack_kernel<<<state.num_blocks, block_dim, 0, state.stream>>>(
@@ -324,9 +391,12 @@ static inline GPUCompactionResult gpu_q_compaction_pipeline_from_parsed(const st
     for (auto& state : unpack_states) {
         if (!state.stream) continue;
         cudaStreamSynchronize(state.stream);
+        cudaEventElapsedTime(&state.h2d_ms, state.h2d_start, state.h2d_stop);
         float kernel_ms = 0.0f;
         cudaEventElapsedTime(&kernel_ms, state.kernel_start, state.kernel_stop);
         result.unpack_kernel_ms += kernel_ms;
+        result.unpack_h2d_ms += state.h2d_ms;
+        result.unpack_h2d_bytes += state.h2d_bytes;
     }
     auto t1 = std::chrono::steady_clock::now();
     result.stage.unpack_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
@@ -345,14 +415,24 @@ static inline GPUCompactionResult gpu_q_compaction_pipeline_from_parsed(const st
     t1 = std::chrono::steady_clock::now();
     result.stage.merge_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
     result.merge_kernel_ms = merged.kernel_ms;
+    result.merge_h2d_ms = merged.h2d_ms;
+    result.merge_d2h_ms = merged.d2h_ms;
+    result.merge_h2d_bytes = merged.h2d_bytes;
+    result.merge_d2h_bytes = merged.d2h_bytes;
     for (auto& state : unpack_states) destroy_unpack_stream_state(state);
 
     t0 = std::chrono::steady_clock::now();
     DevicePlanResult plan = launch_plan_data_blocks_timed_from_device(merged.d_output, merged.total);
     t1 = std::chrono::steady_clock::now();
     result.stage.planning_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+    result.planning_h2d_ms = plan.h2d_ms;
+    result.planning_d2h_ms = plan.d2h_ms;
+    result.planning_h2d_bytes = plan.h2d_bytes;
+    result.planning_d2h_bytes = plan.d2h_bytes;
 
     copy_device_plans_to_host(plan);
+    result.planning_d2h_ms = plan.d2h_ms;
+    result.planning_d2h_bytes = plan.d2h_bytes;
 
     t0 = std::chrono::steady_clock::now();
     BloomBatchResult bloom = launch_bloom_filter_batched_from_device_plans(
@@ -360,6 +440,10 @@ static inline GPUCompactionResult gpu_q_compaction_pipeline_from_parsed(const st
     t1 = std::chrono::steady_clock::now();
     result.stage.bloom_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
     result.bloom_kernel_ms = bloom.kernel_ms;
+    result.bloom_h2d_ms = bloom.h2d_ms;
+    result.bloom_d2h_ms = bloom.d2h_ms;
+    result.bloom_h2d_bytes = bloom.h2d_bytes;
+    result.bloom_d2h_bytes = bloom.d2h_bytes;
 
     PackResult planned_layout;
     planned_layout.plans = plan.plans;
@@ -377,8 +461,11 @@ static inline GPUCompactionResult gpu_q_compaction_pipeline_from_parsed(const st
     t0 = std::chrono::steady_clock::now();
     PackTimedResult pack = launch_pack_timed_from_device_plan_spans(
         merged.d_output, plan.d_first_kv, plan.d_num_kv, plan.plans, pack_spans);
+    float largest_d2h_ms = 0.0f;
+    size_t largest_d2h_bytes = 0;
     std::vector<Key128> largest_keys =
-        copy_largest_keys_from_device(merged.d_output, plan.d_first_kv, plan.d_num_kv, plan.num_blocks);
+        copy_largest_keys_from_device(merged.d_output, plan.d_first_kv, plan.d_num_kv, plan.num_blocks,
+                                      &largest_d2h_ms, &largest_d2h_bytes);
     result.output = assemble_sst_files_targeted_from_largest_keys(largest_keys,
                                                                   pack.result,
                                                                   bloom.filter_bytes,
@@ -387,6 +474,10 @@ static inline GPUCompactionResult gpu_q_compaction_pipeline_from_parsed(const st
     t1 = std::chrono::steady_clock::now();
     result.stage.pack_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
     result.pack_kernel_ms = pack.kernel_ms;
+    result.pack_h2d_ms = pack.h2d_ms;
+    result.pack_d2h_ms = pack.d2h_ms + largest_d2h_ms;
+    result.pack_h2d_bytes = pack.h2d_bytes;
+    result.pack_d2h_bytes = pack.d2h_bytes + largest_d2h_bytes;
 
     destroy_device_plan_result(plan);
     cudaFree(merged.d_output);
@@ -423,6 +514,8 @@ static inline GPUCompactionResult gpu_q_compaction_paper_from_parsed(const std::
         if (block_dim < 32) block_dim = 32;
 
         cudaStreamCreate(&state.stream);
+        cudaEventCreate(&state.h2d_start);
+        cudaEventCreate(&state.h2d_stop);
         cudaEventCreate(&state.kernel_start);
         cudaEventCreate(&state.kernel_stop);
         cudaMalloc(&state.d_buf, inputs[i].file_bytes.size());
@@ -431,6 +524,11 @@ static inline GPUCompactionResult gpu_q_compaction_paper_from_parsed(const std::
         cudaMalloc(&state.d_num_kv, state.num_kv.size() * sizeof(uint32_t));
         cudaMalloc(&state.d_out, (size_t)state.total_kv * sizeof(KVPair));
 
+        state.h2d_bytes = inputs[i].file_bytes.size()
+                + state.block_offsets.size() * sizeof(uint32_t)
+                + state.first_kv.size() * sizeof(uint32_t)
+                + state.num_kv.size() * sizeof(uint32_t);
+        cudaEventRecord(state.h2d_start, state.stream);
         cudaMemcpyAsync(state.d_buf, inputs[i].file_bytes.data(), inputs[i].file_bytes.size(),
                         cudaMemcpyHostToDevice, state.stream);
         cudaMemcpyAsync(state.d_offsets, state.block_offsets.data(),
@@ -442,6 +540,7 @@ static inline GPUCompactionResult gpu_q_compaction_paper_from_parsed(const std::
         cudaMemcpyAsync(state.d_num_kv, state.num_kv.data(),
                         state.num_kv.size() * sizeof(uint32_t),
                         cudaMemcpyHostToDevice, state.stream);
+        cudaEventRecord(state.h2d_stop, state.stream);
 
         cudaEventRecord(state.kernel_start, state.stream);
         unpack_kernel<<<state.num_blocks, block_dim, 0, state.stream>>>(
@@ -451,9 +550,12 @@ static inline GPUCompactionResult gpu_q_compaction_paper_from_parsed(const std::
     for (auto& state : unpack_states) {
         if (!state.stream) continue;
         cudaStreamSynchronize(state.stream);
+        cudaEventElapsedTime(&state.h2d_ms, state.h2d_start, state.h2d_stop);
         float kernel_ms = 0.0f;
         cudaEventElapsedTime(&kernel_ms, state.kernel_start, state.kernel_stop);
         result.unpack_kernel_ms += kernel_ms;
+        result.unpack_h2d_ms += state.h2d_ms;
+        result.unpack_h2d_bytes += state.h2d_bytes;
     }
     auto t1 = std::chrono::steady_clock::now();
     result.stage.unpack_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
@@ -472,6 +574,10 @@ static inline GPUCompactionResult gpu_q_compaction_paper_from_parsed(const std::
     t1 = std::chrono::steady_clock::now();
     result.stage.merge_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
     result.merge_kernel_ms = merged.kernel_ms;
+    result.merge_h2d_ms = merged.h2d_ms;
+    result.merge_d2h_ms = merged.d2h_ms;
+    result.merge_h2d_bytes = merged.h2d_bytes;
+    result.merge_d2h_bytes = merged.d2h_bytes;
     for (auto& state : unpack_states) destroy_unpack_stream_state(state);
 
     t0 = std::chrono::steady_clock::now();
@@ -483,6 +589,10 @@ static inline GPUCompactionResult gpu_q_compaction_paper_from_parsed(const std::
     result.stage.planning_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
 
     DevicePlanArrays device_plans = upload_plans_to_device(plans);
+    result.planning_h2d_ms = device_plans.h2d_ms;
+    result.planning_h2d_bytes = device_plans.h2d_bytes;
+    result.planning_d2h_ms = std::max(0.0, (double)group_sizes.wall_ms - (double)group_sizes.kernel_ms);
+    result.planning_d2h_bytes = group_sizes.group_sizes.size() * sizeof(uint32_t);
 
     t0 = std::chrono::steady_clock::now();
     BloomBatchResult bloom = launch_bloom_filter_batched_from_device_plans(
@@ -490,6 +600,10 @@ static inline GPUCompactionResult gpu_q_compaction_paper_from_parsed(const std::
     t1 = std::chrono::steady_clock::now();
     result.stage.bloom_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
     result.bloom_kernel_ms = bloom.kernel_ms;
+    result.bloom_h2d_ms = bloom.h2d_ms;
+    result.bloom_d2h_ms = bloom.d2h_ms;
+    result.bloom_h2d_bytes = bloom.h2d_bytes;
+    result.bloom_d2h_bytes = bloom.d2h_bytes;
 
     PackResult planned_layout;
     planned_layout.plans = plans;
@@ -506,9 +620,11 @@ static inline GPUCompactionResult gpu_q_compaction_paper_from_parsed(const std::
     t0 = std::chrono::steady_clock::now();
     PackTimedResult pack = launch_pack_timed_from_device_plan_spans(
         merged.d_output, device_plans.d_first_kv, device_plans.d_num_kv, plans, pack_spans);
+    float largest_d2h_ms = 0.0f;
+    size_t largest_d2h_bytes = 0;
     std::vector<Key128> largest_keys =
         copy_largest_keys_from_device(merged.d_output, device_plans.d_first_kv, device_plans.d_num_kv,
-                                      device_plans.num_blocks);
+                                      device_plans.num_blocks, &largest_d2h_ms, &largest_d2h_bytes);
     result.output = assemble_sst_files_targeted_from_largest_keys(largest_keys,
                                                                   pack.result,
                                                                   bloom.filter_bytes,
@@ -517,6 +633,10 @@ static inline GPUCompactionResult gpu_q_compaction_paper_from_parsed(const std::
     t1 = std::chrono::steady_clock::now();
     result.stage.pack_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
     result.pack_kernel_ms = pack.kernel_ms;
+    result.pack_h2d_ms = pack.h2d_ms;
+    result.pack_d2h_ms = pack.d2h_ms + largest_d2h_ms;
+    result.pack_h2d_bytes = pack.h2d_bytes;
+    result.pack_d2h_bytes = pack.d2h_bytes + largest_d2h_bytes;
 
     destroy_device_plan_arrays(device_plans);
     cudaFree(merged.d_output);
@@ -587,6 +707,8 @@ static inline GPUCompactionResult gpu_q_compaction_without_plan_from_parsed(cons
         if (block_dim < 32) block_dim = 32;
 
         cudaStreamCreate(&state.stream);
+        cudaEventCreate(&state.h2d_start);
+        cudaEventCreate(&state.h2d_stop);
         cudaEventCreate(&state.kernel_start);
         cudaEventCreate(&state.kernel_stop);
         cudaMalloc(&state.d_buf, inputs[i].file_bytes.size());
@@ -595,6 +717,11 @@ static inline GPUCompactionResult gpu_q_compaction_without_plan_from_parsed(cons
         cudaMalloc(&state.d_num_kv, state.num_kv.size() * sizeof(uint32_t));
         cudaMalloc(&state.d_out, (size_t)state.total_kv * sizeof(KVPair));
 
+        state.h2d_bytes = inputs[i].file_bytes.size()
+                + state.block_offsets.size() * sizeof(uint32_t)
+                + state.first_kv.size() * sizeof(uint32_t)
+                + state.num_kv.size() * sizeof(uint32_t);
+        cudaEventRecord(state.h2d_start, state.stream);
         cudaMemcpyAsync(state.d_buf, inputs[i].file_bytes.data(), inputs[i].file_bytes.size(),
                         cudaMemcpyHostToDevice, state.stream);
         cudaMemcpyAsync(state.d_offsets, state.block_offsets.data(),
@@ -606,6 +733,7 @@ static inline GPUCompactionResult gpu_q_compaction_without_plan_from_parsed(cons
         cudaMemcpyAsync(state.d_num_kv, state.num_kv.data(),
                         state.num_kv.size() * sizeof(uint32_t),
                         cudaMemcpyHostToDevice, state.stream);
+        cudaEventRecord(state.h2d_stop, state.stream);
 
         cudaEventRecord(state.kernel_start, state.stream);
         unpack_kernel<<<state.num_blocks, block_dim, 0, state.stream>>>(
@@ -615,9 +743,12 @@ static inline GPUCompactionResult gpu_q_compaction_without_plan_from_parsed(cons
     for (auto& state : unpack_states) {
         if (!state.stream) continue;
         cudaStreamSynchronize(state.stream);
+        cudaEventElapsedTime(&state.h2d_ms, state.h2d_start, state.h2d_stop);
         float kernel_ms = 0.0f;
         cudaEventElapsedTime(&kernel_ms, state.kernel_start, state.kernel_stop);
         result.unpack_kernel_ms += kernel_ms;
+        result.unpack_h2d_ms += state.h2d_ms;
+        result.unpack_h2d_bytes += state.h2d_bytes;
     }
     auto t1 = std::chrono::steady_clock::now();
     result.stage.unpack_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
@@ -636,6 +767,10 @@ static inline GPUCompactionResult gpu_q_compaction_without_plan_from_parsed(cons
     t1 = std::chrono::steady_clock::now();
     result.stage.merge_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
     result.merge_kernel_ms = merged.kernel_ms;
+    result.merge_h2d_ms = merged.h2d_ms;
+    result.merge_d2h_ms = merged.d2h_ms;
+    result.merge_h2d_bytes = merged.h2d_bytes;
+    result.merge_d2h_bytes = merged.d2h_bytes;
     for (auto& state : unpack_states) destroy_unpack_stream_state(state);
 
     t0 = std::chrono::steady_clock::now();
@@ -644,6 +779,8 @@ static inline GPUCompactionResult gpu_q_compaction_without_plan_from_parsed(cons
     result.stage.planning_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
     
     DevicePlanArrays device_plans = upload_plans_to_device(plans);
+    result.planning_h2d_ms = device_plans.h2d_ms;
+    result.planning_h2d_bytes = device_plans.h2d_bytes;
 
     t0 = std::chrono::steady_clock::now();
     BloomBatchResult bloom = launch_bloom_filter_batched_from_device_plans(
@@ -651,6 +788,10 @@ static inline GPUCompactionResult gpu_q_compaction_without_plan_from_parsed(cons
     t1 = std::chrono::steady_clock::now();
     result.stage.bloom_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
     result.bloom_kernel_ms = bloom.kernel_ms;
+    result.bloom_h2d_ms = bloom.h2d_ms;
+    result.bloom_d2h_ms = bloom.d2h_ms;
+    result.bloom_h2d_bytes = bloom.h2d_bytes;
+    result.bloom_d2h_bytes = bloom.d2h_bytes;
 
     t0 = std::chrono::steady_clock::now();
     PackTimedResult pack =
@@ -659,9 +800,11 @@ static inline GPUCompactionResult gpu_q_compaction_without_plan_from_parsed(cons
                                             device_plans.d_num_kv,
                                             device_plans.num_blocks);
     pack.result.plans = plans;
+    float largest_d2h_ms = 0.0f;
+    size_t largest_d2h_bytes = 0;
     std::vector<Key128> largest_keys =
         copy_largest_keys_from_device(merged.d_output, device_plans.d_first_kv, device_plans.d_num_kv,
-                                      device_plans.num_blocks);
+                                      device_plans.num_blocks, &largest_d2h_ms, &largest_d2h_bytes);
     result.output = assemble_sst_files_targeted_from_largest_keys(largest_keys,
                                                                   pack.result,
                                                                   bloom.filter_bytes,
@@ -670,6 +813,10 @@ static inline GPUCompactionResult gpu_q_compaction_without_plan_from_parsed(cons
     t1 = std::chrono::steady_clock::now();
     result.stage.pack_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
     result.pack_kernel_ms = pack.kernel_ms;
+    result.pack_h2d_ms = pack.h2d_ms;
+    result.pack_d2h_ms = pack.d2h_ms + largest_d2h_ms;
+    result.pack_h2d_bytes = pack.h2d_bytes;
+    result.pack_d2h_bytes = pack.d2h_bytes + largest_d2h_bytes;
 
     destroy_device_plan_arrays(device_plans);
     cudaFree(merged.d_output);

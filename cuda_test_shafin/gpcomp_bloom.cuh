@@ -155,6 +155,10 @@ struct BloomBatchResult {
     std::vector<uint32_t> bitvec_lengths;
     float                 kernel_ms = 0.0f;
     float                 wall_ms = 0.0f;
+    float                 h2d_ms = 0.0f;
+    float                 d2h_ms = 0.0f;
+    size_t                h2d_bytes = 0;
+    size_t                d2h_bytes = 0;
 };
 
 static inline BloomBatchResult launch_bloom_filter_batched(const std::vector<KVPair>&              kv_array,
@@ -193,10 +197,14 @@ static inline BloomBatchResult launch_bloom_filter_batched(const std::vector<KVP
     cudaMalloc(&d_filter, total_bytes);
 
     auto wall_start = std::chrono::steady_clock::now();
+    auto h2d_start = std::chrono::steady_clock::now();
     cudaMemcpy(d_kv, kv_array.data(), kv_array.size() * sizeof(KVPair), cudaMemcpyHostToDevice);
     cudaMemcpy(d_first_kv, first_kv.data(), plans.size() * sizeof(uint32_t), cudaMemcpyHostToDevice);
     cudaMemcpy(d_num_kv, num_kv.data(), plans.size() * sizeof(uint32_t), cudaMemcpyHostToDevice);
     cudaMemcpy(d_offsets, result.bitvec_offsets.data(), plans.size() * sizeof(uint32_t), cudaMemcpyHostToDevice);
+    auto h2d_end = std::chrono::steady_clock::now();
+    result.h2d_ms = (float)std::chrono::duration<double, std::milli>(h2d_end - h2d_start).count();
+    result.h2d_bytes = kv_array.size() * sizeof(KVPair) + plans.size() * sizeof(uint32_t) * 3;
 
     int max_byte_vector_len = (int)(max_num_kv * GP_BLOOM_BITS_PER_KEY);
     int max_bitvec_len = (max_byte_vector_len + 7) / 8;
@@ -214,7 +222,11 @@ static inline BloomBatchResult launch_bloom_filter_batched(const std::vector<KVP
     cudaEventSynchronize(ev1);
     cudaEventElapsedTime(&result.kernel_ms, ev0, ev1);
 
+    auto d2h_start = std::chrono::steady_clock::now();
     cudaMemcpy(result.filter_bytes.data(), d_filter, total_bytes, cudaMemcpyDeviceToHost);
+    auto d2h_end = std::chrono::steady_clock::now();
+    result.d2h_ms = (float)std::chrono::duration<double, std::milli>(d2h_end - d2h_start).count();
+    result.d2h_bytes = total_bytes;
     auto wall_end = std::chrono::steady_clock::now();
     result.wall_ms = (float)std::chrono::duration<double, std::milli>(wall_end - wall_start).count();
 
@@ -263,9 +275,13 @@ launch_bloom_filter_batched_from_device(const KVPair*                         d_
     cudaMalloc(&d_filter, total_bytes);
 
     auto wall_start = std::chrono::steady_clock::now();
+    auto h2d_start = std::chrono::steady_clock::now();
     cudaMemcpy(d_first_kv, first_kv.data(), plans.size() * sizeof(uint32_t), cudaMemcpyHostToDevice);
     cudaMemcpy(d_num_kv, num_kv.data(), plans.size() * sizeof(uint32_t), cudaMemcpyHostToDevice);
     cudaMemcpy(d_offsets, result.bitvec_offsets.data(), plans.size() * sizeof(uint32_t), cudaMemcpyHostToDevice);
+    auto h2d_end = std::chrono::steady_clock::now();
+    result.h2d_ms = (float)std::chrono::duration<double, std::milli>(h2d_end - h2d_start).count();
+    result.h2d_bytes = plans.size() * sizeof(uint32_t) * 3;
 
     int max_byte_vector_len = (int)(max_num_kv * GP_BLOOM_BITS_PER_KEY);
     int max_bitvec_len = (max_byte_vector_len + 7) / 8;
@@ -283,7 +299,11 @@ launch_bloom_filter_batched_from_device(const KVPair*                         d_
     cudaEventSynchronize(ev1);
     cudaEventElapsedTime(&result.kernel_ms, ev0, ev1);
 
+    auto d2h_start = std::chrono::steady_clock::now();
     cudaMemcpy(result.filter_bytes.data(), d_filter, total_bytes, cudaMemcpyDeviceToHost);
+    auto d2h_end = std::chrono::steady_clock::now();
+    result.d2h_ms = (float)std::chrono::duration<double, std::milli>(d2h_end - d2h_start).count();
+    result.d2h_bytes = total_bytes;
     auto wall_end = std::chrono::steady_clock::now();
     result.wall_ms = (float)std::chrono::duration<double, std::milli>(wall_end - wall_start).count();
 
@@ -306,7 +326,11 @@ launch_bloom_filter_batched_from_device_plans(const KVPair*      d_kv,
     if (num_blocks <= 0) return result;
 
     std::vector<uint32_t> host_num_kv((size_t)num_blocks);
+    auto d2h_plan_start = std::chrono::steady_clock::now();
     cudaMemcpy(host_num_kv.data(), d_num_kv, (size_t)num_blocks * sizeof(uint32_t), cudaMemcpyDeviceToHost);
+    auto d2h_plan_end = std::chrono::steady_clock::now();
+    result.d2h_ms += (float)std::chrono::duration<double, std::milli>(d2h_plan_end - d2h_plan_start).count();
+    result.d2h_bytes += (size_t)num_blocks * sizeof(uint32_t);
 
     uint32_t max_num_kv = 0;
     for (uint32_t n : host_num_kv) max_num_kv = std::max(max_num_kv, n);
@@ -321,7 +345,11 @@ launch_bloom_filter_batched_from_device_plans(const KVPair*      d_kv,
     bloom_filter_layout_kernel<<<1, 1>>>(d_num_kv, num_blocks, d_offsets, d_lengths, d_total_bytes);
 
     uint32_t total_bytes = 0;
+    auto d2h_total_start = std::chrono::steady_clock::now();
     cudaMemcpy(&total_bytes, d_total_bytes, sizeof(uint32_t), cudaMemcpyDeviceToHost);
+    auto d2h_total_end = std::chrono::steady_clock::now();
+    result.d2h_ms += (float)std::chrono::duration<double, std::milli>(d2h_total_end - d2h_total_start).count();
+    result.d2h_bytes += sizeof(uint32_t);
     result.filter_bytes.resize(total_bytes);
     result.bitvec_offsets.resize((size_t)num_blocks);
     result.bitvec_lengths.resize((size_t)num_blocks);
@@ -346,11 +374,15 @@ launch_bloom_filter_batched_from_device_plans(const KVPair*      d_kv,
     cudaEventSynchronize(ev1);
     cudaEventElapsedTime(&result.kernel_ms, ev0, ev1);
 
+    auto d2h_data_start = std::chrono::steady_clock::now();
     cudaMemcpy(result.filter_bytes.data(), d_filter, total_bytes, cudaMemcpyDeviceToHost);
     cudaMemcpy(result.bitvec_offsets.data(), d_offsets,
                (size_t)num_blocks * sizeof(uint32_t), cudaMemcpyDeviceToHost);
     cudaMemcpy(result.bitvec_lengths.data(), d_lengths,
                (size_t)num_blocks * sizeof(uint32_t), cudaMemcpyDeviceToHost);
+    auto d2h_data_end = std::chrono::steady_clock::now();
+    result.d2h_ms += (float)std::chrono::duration<double, std::milli>(d2h_data_end - d2h_data_start).count();
+    result.d2h_bytes += total_bytes + (size_t)num_blocks * sizeof(uint32_t) * 2;
     auto wall_end = std::chrono::steady_clock::now();
     result.wall_ms = (float)std::chrono::duration<double, std::milli>(wall_end - wall_start).count();
 
