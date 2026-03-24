@@ -1,96 +1,153 @@
 # `cuda_test_shafin`
 
-This directory is a narrowed GPComp reproduction focused only on the paper's Q-compaction path.
+This is the small GPComp sandbox for end-to-end GPU compaction experiments.
 
-Fixed configuration:
+Right now the benchmark compares one CPU baseline against 4 main GPU modes:
 
-- 4 input SSTables
-- 8 MiB dummy SSTable target size per input file
-- 16-byte keys
-- 32-byte values
-- 32 KiB data blocks
-- restart interval = 4
-- Q-compaction only
-- no garbage collection
-- CPU vs GPU timing measured from first input-file read to final output-file write
+- `q_paper_with_plan`
+- `q_paper_without_plan`
+- `c_paper_with_plan`
+- `c_paper_without_plan`
 
-Implemented units:
+There are also two extra experimental modes for C-compaction:
 
-- Unpack unit: parse SST data blocks into flat KV arrays
-- Sort unit: Algorithm 1 merge kernel from the paper
-- Pack unit:
-  - data block generation with restart interval 4
-  - Bloom filter generation with Algorithm 2
-  - index block emission
-  - SST footer / metadata emission
+- `c_paper_keys_only_with_plan`
+- `c_paper_keys_only_without_plan`
 
-What was intentionally removed from the copied baseline:
+## CPU baseline used everywhere
 
-- C-compaction paths
-- mixed benchmark modes unrelated to the first Q-compaction milestone
-- configurable restart interval and approximate keys-per-block modelling
-- legacy merge+bloom-only simulations
+Every benchmark run compares against the same CPU baseline:
 
-Build:
+- CPU unpack
+- CPU merge/sort
+- CPU full garbage collection
+- CPU group-aligned planning
+- CPU bloom generation
+- CPU pack + SST assembly + write
+
+## The 4 GPU modes
+
+- `q_paper_with_plan`
+  - GPU does unpack + merge.
+  - No GPU GC.
+  - GPU sends restart-group size metadata to CPU.
+  - CPU does planning.
+  - GPU packs and writes.
+  - Overhead: planning round trip.
+
+- `q_paper_without_plan`
+  - GPU does unpack + merge.
+  - No GPU GC.
+  - No CPU planning round trip.
+  - Uses static planning.
+  - Overhead: smallest host/device overhead, but output layout can differ from CPU.
+
+- `c_paper_with_plan`
+  - GPU does unpack + merge.
+  - Then data goes to CPU for garbage collection.
+  - After GC, GPU computes restart-group sizes, CPU does planning, GPU packs and writes.
+  - Overhead: GC round trip + planning round trip.
+
+- `c_paper_without_plan`
+  - GPU does unpack + merge.
+  - Then data goes to CPU for garbage collection.
+  - After GC, it skips CPU planning and uses static planning.
+  - Overhead: GC round trip, but less metadata traffic than `c_paper_with_plan`.
+
+- `q` vs `c` tells you how much the CPU-side GC costs.
+- `with_plan` vs `without_plan` tells you how much the planning round trip costs.
+
+## Build
 
 ```bash
+cd /home/1755_project/invalidation-aware-caching/cuda_test_shafin
 make all
 ```
 
-Generate the 4 input SSTables:
+## Synthetic data generation
+
+Synthetic input SSTs are generated with `gpcomp_datagen`.
+
+Basic example:
 
 ```bash
-./gpcomp_datagen --out_dir dataset_shafin
+./gpcomp_datagen --out_dir dataset
 ```
 
-Run unit tests:
+Uniform datagen over a large key space:
+
+```bash
+./gpcomp_datagen --out_dir dataset_uniform20m --seed 23 --zipf_alpha 0.0 --user_key_space 20000000
+```
+
+Zipfian datagen example:
+
+```bash
+./gpcomp_datagen --out_dir dataset_zipf --seed 23 --zipf_alpha 0.6 --user_key_space 20000000
+```
+
+Useful knobs:
+
+- `--zipf_alpha 0.0` means uniform in the current generator
+- larger `--zipf_alpha` means more skew / more overlap
+- `--user_key_space` controls how many user keys we draw from
+- smaller key space means more overwritten versions and more work for GC
+
+## Unit tests
 
 ```bash
 ./gpcomp_unit_tests
 ```
 
-Run the end-to-end benchmark:
+## Single benchmark runs
 
 ```bash
-./gpcomp_bench --dataset dataset_shafin --out_dir results_shafin --runs 3
+./gpcomp_bench --dataset dataset --out_dir results_tmp --runs 5 --gpu_mode q_paper_with_plan
+./gpcomp_bench --dataset dataset --out_dir results_tmp --runs 5 --gpu_mode q_paper_without_plan
+./gpcomp_bench --dataset dataset --out_dir results_tmp --runs 5 --gpu_mode c_paper_with_plan
+./gpcomp_bench --dataset dataset --out_dir results_tmp --runs 5 --gpu_mode c_paper_without_plan
 ```
 
-Run the stricter Q-compaction pipeline experiment that keeps the merged KV array on device and only materializes host output state near the end:
+Keys-only GC experiment:
 
 ```bash
-./gpcomp_bench --dataset dataset_shafin --out_dir results_shafin --runs 3 --gpu_mode q_pipeline
+./gpcomp_bench --dataset dataset --out_dir results_tmp --runs 5 --gpu_mode c_paper_keys_only_with_plan
+./gpcomp_bench --dataset dataset --out_dir results_tmp --runs 5 --gpu_mode c_paper_keys_only_without_plan
 ```
 
-Run the paper-shaped Q-compaction mode that plans at restart-group granularity, packs one output SST span per CUDA stream, and preserves CPU/GPU output identity under that layout:
+## Sweeps and plots
+
+The sweep script rebuilds for each value size, regenerates datasets, runs the selected modes, saves logs under `sweep_results/`, and then calls `plot_results.py`.
+
+4-SST sweep:
 
 ```bash
-./gpcomp_bench --dataset dataset_shafin --out_dir results_shafin --runs 3 --gpu_mode q_paper
+bash run_sweep.sh --num_ssts 4 --values "32 64 128 256 512 1024" --runs 5
 ```
 
-Run the experimental overlap variant that precompresses restart groups on a separate GPU stream while restart-group sizes are copied back for CPU planning:
+24-SST sweep:
 
 ```bash
-./gpcomp_bench --dataset dataset_shafin --out_dir results_shafin --runs 3 --gpu_mode q_paper_overlap
+bash run_sweep.sh --num_ssts 24 --values "32 64 128 256 512 1024" --runs 5
 ```
 
-Benchmark snapshots on this machine (`RTX 3070`, 4 x ~8 MiB input SSTs):
+Current defaults in `run_sweep.sh`:
 
-- legacy path: CPU `141.27 ms`, GPU `62.28 ms`, speedup `2.27x`, `PASS`
-- strict Q-pipeline path: CPU `136.65 ms`, GPU `98.21 ms`, speedup `1.39x`, `PASS`
-- paper-shaped Q path: CPU `133.83 ms`, GPU `43.77 ms`, speedup `3.06x`, `PASS`
+- uniform data (`--zipf_alpha 0.0`)
+- user key space `20000000`
+- modes `q_paper_with_plan q_paper_without_plan c_paper_with_plan c_paper_without_plan`
 
-Preserved baseline and current logs:
+The plots currently generated are:
 
-- baseline: `results_shafin/gpcomp_bench_baseline_20260315.log`
-- current legacy benchmark: `results_shafin/gpcomp_bench.log`
-- legacy snapshot: `results_shafin/gpcomp_bench_legacy_20260315.log`
-- Q-pipeline snapshot: `results_shafin/gpcomp_bench_q_pipeline_20260315.log`
-- Q-paper snapshot: `results_shafin/gpcomp_bench_q_paper_20260315.log`
-- Q-paper overlap snapshot: `results_shafin/gpcomp_bench_q_paper_overlap_20260315.log`
+- throughput
+- CPU utilization
+- SSD read/write bandwidth
 
-Main remaining optimization gap relative to the paper:
+## Main files
 
-- block planning and output-file partitioning are still CPU-side and sequential
-- index/meta/footer assembly is still host-side rather than GPU-generated
-- unpack still materializes full values instead of key + value references as described in the paper
-- disk I/O is still staged through host memory; the pipeline/GDS path is not wired into the benchmarked Q-compaction flow yet
+- `gpcomp_bench.cu`: benchmark driver and CPU/GPU comparison
+- `gpcomp_pipeline.cuh`: CPU and GPU compaction pipelines
+- `gpcomp_datagen.cpp`: synthetic SST generation entry point
+- `gpcomp_dummy_data.cuh`: key/value generation and Zipf / key-space control
+- `run_sweep.sh`: full sweep runner
+- `plot_results.py`: plotting from benchmark logs

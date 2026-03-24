@@ -1,12 +1,35 @@
-## QUICK RUN INSTRUCTIONS
+## QUICK RUN
 
-cd /path/to/cuda_test_shafin
+This is what I used to generate the current `sweep_results/` and `graphs/`.
 
-# 4-SST sweep (all value sizes)
+```bash
+cd /home/1755_project/invalidation-aware-caching/cuda_test_shafin
+
+# 4 input SSTs, all value sizes
 bash run_sweep.sh --num_ssts 4 --values "32 64 128 256 512 1024" --runs 5
 
-# 24-SST sweep (all value sizes)
+# 24 input SSTs, all value sizes
 bash run_sweep.sh --num_ssts 24 --values "32 64 128 256 512 1024" --runs 5
+```
+
+The sweep script already does the plotting at the end, so it fills in:
+
+- `sweep_results/sweep_8mb-sst_4sst`
+- `sweep_results/sweep_8mb-sst_24sst`
+- `graphs/`
+
+Current sweep defaults:
+
+- dataset distribution: uniform (`--zipf_alpha 0.0`)
+- user key space: `20000000`
+- modes: `q_paper_with_plan q_paper_without_plan c_paper_with_plan c_paper_without_plan`
+- runs per mode: `5`
+
+For Zipf instead of uniform:
+
+```bash
+bash run_sweep.sh --num_ssts 4 --values "32 64 128 256 512 1024" --runs 5 --zipf_alpha 0.6 --user_key_space 20000000
+```
 
 # Generate charts from sweep results
 python3 plot_results.py --sweep_dir sweep_results/sweep_8mb-sst_4sst --graphs_dir graphs
@@ -24,7 +47,6 @@ Optional Nsight profiling:
 3. implement c_paper with CPU side garbage collection
 4. do the microbenchmarks for different Input, Value, SSTable sizes as is done for the CPU microbenchmarking experiments: /invalidation-aware-caching/benchmarks/cpu/experiments/compaction_parallelism/final_compaction_sweep.sh)  
 5. perform IO/GPU (NVIDIA Nsight) measurements on 
-
 
 
 # NOTES:
