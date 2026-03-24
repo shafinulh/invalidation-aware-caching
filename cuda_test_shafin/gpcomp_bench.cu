@@ -21,6 +21,8 @@ struct RunSummary {
     double cpu_time_ms = 0.0;
     double read_parse_ms = 0.0;
     double write_ms = 0.0;
+    double pipeline_wall_ms = 0.0;
+    double pipeline_cpu_time_ms = 0.0;
     CompactionStageTimes stage;
     float unpack_kernel_ms = 0.0f;
     float merge_kernel_ms = 0.0f;
@@ -269,9 +271,15 @@ static RunSummary run_cpu_once(const std::vector<std::string>& input_paths,
     std::vector<ParsedSST> inputs = load_inputs_with_timing(input_paths, summary.read_parse_ms);
     summary.input_bytes = total_input_bytes(inputs);
     CPUCompactionResult cpu;
-    if (gpu_mode == "q_paper_with_plan" || gpu_mode == "q_paper_without_plan") {
+    double pipeline_cpu_start = get_cpu_time_ms();
+    auto   pipeline_wall_start = std::chrono::steady_clock::now();
+    if (gpu_mode == "q_paper_with_plan" || gpu_mode == "q_paper_without_plan" ||
+        gpu_mode == "q_paper_with_plan_profile" || gpu_mode == "q_paper_without_plan_profile") {
         cpu = cpu_q_compaction_paper_from_parsed(inputs);
     } else cpu = cpu_q_compaction_from_parsed(inputs);
+    auto pipeline_wall_end = std::chrono::steady_clock::now();
+    summary.pipeline_cpu_time_ms = get_cpu_time_ms() - pipeline_cpu_start;
+    summary.pipeline_wall_ms = std::chrono::duration<double, std::milli>(pipeline_wall_end - pipeline_wall_start).count();
 
     auto write_start = std::chrono::steady_clock::now();
     write_output_set(cpu.output, output_dir, "cpu_compacted");
@@ -300,6 +308,8 @@ static RunSummary run_gpu_once(const std::vector<std::string>& input_paths,
     summary.input_bytes = total_input_bytes(inputs);
     summary.h2d_lower_bound_bytes = lower_bound_unpack_h2d_bytes(inputs);
     GPUCompactionResult gpu;
+    double pipeline_cpu_start = get_cpu_time_ms();
+    auto   pipeline_wall_start = std::chrono::steady_clock::now();
     if (gpu_mode == "q_plan_on_gpu_slow") {
         gpu = gpu_q_compaction_pipeline_from_parsed(inputs);
     }
@@ -309,7 +319,16 @@ static RunSummary run_gpu_once(const std::vector<std::string>& input_paths,
     else if (gpu_mode == "q_paper_without_plan") {
         gpu = gpu_q_compaction_without_plan_from_parsed(inputs, false);
     }
+    else if (gpu_mode == "q_paper_with_plan_profile") {
+        gpu = gpu_q_compaction_paper_profile_from_parsed(inputs, false);
+    }
+    else if (gpu_mode == "q_paper_without_plan_profile") {
+        gpu = gpu_q_compaction_without_plan_profile_from_parsed(inputs, false);
+    }
     else gpu = gpu_q_compaction_from_parsed(inputs);
+    auto pipeline_wall_end = std::chrono::steady_clock::now();
+    summary.pipeline_cpu_time_ms = get_cpu_time_ms() - pipeline_cpu_start;
+    summary.pipeline_wall_ms = std::chrono::duration<double, std::milli>(pipeline_wall_end - pipeline_wall_start).count();
 
     auto write_start = std::chrono::steady_clock::now();
     if (!gpu.serialized_output.empty()) {
@@ -398,6 +417,7 @@ int main(int argc, char** argv)
     ensure_dir(out_dir);
     std::vector<std::string> input_paths = collect_sst_paths(dataset_dir, GP_NUM_INPUT_SSTS);
 
+    cudaSetDeviceFlags(cudaDeviceScheduleBlockingSync);
     cudaFree(0);
 
     std::printf("Q-compaction benchmark\n");
@@ -441,7 +461,8 @@ int main(int argc, char** argv)
     gpu_last = collect_sst_paths(out_dir + "/gpu_run" + std::to_string(runs - 1));
     bool exact_output_match = compare_output_sets(cpu_last, gpu_last);
     bool logical_output_match = compare_output_sets_logical(cpu_last, gpu_last);
-    bool outputs_match = (gpu_mode == "q_paper_without_plan") ? logical_output_match : exact_output_match;
+    bool outputs_match = (gpu_mode == "q_paper_without_plan" || gpu_mode == "q_paper_without_plan_profile")
+                       ? logical_output_match : exact_output_match;
 
     size_t cpu_best_idx = (size_t)(std::min_element(cpu_totals.begin(), cpu_totals.end()) - cpu_totals.begin());
     size_t gpu_best_idx = (size_t)(std::min_element(gpu_totals.begin(), gpu_totals.end()) - gpu_totals.begin());
@@ -451,11 +472,17 @@ int main(int argc, char** argv)
     std::printf("CPU total (Wall): min=%.2f ms  mean=%.2f +- %.2f ms\n",
                 cpu_total_stats.min, cpu_total_stats.mean, cpu_total_stats.stddev);
     std::printf("CPU total (CPU-Time): %.2f ms\n", cpu_best.cpu_time_ms);
+    std::printf("CPU pipeline (Wall): %.2f ms  (CPU-Time): %.2f ms  utilization: %.1f%%\n",
+                cpu_best.pipeline_wall_ms, cpu_best.pipeline_cpu_time_ms,
+                cpu_best.pipeline_wall_ms > 0 ? (cpu_best.pipeline_cpu_time_ms / cpu_best.pipeline_wall_ms) * 100.0 : 0.0);
     std::printf("GPU total (Wall): min=%.2f ms  mean=%.2f +- %.2f ms\n",
                 gpu_total_stats.min, gpu_total_stats.mean, gpu_total_stats.stddev);
     std::printf("GPU total (CPU-Time): %.2f ms\n", gpu_best.cpu_time_ms);
+    std::printf("GPU pipeline (Wall): %.2f ms  (CPU-Time): %.2f ms  utilization: %.1f%%\n",
+                gpu_best.pipeline_wall_ms, gpu_best.pipeline_cpu_time_ms,
+                gpu_best.pipeline_wall_ms > 0 ? (gpu_best.pipeline_cpu_time_ms / gpu_best.pipeline_wall_ms) * 100.0 : 0.0);
     std::printf("Speedup: %.2fx (min totals)\n", cpu_total_stats.min / gpu_total_stats.min);
-    if (gpu_mode == "q_paper_without_plan") {
+    if (gpu_mode == "q_paper_without_plan" || gpu_mode == "q_paper_without_plan_profile") {
         std::printf("Output logically identical: %s", logical_output_match ? "PASS" : "FAIL");
         if (!exact_output_match && logical_output_match) {
             std::printf("  (different block/file layout than CPU baseline)");

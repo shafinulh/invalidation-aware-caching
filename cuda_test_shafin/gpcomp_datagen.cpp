@@ -6,9 +6,10 @@
 
 static uint32_t tune_entries_per_sst(uint64_t seed)
 {
-    uint32_t low = 100000;
-    uint32_t high = 220000;
-    while (build_cpu_sst(high, 0, seed).file_bytes.size() < GP_TARGET_FILE_BYTES) high += 10000;
+    uint32_t low = 1;
+    uint32_t high = 2 * GP_TARGET_FILE_BYTES / (GP_KEY_BYTES + GP_VALUE_BYTES);
+    if (high < 100) high = 100;
+    while (build_cpu_sst(high, 0, seed).file_bytes.size() < GP_TARGET_FILE_BYTES) high *= 2;
 
     uint32_t best_entries = low;
     uint64_t best_diff = UINT64_MAX;

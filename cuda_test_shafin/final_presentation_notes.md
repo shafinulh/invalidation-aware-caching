@@ -1,19 +1,16 @@
 ## QUICK RUN INSTRUCTIONS
 
-Set your working directory and run the sweep (portable, no hardcoded host path):
+cd /path/to/cuda_test_shafin
 
-DIR="/path/to/cuda_test_shafin"
-cd "$DIR"
-./run_sweep.sh --runs 5 --values "32 64 128"
+# 4-SST sweep (all value sizes)
+bash run_sweep.sh --num_ssts 4 --values "32 64 128 256 512 1024" --runs 5
 
-Optional custom output/dataset prefix:
+# 24-SST sweep (all value sizes)
+bash run_sweep.sh --num_ssts 24 --values "32 64 128 256 512 1024" --runs 5
 
-./run_sweep.sh --out_dir "$DIR/results/my_sweep" --dataset_prefix dataset_shafin_V --runs 3 --values "32 64"
-
-Optional plotting (portable paths):
-
-python3 plot_results.py --results_dir "$DIR/results" --graphs_dir "$DIR/graphs"
-python3 plot_profile_metrics.py --results_dir "$DIR/results" --graphs_dir "$DIR/graphs"
+# Generate charts from sweep results
+python3 plot_results.py --sweep_dir sweep_results/sweep_8mb-sst_4sst --graphs_dir graphs
+python3 plot_results.py --sweep_dir sweep_results/sweep_8mb-sst_24sst --graphs_dir graphs
 
 Optional Nsight profiling:
 

@@ -849,3 +849,162 @@ static inline GPUCompactionResult gpu_q_compaction_without_plan_from_parsed(cons
     cudaFree(merged.d_output);
     return result;
 }
+
+/* ================================================================
+ *  Profile (instrumentation-free) pipeline functions.
+ *  No chrono, no cudaEvent, no per-stage timing.
+ *  Uses blocking-sync (cudaDeviceSynchronize) at natural boundaries.
+ * ================================================================ */
+
+static inline GPUCompactionResult gpu_q_compaction_paper_profile_from_parsed(
+    const std::vector<ParsedSST>& inputs, bool materialize_output = true)
+{
+    GPUCompactionResult result;
+
+    struct ProfUnpackState {
+        cudaStream_t stream = nullptr;
+        KVPair*      d_out = nullptr;
+        uint32_t     total_kv = 0;
+    };
+    std::vector<ProfUnpackState> pstates(inputs.size());
+
+    for (size_t i = 0; i < inputs.size(); ++i) {
+        auto iplans = plans_from_parsed(inputs[i]);
+        auto boff = block_offsets_from_parsed(inputs[i]);
+        std::vector<uint32_t> fkv(iplans.size()), nkv(iplans.size());
+        uint32_t tkv = inputs[i].footer.total_kv;
+        int nblk = (int)iplans.size();
+        for (size_t p = 0; p < iplans.size(); ++p) { fkv[p] = iplans[p].first_kv; nkv[p] = iplans[p].num_kv; }
+        if (nblk == 0) continue;
+
+        uint32_t mr = 0;
+        for (const auto& pl : iplans)
+            mr = std::max(mr, (pl.num_kv + (uint32_t)GP_RESTART_INTERVAL - 1u) / (uint32_t)GP_RESTART_INTERVAL);
+        int bd = ((int)mr + 31) / 32 * 32;
+        if (bd < 32) bd = 32;
+
+        uint8_t* d_buf = nullptr; uint32_t* d_off = nullptr; uint32_t* d_fkv = nullptr; uint32_t* d_nkv = nullptr;
+        KVPair* d_out = nullptr;
+        cudaStreamCreate(&pstates[i].stream);
+        cudaMalloc(&d_buf, inputs[i].file_bytes.size());
+        cudaMalloc(&d_off, boff.size() * sizeof(uint32_t));
+        cudaMalloc(&d_fkv, fkv.size() * sizeof(uint32_t));
+        cudaMalloc(&d_nkv, nkv.size() * sizeof(uint32_t));
+        cudaMalloc(&d_out, (size_t)tkv * sizeof(KVPair));
+
+        cudaMemcpyAsync(d_buf, inputs[i].file_bytes.data(), inputs[i].file_bytes.size(), cudaMemcpyHostToDevice, pstates[i].stream);
+        cudaMemcpyAsync(d_off, boff.data(), boff.size() * sizeof(uint32_t), cudaMemcpyHostToDevice, pstates[i].stream);
+        cudaMemcpyAsync(d_fkv, fkv.data(), fkv.size() * sizeof(uint32_t), cudaMemcpyHostToDevice, pstates[i].stream);
+        cudaMemcpyAsync(d_nkv, nkv.data(), nkv.size() * sizeof(uint32_t), cudaMemcpyHostToDevice, pstates[i].stream);
+        unpack_kernel<<<nblk, bd, 0, pstates[i].stream>>>(d_buf, d_off, d_fkv, d_nkv, nblk, d_out);
+
+        cudaStreamSynchronize(pstates[i].stream);
+        cudaFree(d_buf); cudaFree(d_off); cudaFree(d_fkv); cudaFree(d_nkv);
+        pstates[i].d_out = d_out;
+        pstates[i].total_kv = tkv;
+    }
+
+    std::vector<KVPair*> d_unpacked; std::vector<int> unpack_sizes;
+    for (auto& s : pstates) { d_unpacked.push_back(s.d_out); unpack_sizes.push_back((int)s.total_kv); }
+
+    auto merged = launch_merge_untimed_from_device(d_unpacked, unpack_sizes);
+    for (auto& s : pstates) { if (s.d_out) cudaFree(s.d_out); if (s.stream) cudaStreamDestroy(s.stream); }
+
+    auto gsizes = launch_restart_group_sizes_untimed_from_device(merged.d_output, merged.total);
+    auto plans = plan_data_blocks_group_aligned_from_group_sizes(gsizes, (uint32_t)merged.total);
+    auto dplans = upload_plans_to_device_untimed(plans);
+
+    auto bloom = launch_bloom_filter_batched_untimed_from_plans(merged.d_output, dplans.d_first_kv, dplans.d_num_kv, plans);
+
+    std::vector<uint32_t> pfl(plans.size());
+    PackResult prl; prl.plans = plans; prl.block_sizes.resize(plans.size());
+    for (size_t i = 0; i < plans.size(); ++i) { prl.block_sizes[i] = plans[i].serialized_size; pfl[i] = (plans[i].num_kv * GP_BLOOM_BITS_PER_KEY + 7u) / 8u; }
+    auto pspans = partition_output_blocks(prl, pfl, GP_TARGET_FILE_BYTES);
+
+    auto pack = launch_pack_untimed_from_device_plans(merged.d_output, dplans.d_first_kv, dplans.d_num_kv, plans);
+    Key128* d_lk = gather_largest_keys_to_device(merged.d_output, dplans.d_first_kv, dplans.d_num_kv, dplans.num_blocks);
+    auto asm_res = assemble_sst_files_untimed_on_device(plans, pack.block_sizes, pack.d_blocks, d_lk, bloom.d_filter_bytes, bloom.bitvec_offsets, bloom.bitvec_lengths, pspans, materialize_output);
+    result.output = std::move(asm_res.output);
+    result.serialized_output = std::move(asm_res.serialized_output);
+
+    if (d_lk) cudaFree(d_lk);
+    destroy_device_pack_untimed_result(pack);
+    destroy_device_bloom_batch_untimed_result(bloom);
+    destroy_device_plan_arrays_untimed(dplans);
+    cudaFree(merged.d_output);
+    return result;
+}
+
+static inline GPUCompactionResult gpu_q_compaction_without_plan_profile_from_parsed(
+    const std::vector<ParsedSST>& inputs, bool materialize_output = true)
+{
+    GPUCompactionResult result;
+
+    struct ProfUnpackState2 {
+        cudaStream_t stream = nullptr;
+        KVPair*      d_out = nullptr;
+        uint32_t     total_kv = 0;
+    };
+    std::vector<ProfUnpackState2> pstates(inputs.size());
+
+    for (size_t i = 0; i < inputs.size(); ++i) {
+        auto iplans = plans_from_parsed(inputs[i]);
+        auto boff = block_offsets_from_parsed(inputs[i]);
+        std::vector<uint32_t> fkv(iplans.size()), nkv(iplans.size());
+        uint32_t tkv = inputs[i].footer.total_kv;
+        int nblk = (int)iplans.size();
+        for (size_t p = 0; p < iplans.size(); ++p) { fkv[p] = iplans[p].first_kv; nkv[p] = iplans[p].num_kv; }
+        if (nblk == 0) continue;
+
+        uint32_t mr = 0;
+        for (const auto& pl : iplans)
+            mr = std::max(mr, (pl.num_kv + (uint32_t)GP_RESTART_INTERVAL - 1u) / (uint32_t)GP_RESTART_INTERVAL);
+        int bd = ((int)mr + 31) / 32 * 32;
+        if (bd < 32) bd = 32;
+
+        uint8_t* d_buf = nullptr; uint32_t* d_off = nullptr; uint32_t* d_fkv = nullptr; uint32_t* d_nkv = nullptr;
+        KVPair* d_out = nullptr;
+        cudaStreamCreate(&pstates[i].stream);
+        cudaMalloc(&d_buf, inputs[i].file_bytes.size());
+        cudaMalloc(&d_off, boff.size() * sizeof(uint32_t));
+        cudaMalloc(&d_fkv, fkv.size() * sizeof(uint32_t));
+        cudaMalloc(&d_nkv, nkv.size() * sizeof(uint32_t));
+        cudaMalloc(&d_out, (size_t)tkv * sizeof(KVPair));
+
+        cudaMemcpyAsync(d_buf, inputs[i].file_bytes.data(), inputs[i].file_bytes.size(), cudaMemcpyHostToDevice, pstates[i].stream);
+        cudaMemcpyAsync(d_off, boff.data(), boff.size() * sizeof(uint32_t), cudaMemcpyHostToDevice, pstates[i].stream);
+        cudaMemcpyAsync(d_fkv, fkv.data(), fkv.size() * sizeof(uint32_t), cudaMemcpyHostToDevice, pstates[i].stream);
+        cudaMemcpyAsync(d_nkv, nkv.data(), nkv.size() * sizeof(uint32_t), cudaMemcpyHostToDevice, pstates[i].stream);
+        unpack_kernel<<<nblk, bd, 0, pstates[i].stream>>>(d_buf, d_off, d_fkv, d_nkv, nblk, d_out);
+
+        cudaStreamSynchronize(pstates[i].stream);
+        cudaFree(d_buf); cudaFree(d_off); cudaFree(d_fkv); cudaFree(d_nkv);
+        pstates[i].d_out = d_out;
+        pstates[i].total_kv = tkv;
+    }
+
+    std::vector<KVPair*> d_unpacked; std::vector<int> unpack_sizes;
+    for (auto& s : pstates) { d_unpacked.push_back(s.d_out); unpack_sizes.push_back((int)s.total_kv); }
+
+    auto merged = launch_merge_untimed_from_device(d_unpacked, unpack_sizes);
+    for (auto& s : pstates) { if (s.d_out) cudaFree(s.d_out); if (s.stream) cudaStreamDestroy(s.stream); }
+
+    auto plans = plan_data_blocks_static((uint32_t)merged.total);
+    auto pspans = partition_output_blocks_from_plan_estimates(plans, GP_TARGET_FILE_BYTES);
+    auto dplans = upload_plans_to_device_untimed(plans);
+
+    auto bloom = launch_bloom_filter_batched_untimed_from_plans(merged.d_output, dplans.d_first_kv, dplans.d_num_kv, plans);
+
+    auto pack = launch_pack_untimed_from_device_plans(merged.d_output, dplans.d_first_kv, dplans.d_num_kv, plans);
+    Key128* d_lk = gather_largest_keys_to_device(merged.d_output, dplans.d_first_kv, dplans.d_num_kv, dplans.num_blocks);
+    auto asm_res = assemble_sst_files_untimed_on_device(plans, pack.block_sizes, pack.d_blocks, d_lk, bloom.d_filter_bytes, bloom.bitvec_offsets, bloom.bitvec_lengths, pspans, materialize_output);
+    result.output = std::move(asm_res.output);
+    result.serialized_output = std::move(asm_res.serialized_output);
+
+    if (d_lk) cudaFree(d_lk);
+    destroy_device_pack_untimed_result(pack);
+    destroy_device_bloom_batch_untimed_result(bloom);
+    destroy_device_plan_arrays_untimed(dplans);
+    cudaFree(merged.d_output);
+    return result;
+}

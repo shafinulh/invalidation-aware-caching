@@ -1467,3 +1467,106 @@ static inline std::vector<KVPair> cpu_unpack_all(const std::vector<uint8_t>&    
     }
     return out;
 }
+
+/* ---- untimed helpers for profile mode ---- */
+
+static inline std::vector<uint32_t>
+launch_restart_group_sizes_untimed_from_device(const KVPair* d_kv, int total_kv)
+{
+    if (total_kv <= 0) return {};
+    int num_groups = (total_kv + GP_RESTART_INTERVAL - 1) / GP_RESTART_INTERVAL;
+    uint32_t* d_group_sizes = nullptr;
+    cudaMalloc(&d_group_sizes, (size_t)num_groups * sizeof(uint32_t));
+
+    int block = 256;
+    int grid = (num_groups + block - 1) / block;
+    compute_restart_group_sizes_kernel<<<grid, block>>>(d_kv, total_kv, d_group_sizes);
+
+    std::vector<uint32_t> group_sizes((size_t)num_groups);
+    cudaMemcpy(group_sizes.data(), d_group_sizes,
+               (size_t)num_groups * sizeof(uint32_t), cudaMemcpyDeviceToHost);
+    cudaFree(d_group_sizes);
+    return group_sizes;
+}
+
+struct DevicePlanArraysUntimed {
+    uint32_t* d_first_kv = nullptr;
+    uint32_t* d_num_kv = nullptr;
+    int       num_blocks = 0;
+};
+
+static inline DevicePlanArraysUntimed upload_plans_to_device_untimed(const std::vector<DataBlockPlanEntry>& plans)
+{
+    DevicePlanArraysUntimed arrays;
+    arrays.num_blocks = (int)plans.size();
+    if (plans.empty()) return arrays;
+
+    std::vector<uint32_t> first_kv(plans.size());
+    std::vector<uint32_t> num_kv(plans.size());
+    for (size_t i = 0; i < plans.size(); ++i) {
+        first_kv[i] = plans[i].first_kv;
+        num_kv[i] = plans[i].num_kv;
+    }
+    cudaMalloc(&arrays.d_first_kv, plans.size() * sizeof(uint32_t));
+    cudaMalloc(&arrays.d_num_kv, plans.size() * sizeof(uint32_t));
+    cudaMemcpy(arrays.d_first_kv, first_kv.data(),
+               plans.size() * sizeof(uint32_t), cudaMemcpyHostToDevice);
+    cudaMemcpy(arrays.d_num_kv, num_kv.data(),
+               plans.size() * sizeof(uint32_t), cudaMemcpyHostToDevice);
+    return arrays;
+}
+
+static inline void destroy_device_plan_arrays_untimed(DevicePlanArraysUntimed& arrays)
+{
+    if (arrays.d_num_kv) cudaFree(arrays.d_num_kv);
+    if (arrays.d_first_kv) cudaFree(arrays.d_first_kv);
+    arrays = DevicePlanArraysUntimed{};
+}
+
+struct DevicePackUntimedResult {
+    uint8_t*              d_blocks = nullptr;
+    std::vector<uint32_t> block_sizes;
+};
+
+static inline DevicePackUntimedResult
+launch_pack_untimed_from_device_plans(const KVPair*                         d_kv,
+                                      const uint32_t*                       d_first_kv,
+                                      const uint32_t*                       d_num_kv,
+                                      const std::vector<DataBlockPlanEntry>& plans)
+{
+    DevicePackUntimedResult result;
+    int num_blocks = (int)plans.size();
+    if (num_blocks <= 0) return result;
+
+    uint8_t*  d_blocks = nullptr;
+    uint32_t* d_sizes = nullptr;
+    cudaMalloc(&d_blocks, (size_t)num_blocks * GP_DATA_BLOCK_BYTES);
+    cudaMalloc(&d_sizes, (size_t)num_blocks * sizeof(uint32_t));
+
+    uint32_t max_restarts = 0;
+    for (const auto& plan : plans)
+        max_restarts = std::max(max_restarts,
+                                (plan.num_kv + (uint32_t)GP_RESTART_INTERVAL - 1u)
+                              / (uint32_t)GP_RESTART_INTERVAL);
+    int block_dim = ((int)max_restarts + 31) / 32 * 32;
+    if (block_dim < 32) block_dim = 32;
+    int shared_bytes = (int)(max_restarts * 3 * sizeof(uint32_t));
+
+    pack_kernel<<<num_blocks, block_dim, shared_bytes>>>(
+        d_kv, d_first_kv, d_num_kv, num_blocks, d_blocks, d_sizes);
+    cudaDeviceSynchronize();
+
+    result.block_sizes.resize((size_t)num_blocks);
+    cudaMemcpy(result.block_sizes.data(), d_sizes,
+               (size_t)num_blocks * sizeof(uint32_t), cudaMemcpyDeviceToHost);
+
+    result.d_blocks = d_blocks;
+    cudaFree(d_sizes);
+    return result;
+}
+
+static inline void destroy_device_pack_untimed_result(DevicePackUntimedResult& r)
+{
+    if (r.d_blocks) cudaFree(r.d_blocks);
+    r = DevicePackUntimedResult{};
+}

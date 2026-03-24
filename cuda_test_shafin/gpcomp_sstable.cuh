@@ -1089,6 +1089,152 @@ assemble_sst_files_from_spans_on_device(const std::vector<DataBlockPlanEntry>&  
     return result;
 }
 
+struct DeviceAssembleSSTUntimedResult {
+    SSTBuildSet output;
+    SerializedSSTHostSet serialized_output;
+};
+
+static inline DeviceAssembleSSTUntimedResult
+assemble_sst_files_untimed_on_device(const std::vector<DataBlockPlanEntry>&      plans,
+                                     const std::vector<uint32_t>&                 block_sizes,
+                                     const uint8_t*                               d_packed_blocks,
+                                     const Key128*                                d_largest_keys,
+                                     const uint8_t*                               d_filter_bytes,
+                                     const std::vector<uint32_t>&                 filter_offsets,
+                                     const std::vector<uint32_t>&                 filter_lengths,
+                                     const std::vector<std::pair<size_t, size_t>>& spans,
+                                     bool                                          materialize_output = true)
+{
+    DeviceAssembleSSTUntimedResult result;
+    if (spans.empty()) return result;
+
+    std::vector<DeviceSSTFileLayout> layouts(spans.size());
+    std::vector<DeviceSSTBlockTask> tasks;
+    tasks.reserve(plans.size());
+
+    uint64_t total_output_bytes = 0;
+    for (size_t file_idx = 0; file_idx < spans.size(); ++file_idx) {
+        size_t block_begin = spans[file_idx].first;
+        size_t block_end = spans[file_idx].second;
+        gp_fail_if(block_begin >= block_end, "invalid SST block range");
+
+        size_t block_count = block_end - block_begin;
+        size_t kv_begin = plans[block_begin].first_kv;
+        size_t kv_end = plans[block_end - 1].first_kv + plans[block_end - 1].num_kv;
+
+        uint64_t data_region_size = 0;
+        uint64_t filter_region_size = 0;
+        for (size_t global = block_begin; global < block_end; ++global) {
+            data_region_size += block_sizes[global];
+            filter_region_size += sizeof(FilterBlockHeader) + filter_lengths[global];
+        }
+
+        DeviceSSTFileLayout& layout = layouts[file_idx];
+        layout.buffer_offset = total_output_bytes;
+        layout.filter_region_offset = data_region_size;
+        layout.filter_region_size = (uint32_t)filter_region_size;
+        layout.index_region_offset = layout.filter_region_offset + filter_region_size;
+        layout.index_region_size = (uint32_t)(block_count * sizeof(IndexEntry));
+        layout.filter_meta_offset = layout.index_region_offset + layout.index_region_size;
+        layout.filter_meta_size = (uint32_t)(block_count * sizeof(FilterBlockMeta));
+        layout.data_meta_offset = layout.filter_meta_offset + layout.filter_meta_size;
+        layout.data_meta_size = (uint32_t)(block_count * sizeof(DataBlockMeta));
+        layout.num_data_blocks = (uint32_t)block_count;
+        layout.total_kv = (uint32_t)(kv_end - kv_begin);
+        layout.total_size = layout.data_meta_offset + layout.data_meta_size + sizeof(SSTFooter);
+
+        uint64_t running_data_offset = 0;
+        uint64_t running_filter_offset = layout.filter_region_offset;
+        for (size_t local = 0; local < block_count; ++local) {
+            size_t global = block_begin + local;
+            DeviceSSTBlockTask task{};
+            task.file_index = (uint32_t)file_idx;
+            task.local_block_index = (uint32_t)local;
+            task.global_block_index = (uint32_t)global;
+            task.data_dst_offset = running_data_offset;
+            task.filter_dst_offset = running_filter_offset;
+            task.block_size = block_sizes[global];
+            task.filter_src_offset = filter_offsets[global];
+            task.filter_length = filter_lengths[global];
+            task.local_first_kv = (uint32_t)(plans[global].first_kv - kv_begin);
+            task.num_kv = plans[global].num_kv;
+            tasks.push_back(task);
+
+            running_data_offset += block_sizes[global];
+            running_filter_offset += sizeof(FilterBlockHeader) + filter_lengths[global];
+        }
+        total_output_bytes += layout.total_size;
+    }
+
+    uint8_t* d_all_files = nullptr;
+    DeviceSSTFileLayout* d_layouts = nullptr;
+    DeviceSSTBlockTask* d_tasks = nullptr;
+    cudaMalloc(&d_all_files, (size_t)std::max<uint64_t>(total_output_bytes, 1u));
+    cudaMalloc(&d_layouts, layouts.size() * sizeof(DeviceSSTFileLayout));
+    cudaMalloc(&d_tasks, tasks.size() * sizeof(DeviceSSTBlockTask));
+
+    cudaMemcpy(d_layouts, layouts.data(),
+               layouts.size() * sizeof(DeviceSSTFileLayout), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_tasks, tasks.data(),
+               tasks.size() * sizeof(DeviceSSTBlockTask), cudaMemcpyHostToDevice);
+
+    assemble_sst_blocks_kernel<<<(int)tasks.size(), 256>>>(
+        d_all_files, d_layouts, d_tasks, (int)tasks.size(), d_packed_blocks, d_filter_bytes, d_largest_keys);
+    int footer_block = 128;
+    int footer_grid = ((int)layouts.size() + footer_block - 1) / footer_block;
+    write_sst_footers_kernel<<<footer_grid, footer_block>>>(d_all_files, d_layouts, (int)layouts.size());
+    cudaDeviceSynchronize();
+
+    uint8_t* h_all_files = nullptr;
+    cudaMallocHost(&h_all_files, (size_t)std::max<uint64_t>(total_output_bytes, 1u));
+    cudaMemcpy(h_all_files, d_all_files, (size_t)total_output_bytes, cudaMemcpyDeviceToHost);
+
+    if (materialize_output) {
+        result.output.files.reserve(layouts.size());
+        for (const auto& layout : layouts) {
+            SSTBuildArtifacts artifacts;
+            artifacts.file_bytes.resize((size_t)layout.total_size);
+            std::memcpy(artifacts.file_bytes.data(),
+                        h_all_files + layout.buffer_offset,
+                        (size_t)layout.total_size);
+            artifacts.index_entries.resize(layout.num_data_blocks);
+            if (!artifacts.index_entries.empty())
+                std::memcpy(artifacts.index_entries.data(),
+                            artifacts.file_bytes.data() + layout.index_region_offset,
+                            (size_t)layout.index_region_size);
+            artifacts.filter_meta.resize(layout.num_data_blocks);
+            if (!artifacts.filter_meta.empty())
+                std::memcpy(artifacts.filter_meta.data(),
+                            artifacts.file_bytes.data() + layout.filter_meta_offset,
+                            (size_t)layout.filter_meta_size);
+            artifacts.data_meta.resize(layout.num_data_blocks);
+            if (!artifacts.data_meta.empty())
+                std::memcpy(artifacts.data_meta.data(),
+                            artifacts.file_bytes.data() + layout.data_meta_offset,
+                            (size_t)layout.data_meta_size);
+            result.output.files.push_back(std::move(artifacts));
+        }
+    } else {
+        result.serialized_output.all_file_bytes.data = h_all_files;
+        result.serialized_output.all_file_bytes.size = (size_t)total_output_bytes;
+        result.serialized_output.file_offsets.reserve(layouts.size());
+        result.serialized_output.file_sizes.reserve(layouts.size());
+        result.serialized_output.file_blocks.reserve(layouts.size());
+        for (const auto& layout : layouts) {
+            result.serialized_output.file_offsets.push_back(layout.buffer_offset);
+            result.serialized_output.file_sizes.push_back(layout.total_size);
+            result.serialized_output.file_blocks.push_back(layout.num_data_blocks);
+        }
+        h_all_files = nullptr;
+    }
+
+    if (h_all_files) cudaFreeHost(h_all_files);
+    cudaFree(d_tasks);
+    cudaFree(d_layouts);
+    cudaFree(d_all_files);
+    return result;
+}
+
 static inline std::vector<DataBlockPlanEntry> plans_from_parsed(const ParsedSST& parsed)
 {
     std::vector<DataBlockPlanEntry> plans(parsed.data_blocks.size());
