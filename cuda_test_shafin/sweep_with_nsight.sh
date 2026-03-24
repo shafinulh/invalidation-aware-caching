@@ -157,6 +157,7 @@ for VAL in $VALUES_STR; do
                 -o "$PREFIX" \
                 --trace=cuda,osrt,nvtx \
                 --sample=none \
+                --cpuctxsw=none \
                 ./gpcomp_bench --dataset "$DATASET_DIR" --out_dir "$BENCH_OUTDIR" --runs "$RUNS" --gpu_mode "$MODE" \
                 > "$LOG_PATH" 2>&1
             EXIT_CODE="$?"

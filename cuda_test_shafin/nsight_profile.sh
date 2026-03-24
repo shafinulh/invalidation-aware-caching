@@ -36,6 +36,7 @@ if [[ "$TOOL" == "nsys" ]]; then
     -o "$OUT_PREFIX" \
     --trace=cuda,osrt,nvtx \
     --sample=none \
+    --cpuctxsw=none \
     ./gpcomp_bench --dataset "$DATASET" --out_dir "$OUT_DIR/gpcomp_out_${STAMP}" --runs "$RUNS" --gpu_mode "$GPU_MODE"
   if [[ -f "${OUT_PREFIX}.nsys-rep" ]]; then
     echo "Nsight Systems report: ${OUT_PREFIX}.nsys-rep"
