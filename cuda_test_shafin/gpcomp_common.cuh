@@ -136,6 +136,11 @@ static inline bool kv_key_less(const KVPair& a, const KVPair& b)
     return key_compare(a.key, b.key) < 0;
 }
 
+static inline bool kv_user_key_equal(const KVPair& a, const KVPair& b)
+{
+    return load_be64(a.key.bytes) == load_be64(b.key.bytes);
+}
+
 __host__ __device__ static inline int key_shared_prefix(const Key128& a, const Key128& b)
 {
     int shared = 0;
@@ -175,6 +180,11 @@ static inline uint64_t key_user_component(const Key128& key)
 static inline uint64_t key_tag_component(const Key128& key)
 {
     return load_be64(key.bytes + 8);
+}
+
+static inline bool key_user_equal(const Key128& a, const Key128& b)
+{
+    return key_user_component(a) == key_user_component(b);
 }
 
 static inline std::string format_key(const Key128& key)
@@ -264,6 +274,39 @@ static inline std::vector<KVPair> cpu_merge_reference(const std::vector<std::vec
         merged.push_back(arrays[best][indices[best]++]);
     }
     return merged;
+}
+
+static inline std::vector<KVPair> garbage_collect_sorted_kv(const std::vector<KVPair>& sorted_kv)
+{
+    std::vector<KVPair> survivors;
+    survivors.reserve(sorted_kv.size());
+
+    size_t i = 0;
+    while (i < sorted_kv.size()) {
+        size_t j = i + 1;
+        while (j < sorted_kv.size() && kv_user_key_equal(sorted_kv[i], sorted_kv[j])) ++j;
+
+        // Internal keys are encoded big-endian as {user_key, tag}, so the
+        // last KV in a run is the newest surviving version for that user key.
+        survivors.push_back(sorted_kv[j - 1]);
+        i = j;
+    }
+    return survivors;
+}
+
+static inline std::vector<uint32_t> garbage_collect_sorted_keys_to_indices(const std::vector<Key128>& sorted_keys)
+{
+    std::vector<uint32_t> survivor_indices;
+    survivor_indices.reserve(sorted_keys.size());
+
+    size_t i = 0;
+    while (i < sorted_keys.size()) {
+        size_t j = i + 1;
+        while (j < sorted_keys.size() && key_user_equal(sorted_keys[i], sorted_keys[j])) ++j;
+        survivor_indices.push_back((uint32_t)(j - 1));
+        i = j;
+    }
+    return survivor_indices;
 }
 
 static inline bool kv_equal(const KVPair& a, const KVPair& b)

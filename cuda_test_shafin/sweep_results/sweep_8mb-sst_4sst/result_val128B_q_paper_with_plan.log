@@ -1,0 +1,44 @@
+Q-compaction benchmark
+  input SSTs: 4
+  key bytes: 16  value bytes: 128  restart interval: 4  block size: 32768
+  runs: 5  (timed)
+  gpu mode: q_paper_with_plan
+  cpu baseline: enabled (full GC + group-aligned planning)
+  gpu garbage collection: disabled (Q-compaction only)
+
+CPU total (Wall): min=67.57 ms  mean=71.81 +- 6.16 ms
+CPU total (CPU-Time): 67.59 ms
+CPU pipeline (Wall): 57.76 ms  (CPU-Time): 57.78 ms  utilization: 100.0%
+GPU total (Wall): min=33.03 ms  mean=35.37 +- 2.82 ms
+GPU total (CPU-Time): 27.91 ms
+GPU pipeline (Wall): 23.61 ms  (CPU-Time): 18.48 ms  utilization: 78.3%
+Speedup: 2.05x (min totals)
+Output logically identical: PASS  (different block/file layout than CPU baseline)
+
+Best CPU run breakdown (ms):
+  read+parse 4.16  unpack 7.59  sort(merge) 11.53  gc 7.30  plan 1.82  bloom 12.01  pack+assemble 17.51  write 5.65
+  output bytes 33287289  data blocks 1006  output files 4
+
+  I/O profile: input bytes 33553843  estimated SSD read BW 7693.83 MB/s  estimated SSD write BW 5620.92 MB/s
+
+  SSD<->CPU (estimated): SSD->CPU 4.16 ms (33553843 B, 7693.83 MB/s)  CPU->SSD 5.65 ms (33287289 B, 5620.92 MB/s)
+
+Best GPU run breakdown (ms):
+  read+parse 4.12  unpack 4.68  sort(merge) 2.53  gc 0.00  plan 1.22  bloom 0.05  pack+assemble 11.57  write 5.29
+  kernel-only: unpack 1.96  sort(merge) 2.37  bloom 0.03  pack 2.16
+  non-kernel overhead (ms): unpack 2.72  sort(merge) 0.16  bloom 0.01  pack 9.41
+  transfer stage detail (measured):
+    unpack  H2D 3.73 ms (33566083 B)  D2H 0.00 ms (0 B)
+    merge   H2D 0.06 ms (68 B)  D2H 0.00 ms (0 B)
+    gc      H2D 0.00 ms (0 B)  D2H 0.00 ms (0 B)
+    plan    H2D 0.06 ms (8096 B)  D2H 0.08 ms (230668 B)
+    bloom   H2D 0.00 ms (4048 B)  D2H 0.00 ms (0 B)
+    pack    H2D 0.03 ms (57024 B)  D2H 3.09 ms (33480945 B)
+  measured transfer totals: H2D 3.87 ms (33635319 B, 8282.15 MB/s)  D2H 3.17 ms (33711613 B, 10130.84 MB/s)
+  transfer lower-bound bytes: H2D 33635319  D2H 33711613
+  estimated transfer+sync BW (lower-bound): 5219.60 MB/s
+  CPU<->GPU (lower-bound): CPU->GPU H2D 33635319 B  GPU->CPU D2H 33711613 B
+  CPU<->GPU envelope: non-kernel total 12.30 ms  estimated BW 5219.60 MB/s
+  output bytes 33476897  data blocks 1012  output files 4
+  I/O profile: input bytes 33553843  estimated SSD read BW 7758.65 MB/s  estimated SSD write BW 6034.15 MB/s
+  SSD<->CPU (estimated): SSD->CPU 4.12 ms (33553843 B, 7758.65 MB/s)  CPU->SSD 5.29 ms (33476897 B, 6034.15 MB/s)

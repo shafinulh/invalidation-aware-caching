@@ -29,6 +29,59 @@ static std::vector<KVPair> make_test_array(uint32_t count, uint32_t sst_id, uint
     return out;
 }
 
+static ParsedSST build_parsed_sst_from_kv(const std::vector<KVPair>& kv)
+{
+    std::vector<DataBlockPlanEntry> plans = plan_data_blocks(kv);
+    PackResult pack = cpu_pack_all(kv, plans);
+    std::vector<uint32_t> filter_offsets, filter_lengths;
+    std::vector<uint8_t> filter_bytes = build_cpu_filter_bytes(kv, plans, filter_offsets, filter_lengths);
+    return parse_sst_bytes(assemble_sst_file(kv, pack, filter_bytes, filter_offsets, filter_lengths).file_bytes);
+}
+
+static std::vector<ParsedSST> make_duplicate_inputs()
+{
+    std::vector<ParsedSST> inputs;
+    for (uint32_t sst = 0; sst < GP_NUM_INPUT_SSTS; ++sst) {
+        std::vector<uint64_t> user_keys;
+        switch (sst) {
+            case 0: user_keys = {10, 20, 30, 60}; break;
+            case 1: user_keys = {20, 30, 40, 70}; break;
+            case 2: user_keys = {30, 50, 80}; break;
+            default: user_keys = {20, 50, 90}; break;
+        }
+
+        std::vector<KVPair> kv(user_keys.size());
+        for (size_t i = 0; i < user_keys.size(); ++i) {
+            kv[i].key = make_internal_key(user_keys[i], sst, (uint32_t)i);
+            kv[i].value = make_value_payload(user_keys[i], sst, (uint32_t)i);
+        }
+        inputs.push_back(build_parsed_sst_from_kv(kv));
+    }
+    return inputs;
+}
+
+static std::vector<KVPair> unpack_build_set(const SSTBuildSet& set)
+{
+    std::vector<KVPair> kv;
+    for (const auto& file : set.files) {
+        ParsedSST parsed = parse_sst_bytes(file.file_bytes);
+        std::vector<KVPair> unpacked = cpu_unpack_sst(parsed);
+        kv.insert(kv.end(), unpacked.begin(), unpacked.end());
+    }
+    return kv;
+}
+
+static bool build_sets_logically_equal(const SSTBuildSet& lhs, const SSTBuildSet& rhs)
+{
+    std::vector<KVPair> lhs_kv = unpack_build_set(lhs);
+    std::vector<KVPair> rhs_kv = unpack_build_set(rhs);
+    if (lhs_kv.size() != rhs_kv.size()) return false;
+    for (size_t i = 0; i < lhs_kv.size(); ++i) {
+        if (!kv_equal(lhs_kv[i], rhs_kv[i])) return false;
+    }
+    return true;
+}
+
 static bool test_algorithm1_merge()
 {
     std::vector<std::vector<KVPair>> arrays;
@@ -109,6 +162,42 @@ static bool test_target_file_partitioning()
         actual_total_kv += parsed.footer.total_kv;
     }
     ok &= check(actual_total_kv == kv.size(), "Partitioned SSTs preserve total KV count");
+    return ok;
+}
+
+static bool test_cpu_garbage_collection_keeps_newest_version()
+{
+    std::vector<std::vector<KVPair>> arrays;
+    arrays.push_back(make_test_array(4, 0, 100));
+
+    std::vector<KVPair> overlap1(3);
+    overlap1[0].key = make_internal_key(103, 1, 0);
+    overlap1[0].value = make_value_payload(103, 1, 0);
+    overlap1[1].key = make_internal_key(106, 1, 1);
+    overlap1[1].value = make_value_payload(106, 1, 1);
+    overlap1[2].key = make_internal_key(112, 1, 2);
+    overlap1[2].value = make_value_payload(112, 1, 2);
+    arrays.push_back(overlap1);
+
+    std::vector<KVPair> overlap2(2);
+    overlap2[0].key = make_internal_key(106, 2, 0);
+    overlap2[0].value = make_value_payload(106, 2, 0);
+    overlap2[1].key = make_internal_key(109, 2, 1);
+    overlap2[1].value = make_value_payload(109, 2, 1);
+    arrays.push_back(overlap2);
+
+    std::vector<KVPair> merged = cpu_merge_reference(arrays);
+    std::vector<KVPair> gc = garbage_collect_sorted_kv(merged);
+
+    bool ok = check(gc.size() == 5, "Garbage collection removes overwritten versions");
+    ok &= check(key_user_component(gc[0].key) == 100, "Garbage collection keeps the first unique user key");
+    ok &= check(key_user_component(gc[1].key) == 103 && key_tag_component(gc[1].key) == (((uint64_t)1 << 32) | 0u),
+                "Garbage collection keeps the newest version for user key 103");
+    ok &= check(key_user_component(gc[2].key) == 106 && key_tag_component(gc[2].key) == (((uint64_t)2 << 32) | 0u),
+                "Garbage collection keeps the newest version for user key 106");
+    ok &= check(key_user_component(gc[3].key) == 109 && key_tag_component(gc[3].key) == (((uint64_t)2 << 32) | 1u),
+                "Garbage collection keeps the newest version for user key 109");
+    ok &= check(key_user_component(gc[4].key) == 112, "Garbage collection preserves later unique keys");
     return ok;
 }
 
@@ -304,6 +393,70 @@ static bool test_gpu_q_compaction_without_plan_matches_cpu()
     return ok;
 }
 
+static bool test_gpu_c_compaction_paper_matches_cpu()
+{
+    std::vector<ParsedSST> inputs = make_duplicate_inputs();
+
+    CPUCompactionResult cpu = cpu_c_compaction_paper_from_parsed(inputs);
+    GPUCompactionResult gpu = gpu_c_compaction_paper_from_parsed(inputs);
+
+    bool ok = check(cpu.output.files.size() == gpu.output.files.size(),
+                    "GPU C-paper compaction emits the same number of SST files as CPU");
+    for (size_t i = 0; i < cpu.output.files.size() && ok; ++i) {
+        ok &= check(cpu.output.files[i].file_bytes == gpu.output.files[i].file_bytes,
+                    "GPU C-paper compaction output SST matches CPU output exactly");
+    }
+    ok &= check(cpu.merged.size() == gpu.merged.size(), "C-paper garbage-collected KV count matches");
+    return ok;
+}
+
+static bool test_gpu_c_compaction_without_plan_matches_cpu()
+{
+    std::vector<ParsedSST> inputs = make_duplicate_inputs();
+
+    CPUCompactionResult cpu = cpu_c_compaction_without_plan_from_parsed(inputs);
+    GPUCompactionResult gpu = gpu_c_compaction_without_plan_from_parsed(inputs);
+
+    bool ok = check(cpu.output.files.size() == gpu.output.files.size(),
+                    "GPU C-compaction without plan emits the same number of SST files as CPU");
+    ok &= check(build_sets_logically_equal(cpu.output, gpu.output),
+                "GPU C-compaction without plan matches CPU output logically");
+    ok &= check(cpu.merged.size() == gpu.merged.size(), "C-without-plan garbage-collected KV count matches");
+    return ok;
+}
+
+static bool test_gpu_c_compaction_keys_only_paper_matches_cpu()
+{
+    std::vector<ParsedSST> inputs = make_duplicate_inputs();
+
+    CPUCompactionResult cpu = cpu_c_compaction_paper_from_parsed(inputs);
+    GPUCompactionResult gpu = gpu_c_compaction_paper_keys_only_from_parsed(inputs);
+
+    bool ok = check(cpu.output.files.size() == gpu.output.files.size(),
+                    "GPU C-paper keys-only compaction emits the same number of SST files as CPU");
+    for (size_t i = 0; i < cpu.output.files.size() && ok; ++i) {
+        ok &= check(cpu.output.files[i].file_bytes == gpu.output.files[i].file_bytes,
+                    "GPU C-paper keys-only compaction output SST matches CPU output exactly");
+    }
+    ok &= check(cpu.merged.size() == gpu.merged.size(), "C-paper keys-only garbage-collected KV count matches");
+    return ok;
+}
+
+static bool test_gpu_c_compaction_keys_only_without_plan_matches_cpu()
+{
+    std::vector<ParsedSST> inputs = make_duplicate_inputs();
+
+    CPUCompactionResult cpu = cpu_c_compaction_without_plan_from_parsed(inputs);
+    GPUCompactionResult gpu = gpu_c_compaction_without_plan_keys_only_from_parsed(inputs);
+
+    bool ok = check(cpu.output.files.size() == gpu.output.files.size(),
+                    "GPU C-compaction keys-only without plan emits the same number of SST files as CPU");
+    ok &= check(build_sets_logically_equal(cpu.output, gpu.output),
+                "GPU C-compaction keys-only without plan matches CPU output logically");
+    ok &= check(cpu.merged.size() == gpu.merged.size(), "C-keys-only-without-plan garbage-collected KV count matches");
+    return ok;
+}
+
 int main()
 {
     cudaFree(0);
@@ -312,6 +465,7 @@ int main()
     test_pack_roundtrip();
     test_sst_roundtrip();
     test_target_file_partitioning();
+    test_cpu_garbage_collection_keeps_newest_version();
     test_device_plan_matches_cpu();
     test_group_aligned_plan_matches_gpu_group_sizes();
     test_streamed_pack_matches_single_grid_pack();
@@ -319,6 +473,10 @@ int main()
     test_gpu_q_compaction_pipeline_matches_cpu();
     test_gpu_q_compaction_paper_matches_cpu();
     test_gpu_q_compaction_without_plan_matches_cpu();
+    test_gpu_c_compaction_paper_matches_cpu();
+    test_gpu_c_compaction_without_plan_matches_cpu();
+    test_gpu_c_compaction_keys_only_paper_matches_cpu();
+    test_gpu_c_compaction_keys_only_without_plan_matches_cpu();
     std::printf("\nPassed: %d  Failed: %d\n", g_passed, g_failed);
     return g_failed == 0 ? 0 : 1;
 }

@@ -42,6 +42,10 @@ struct RunSummary {
     double merge_d2h_ms = 0.0;
     size_t merge_h2d_bytes = 0;
     size_t merge_d2h_bytes = 0;
+    double gc_h2d_ms = 0.0;
+    double gc_d2h_ms = 0.0;
+    size_t gc_h2d_bytes = 0;
+    size_t gc_d2h_bytes = 0;
     double planning_h2d_ms = 0.0;
     double planning_d2h_ms = 0.0;
     size_t planning_h2d_bytes = 0;
@@ -186,6 +190,8 @@ static bool compare_output_sets_logical(const std::vector<std::string>& lhs,
 {
     std::vector<KVPair> lhs_kv = unpack_output_set(lhs);
     std::vector<KVPair> rhs_kv = unpack_output_set(rhs);
+    lhs_kv = garbage_collect_sorted_kv(lhs_kv);
+    rhs_kv = garbage_collect_sorted_kv(rhs_kv);
     if (lhs_kv.size() != rhs_kv.size()) return false;
     for (size_t i = 0; i < lhs_kv.size(); ++i) {
         if (!kv_equal(lhs_kv[i], rhs_kv[i])) return false;
@@ -260,6 +266,28 @@ static double mb_per_sec(size_t bytes, double ms)
     return ((double)bytes / (1024.0 * 1024.0)) / (ms / 1000.0);
 }
 
+static bool is_c_with_plan_mode(const std::string& gpu_mode)
+{
+    return gpu_mode == "c_paper" || gpu_mode == "c_paper_with_plan"
+        || gpu_mode == "c_paper_keys_only_with_plan";
+}
+
+static bool is_c_without_plan_mode(const std::string& gpu_mode)
+{
+    return gpu_mode == "c_paper_without_plan"
+        || gpu_mode == "c_paper_keys_only_without_plan";
+}
+
+static bool is_gc_enabled_mode(const std::string& gpu_mode)
+{
+    return is_c_with_plan_mode(gpu_mode) || is_c_without_plan_mode(gpu_mode);
+}
+
+static bool is_exact_match_mode(const std::string& gpu_mode)
+{
+    return is_c_with_plan_mode(gpu_mode);
+}
+
 static RunSummary run_cpu_once(const std::vector<std::string>& input_paths,
                                const std::string&               output_dir,
                                const std::string&               gpu_mode)
@@ -273,10 +301,8 @@ static RunSummary run_cpu_once(const std::vector<std::string>& input_paths,
     CPUCompactionResult cpu;
     double pipeline_cpu_start = get_cpu_time_ms();
     auto   pipeline_wall_start = std::chrono::steady_clock::now();
-    if (gpu_mode == "q_paper_with_plan" || gpu_mode == "q_paper_without_plan" ||
-        gpu_mode == "q_paper_with_plan_profile" || gpu_mode == "q_paper_without_plan_profile") {
-        cpu = cpu_q_compaction_paper_from_parsed(inputs);
-    } else cpu = cpu_q_compaction_from_parsed(inputs);
+    (void)gpu_mode;
+    cpu = cpu_c_compaction_paper_from_parsed(inputs);
     auto pipeline_wall_end = std::chrono::steady_clock::now();
     summary.pipeline_cpu_time_ms = get_cpu_time_ms() - pipeline_cpu_start;
     summary.pipeline_wall_ms = std::chrono::duration<double, std::milli>(pipeline_wall_end - pipeline_wall_start).count();
@@ -325,6 +351,18 @@ static RunSummary run_gpu_once(const std::vector<std::string>& input_paths,
     else if (gpu_mode == "q_paper_without_plan_profile") {
         gpu = gpu_q_compaction_without_plan_profile_from_parsed(inputs, false);
     }
+    else if (gpu_mode == "c_paper" || gpu_mode == "c_paper_with_plan") {
+        gpu = gpu_c_compaction_paper_from_parsed(inputs, false);
+    }
+    else if (gpu_mode == "c_paper_without_plan") {
+        gpu = gpu_c_compaction_without_plan_from_parsed(inputs, false);
+    }
+    else if (gpu_mode == "c_paper_keys_only_with_plan") {
+        gpu = gpu_c_compaction_paper_keys_only_from_parsed(inputs, false);
+    }
+    else if (gpu_mode == "c_paper_keys_only_without_plan") {
+        gpu = gpu_c_compaction_without_plan_keys_only_from_parsed(inputs, false);
+    }
     else gpu = gpu_q_compaction_from_parsed(inputs);
     auto pipeline_wall_end = std::chrono::steady_clock::now();
     summary.pipeline_cpu_time_ms = get_cpu_time_ms() - pipeline_cpu_start;
@@ -364,6 +402,10 @@ static RunSummary run_gpu_once(const std::vector<std::string>& input_paths,
     summary.merge_d2h_ms = gpu.merge_d2h_ms;
     summary.merge_h2d_bytes = gpu.merge_h2d_bytes;
     summary.merge_d2h_bytes = gpu.merge_d2h_bytes;
+    summary.gc_h2d_ms = gpu.gc_h2d_ms;
+    summary.gc_d2h_ms = gpu.gc_d2h_ms;
+    summary.gc_h2d_bytes = gpu.gc_h2d_bytes;
+    summary.gc_d2h_bytes = gpu.gc_d2h_bytes;
     summary.planning_h2d_ms = gpu.planning_h2d_ms;
     summary.planning_d2h_ms = gpu.planning_d2h_ms;
     summary.planning_h2d_bytes = gpu.planning_h2d_bytes;
@@ -377,9 +419,11 @@ static RunSummary run_gpu_once(const std::vector<std::string>& input_paths,
     summary.pack_h2d_bytes = gpu.pack_h2d_bytes;
     summary.pack_d2h_bytes = gpu.pack_d2h_bytes;
     summary.h2d_lower_bound_bytes = summary.unpack_h2d_bytes + summary.merge_h2d_bytes
+                                  + summary.gc_h2d_bytes
                                   + summary.planning_h2d_bytes + summary.bloom_h2d_bytes
                                   + summary.pack_h2d_bytes;
     summary.d2h_lower_bound_bytes = summary.unpack_d2h_bytes + summary.merge_d2h_bytes
+                                  + summary.gc_d2h_bytes
                                   + summary.planning_d2h_bytes + summary.bloom_d2h_bytes
                                   + summary.pack_d2h_bytes;
     summary.unpack_non_kernel_ms = clamp_non_kernel(summary.stage.unpack_ms, summary.unpack_kernel_ms);
@@ -406,7 +450,7 @@ int main(int argc, char** argv)
         else if (arg == "--runs") runs = std::stoi(next());
         else if (arg == "--gpu_mode") gpu_mode = next();
         else if (arg == "--help") {
-            std::printf("Usage: %s [--dataset DIR] [--out_dir DIR] [--runs N] [--gpu_mode baseline|q_plan_on_gpu_slow|q_paper_with_plan|q_paper_without_plan]\n",
+            std::printf("Usage: %s [--dataset DIR] [--out_dir DIR] [--runs N] [--gpu_mode baseline|q_plan_on_gpu_slow|q_paper_with_plan|q_paper_without_plan|c_paper_with_plan|c_paper_without_plan|c_paper_keys_only_with_plan|c_paper_keys_only_without_plan]\n",
                         argv[0]);
             return 0;
         } else {
@@ -420,13 +464,17 @@ int main(int argc, char** argv)
     cudaSetDeviceFlags(cudaDeviceScheduleBlockingSync);
     cudaFree(0);
 
-    std::printf("Q-compaction benchmark\n");
+    std::printf("%s benchmark\n", is_gc_enabled_mode(gpu_mode) ? "C-compaction" : "Q-compaction");
     std::printf("  input SSTs: %zu\n", input_paths.size());
     std::printf("  key bytes: %d  value bytes: %d  restart interval: %d  block size: %d\n",
                 GP_KEY_BYTES, GP_VALUE_BYTES, GP_RESTART_INTERVAL, GP_DATA_BLOCK_BYTES);
     std::printf("  runs: %d  (timed)\n", runs);
     std::printf("  gpu mode: %s\n", gpu_mode.c_str());
-    std::printf("  garbage collection: disabled (Q-compaction only)\n\n");
+    std::printf("  cpu baseline: enabled (full GC + group-aligned planning)\n");
+    std::printf("  gpu garbage collection: %s\n\n",
+                is_gc_enabled_mode(gpu_mode)
+                    ? "enabled (CPU after GPU sort, before GPU SST construction)"
+                    : "disabled (Q-compaction only)");
 
     std::vector<RunSummary> cpu_runs, gpu_runs;
     cpu_runs.reserve(runs);
@@ -461,8 +509,7 @@ int main(int argc, char** argv)
     gpu_last = collect_sst_paths(out_dir + "/gpu_run" + std::to_string(runs - 1));
     bool exact_output_match = compare_output_sets(cpu_last, gpu_last);
     bool logical_output_match = compare_output_sets_logical(cpu_last, gpu_last);
-    bool outputs_match = (gpu_mode == "q_paper_without_plan" || gpu_mode == "q_paper_without_plan_profile")
-                       ? logical_output_match : exact_output_match;
+    bool outputs_match = is_exact_match_mode(gpu_mode) ? exact_output_match : logical_output_match;
 
     size_t cpu_best_idx = (size_t)(std::min_element(cpu_totals.begin(), cpu_totals.end()) - cpu_totals.begin());
     size_t gpu_best_idx = (size_t)(std::min_element(gpu_totals.begin(), gpu_totals.end()) - gpu_totals.begin());
@@ -482,7 +529,7 @@ int main(int argc, char** argv)
                 gpu_best.pipeline_wall_ms, gpu_best.pipeline_cpu_time_ms,
                 gpu_best.pipeline_wall_ms > 0 ? (gpu_best.pipeline_cpu_time_ms / gpu_best.pipeline_wall_ms) * 100.0 : 0.0);
     std::printf("Speedup: %.2fx (min totals)\n", cpu_total_stats.min / gpu_total_stats.min);
-    if (gpu_mode == "q_paper_without_plan" || gpu_mode == "q_paper_without_plan_profile") {
+    if (!is_exact_match_mode(gpu_mode)) {
         std::printf("Output logically identical: %s", logical_output_match ? "PASS" : "FAIL");
         if (!exact_output_match && logical_output_match) {
             std::printf("  (different block/file layout than CPU baseline)");
@@ -493,9 +540,10 @@ int main(int argc, char** argv)
     }
 
     std::printf("Best CPU run breakdown (ms):\n");
-    std::printf("  read+parse %.2f  unpack %.2f  sort(merge) %.2f  plan %.2f  bloom %.2f  pack+assemble %.2f  write %.2f\n",
+    std::printf("  read+parse %.2f  unpack %.2f  sort(merge) %.2f  gc %.2f  plan %.2f  bloom %.2f  pack+assemble %.2f  write %.2f\n",
                 cpu_best.read_parse_ms, cpu_best.stage.unpack_ms, cpu_best.stage.merge_ms,
-                cpu_best.stage.planning_ms, cpu_best.stage.bloom_ms, cpu_best.stage.pack_ms, cpu_best.write_ms);
+                cpu_best.stage.gc_ms, cpu_best.stage.planning_ms, cpu_best.stage.bloom_ms,
+                cpu_best.stage.pack_ms, cpu_best.write_ms);
     std::printf("  output bytes %zu  data blocks %zu  output files %zu\n\n",
                 cpu_best.output_bytes, cpu_best.output_blocks, cpu_best.output_files);
     std::printf("  I/O profile: input bytes %zu  estimated SSD read BW %.2f MB/s  estimated SSD write BW %.2f MB/s\n\n",
@@ -511,9 +559,10 @@ int main(int argc, char** argv)
                 mb_per_sec(cpu_best.output_bytes, cpu_best.write_ms));
 
     std::printf("Best GPU run breakdown (ms):\n");
-    std::printf("  read+parse %.2f  unpack %.2f  sort(merge) %.2f  plan %.2f  bloom %.2f  pack+assemble %.2f  write %.2f\n",
+    std::printf("  read+parse %.2f  unpack %.2f  sort(merge) %.2f  gc %.2f  plan %.2f  bloom %.2f  pack+assemble %.2f  write %.2f\n",
                 gpu_best.read_parse_ms, gpu_best.stage.unpack_ms, gpu_best.stage.merge_ms,
-                gpu_best.stage.planning_ms, gpu_best.stage.bloom_ms, gpu_best.stage.pack_ms, gpu_best.write_ms);
+                gpu_best.stage.gc_ms, gpu_best.stage.planning_ms, gpu_best.stage.bloom_ms,
+                gpu_best.stage.pack_ms, gpu_best.write_ms);
     std::printf("  kernel-only: unpack %.2f  sort(merge) %.2f  bloom %.2f  pack %.2f\n",
                 gpu_best.unpack_kernel_ms, gpu_best.merge_kernel_ms, gpu_best.bloom_kernel_ms, gpu_best.pack_kernel_ms);
     std::printf("  non-kernel overhead (ms): unpack %.2f  sort(merge) %.2f  bloom %.2f  pack %.2f\n",
@@ -526,6 +575,9 @@ int main(int argc, char** argv)
     std::printf("    merge   H2D %.2f ms (%zu B)  D2H %.2f ms (%zu B)\n",
                 gpu_best.merge_h2d_ms, gpu_best.merge_h2d_bytes,
                 gpu_best.merge_d2h_ms, gpu_best.merge_d2h_bytes);
+    std::printf("    gc      H2D %.2f ms (%zu B)  D2H %.2f ms (%zu B)\n",
+                gpu_best.gc_h2d_ms, gpu_best.gc_h2d_bytes,
+                gpu_best.gc_d2h_ms, gpu_best.gc_d2h_bytes);
     std::printf("    plan    H2D %.2f ms (%zu B)  D2H %.2f ms (%zu B)\n",
                 gpu_best.planning_h2d_ms, gpu_best.planning_h2d_bytes,
                 gpu_best.planning_d2h_ms, gpu_best.planning_d2h_bytes);
@@ -535,9 +587,11 @@ int main(int argc, char** argv)
     std::printf("    pack    H2D %.2f ms (%zu B)  D2H %.2f ms (%zu B)\n",
                 gpu_best.pack_h2d_ms, gpu_best.pack_h2d_bytes,
                 gpu_best.pack_d2h_ms, gpu_best.pack_d2h_bytes);
-    double gpu_h2d_ms = gpu_best.unpack_h2d_ms + gpu_best.merge_h2d_ms + gpu_best.planning_h2d_ms
+    double gpu_h2d_ms = gpu_best.unpack_h2d_ms + gpu_best.merge_h2d_ms + gpu_best.gc_h2d_ms
+                      + gpu_best.planning_h2d_ms
                       + gpu_best.bloom_h2d_ms + gpu_best.pack_h2d_ms;
-    double gpu_d2h_ms = gpu_best.unpack_d2h_ms + gpu_best.merge_d2h_ms + gpu_best.planning_d2h_ms
+    double gpu_d2h_ms = gpu_best.unpack_d2h_ms + gpu_best.merge_d2h_ms + gpu_best.gc_d2h_ms
+                      + gpu_best.planning_d2h_ms
                       + gpu_best.bloom_d2h_ms + gpu_best.pack_d2h_ms;
     std::printf("  measured transfer totals: H2D %.2f ms (%zu B, %.2f MB/s)  D2H %.2f ms (%zu B, %.2f MB/s)\n",
                 gpu_h2d_ms, gpu_best.h2d_lower_bound_bytes,
@@ -545,6 +599,7 @@ int main(int argc, char** argv)
                 gpu_d2h_ms, gpu_best.d2h_lower_bound_bytes,
                 mb_per_sec(gpu_best.d2h_lower_bound_bytes, gpu_d2h_ms));
     double gpu_non_kernel_total = gpu_best.unpack_non_kernel_ms + gpu_best.merge_non_kernel_ms
+                                + gpu_best.gc_h2d_ms + gpu_best.gc_d2h_ms
                                 + gpu_best.bloom_non_kernel_ms + gpu_best.pack_non_kernel_ms;
     std::printf("  transfer lower-bound bytes: H2D %zu  D2H %zu\n",
                 gpu_best.h2d_lower_bound_bytes, gpu_best.d2h_lower_bound_bytes);

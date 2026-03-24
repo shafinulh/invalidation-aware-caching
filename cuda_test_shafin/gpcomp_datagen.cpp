@@ -4,18 +4,18 @@
 #include <string>
 #include <sys/stat.h>
 
-static uint32_t tune_entries_per_sst(uint64_t seed)
+static uint32_t tune_entries_per_sst(uint64_t seed, const DummyDataConfig& config)
 {
     uint32_t low = 1;
     uint32_t high = 2 * GP_TARGET_FILE_BYTES / (GP_KEY_BYTES + GP_VALUE_BYTES);
     if (high < 100) high = 100;
-    while (build_cpu_sst(high, 0, seed).file_bytes.size() < GP_TARGET_FILE_BYTES) high *= 2;
+    while (build_cpu_sst(high, 0, seed, config).file_bytes.size() < GP_TARGET_FILE_BYTES) high *= 2;
 
     uint32_t best_entries = low;
     uint64_t best_diff = UINT64_MAX;
     while (low <= high) {
         uint32_t mid = low + (high - low) / 2;
-        uint64_t size = build_cpu_sst(mid, 0, seed).file_bytes.size();
+        uint64_t size = build_cpu_sst(mid, 0, seed, config).file_bytes.size();
         uint64_t diff = (size > GP_TARGET_FILE_BYTES) ? (size - GP_TARGET_FILE_BYTES)
                                                       : (GP_TARGET_FILE_BYTES - size);
         if (diff < best_diff) {
@@ -42,6 +42,7 @@ int main(int argc, char** argv)
 {
     std::string out_dir = "dataset";
     uint64_t seed = 23;
+    DummyDataConfig config = make_default_gpcomp_dataset_config();
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
         auto next = [&]() -> const char* {
@@ -50,8 +51,15 @@ int main(int argc, char** argv)
         };
         if (arg == "--out_dir") out_dir = next();
         else if (arg == "--seed") seed = std::stoull(next());
+        else if (arg == "--zipf_alpha") config.zipf_alpha = std::stod(next());
+        else if (arg == "--user_key_space") config.user_key_space = std::stoull(next());
         else if (arg == "--help") {
-            std::printf("Usage: %s [--out_dir DIR] [--seed N]\n", argv[0]);
+            std::printf("Usage: %s [--out_dir DIR] [--seed N] [--zipf_alpha A] [--user_key_space N]\n",
+                        argv[0]);
+            std::printf("  Synthetic writes follow a Zipfian user-key distribution with alpha=%.2f.\n",
+                        config.zipf_alpha);
+            std::printf("  Default user-key space: %llu\n",
+                        (unsigned long long)config.user_key_space);
             return 0;
         } else {
             throw std::runtime_error("unknown option: " + arg);
@@ -59,9 +67,12 @@ int main(int argc, char** argv)
     }
 
     ensure_dir(out_dir);
-    uint32_t entries_per_sst = tune_entries_per_sst(seed);
+    uint32_t entries_per_sst = tune_entries_per_sst(seed, config);
+    uint64_t user_key_space = resolve_user_key_space(entries_per_sst, config);
     std::printf("Generating %d dummy SSTs, target file size %d bytes, entries_per_sst=%u\n",
                 GP_NUM_INPUT_SSTS, GP_TARGET_FILE_BYTES, entries_per_sst);
+    std::printf("  distribution=zipf  alpha=%.2f  user_key_space=%llu\n",
+                config.zipf_alpha, (unsigned long long)user_key_space);
 
     FILE* meta = std::fopen((out_dir + "/dataset.meta").c_str(), "w");
     gp_fail_if(!meta, "failed to open dataset.meta");
@@ -75,9 +86,12 @@ int main(int argc, char** argv)
     std::fprintf(meta, "bloom_bits_per_key=%d\n", GP_BLOOM_BITS_PER_KEY);
     std::fprintf(meta, "bloom_hashes=%d\n", GP_BLOOM_HASHES);
     std::fprintf(meta, "seed=%llu\n", (unsigned long long)seed);
+    std::fprintf(meta, "distribution=zipf\n");
+    std::fprintf(meta, "zipf_alpha=%.2f\n", config.zipf_alpha);
+    std::fprintf(meta, "user_key_space=%llu\n", (unsigned long long)user_key_space);
 
     for (uint32_t sst = 0; sst < GP_NUM_INPUT_SSTS; ++sst) {
-        SSTBuildArtifacts build = build_cpu_sst(entries_per_sst, sst, seed);
+        SSTBuildArtifacts build = build_cpu_sst(entries_per_sst, sst, seed, config);
         char path[256];
         std::snprintf(path, sizeof(path), "%s/sst_%04u.sst", out_dir.c_str(), sst);
         write_binary_file(path, build.file_bytes);
