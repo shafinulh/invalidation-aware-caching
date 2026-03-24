@@ -1,0 +1,26 @@
+Generating 24 dummy SSTs, target file size 8388608 bytes, entries_per_sst=30618
+  distribution=zipf  alpha=0.00  user_key_space=20000000
+  dataset_shafin_V256/sst_0000.sst  size=8388566 bytes  blocks=256  kv=30618
+  dataset_shafin_V256/sst_0001.sst  size=8388394 bytes  blocks=256  kv=30618
+  dataset_shafin_V256/sst_0002.sst  size=8388519 bytes  blocks=256  kv=30618
+  dataset_shafin_V256/sst_0003.sst  size=8388402 bytes  blocks=256  kv=30618
+  dataset_shafin_V256/sst_0004.sst  size=8388452 bytes  blocks=256  kv=30618
+  dataset_shafin_V256/sst_0005.sst  size=8388477 bytes  blocks=256  kv=30618
+  dataset_shafin_V256/sst_0006.sst  size=8388472 bytes  blocks=256  kv=30618
+  dataset_shafin_V256/sst_0007.sst  size=8388427 bytes  blocks=256  kv=30618
+  dataset_shafin_V256/sst_0008.sst  size=8388564 bytes  blocks=256  kv=30618
+  dataset_shafin_V256/sst_0009.sst  size=8388557 bytes  blocks=256  kv=30618
+  dataset_shafin_V256/sst_0010.sst  size=8388562 bytes  blocks=256  kv=30618
+  dataset_shafin_V256/sst_0011.sst  size=8388310 bytes  blocks=256  kv=30618
+  dataset_shafin_V256/sst_0012.sst  size=8388527 bytes  blocks=256  kv=30618
+  dataset_shafin_V256/sst_0013.sst  size=8388506 bytes  blocks=256  kv=30618
+  dataset_shafin_V256/sst_0014.sst  size=8388353 bytes  blocks=256  kv=30618
+  dataset_shafin_V256/sst_0015.sst  size=8388526 bytes  blocks=256  kv=30618
+  dataset_shafin_V256/sst_0016.sst  size=8388503 bytes  blocks=256  kv=30618
+  dataset_shafin_V256/sst_0017.sst  size=8388551 bytes  blocks=256  kv=30618
+  dataset_shafin_V256/sst_0018.sst  size=8388441 bytes  blocks=256  kv=30618
+  dataset_shafin_V256/sst_0019.sst  size=8388539 bytes  blocks=256  kv=30618
+  dataset_shafin_V256/sst_0020.sst  size=8388493 bytes  blocks=256  kv=30618
+  dataset_shafin_V256/sst_0021.sst  size=8388538 bytes  blocks=256  kv=30618
+  dataset_shafin_V256/sst_0022.sst  size=8388463 bytes  blocks=256  kv=30618
+  dataset_shafin_V256/sst_0023.sst  size=8388558 bytes  blocks=256  kv=30618

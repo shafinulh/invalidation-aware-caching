@@ -1,0 +1,51 @@
+WARNING: CPU context switch tracing not supported, disabling.
+Try the 'nsys status --environment' command to learn more.
+
+Q-compaction benchmark
+  input SSTs: 4
+  key bytes: 16  value bytes: 256  restart interval: 4  block size: 32768
+  runs: 5  (timed)
+  gpu mode: q_paper_with_plan
+  cpu baseline: enabled (full GC + group-aligned planning)
+  gpu garbage collection: disabled (Q-compaction only)
+
+CPU total (Wall): min=54.36 ms  mean=59.12 +- 7.02 ms
+CPU total (CPU-Time): 54.90 ms
+CPU pipeline (Wall): 44.82 ms  (CPU-Time): 44.97 ms  utilization: 100.3%
+GPU total (Wall): min=33.25 ms  mean=73.41 +- 79.14 ms
+GPU total (CPU-Time): 28.90 ms
+GPU pipeline (Wall): 23.69 ms  (CPU-Time): 19.34 ms  utilization: 81.6%
+Speedup: 1.63x (min totals)
+Output logically identical: PASS  (different block/file layout than CPU baseline)
+
+Best CPU run breakdown (ms):
+  read+parse 4.18  unpack 5.58  sort(merge) 9.59  gc 7.57  plan 1.36  bloom 6.32  pack+assemble 14.40  write 5.35
+  output bytes 33413663  data blocks 1018  output files 4
+
+  I/O profile: input bytes 33553881  estimated SSD read BW 7655.40 MB/s  estimated SSD write BW 5958.18 MB/s
+
+  SSD<->CPU (estimated): SSD->CPU 4.18 ms (33553881 B, 7655.40 MB/s)  CPU->SSD 5.35 ms (33413663 B, 5958.18 MB/s)
+
+Best GPU run breakdown (ms):
+  read+parse 4.28  unpack 4.94  sort(merge) 2.33  gc 0.00  plan 1.20  bloom 0.07  pack+assemble 11.61  write 5.28
+  kernel-only: unpack 1.93  sort(merge) 2.23  bloom 0.02  pack 2.13
+  non-kernel overhead (ms): unpack 3.01  sort(merge) 0.10  bloom 0.04  pack 9.48
+  transfer stage detail (measured):
+    unpack  H2D 4.11 ms (33566169 B)  D2H 0.00 ms (0 B)
+    merge   H2D 0.02 ms (68 B)  D2H 0.00 ms (0 B)
+    gc      H2D 0.00 ms (0 B)  D2H 0.00 ms (0 B)
+    plan    H2D 0.02 ms (8168 B)  D2H 0.06 ms (122472 B)
+    bloom   H2D 0.00 ms (4084 B)  D2H 0.00 ms (0 B)
+    pack    H2D 0.02 ms (57616 B)  D2H 3.09 ms (33523485 B)
+  measured transfer totals: H2D 4.17 ms (33636105 B, 7696.31 MB/s)  D2H 3.16 ms (33645957 B, 10168.82 MB/s)
+  transfer lower-bound bytes: H2D 33636105  D2H 33645957
+  estimated transfer+sync BW (lower-bound): 5082.01 MB/s
+  CPU<->GPU (lower-bound): CPU->GPU H2D 33636105 B  GPU->CPU D2H 33645957 B
+  CPU<->GPU envelope: non-kernel total 12.63 ms  estimated BW 5082.01 MB/s
+  output bytes 33519401  data blocks 1021  output files 5
+  I/O profile: input bytes 33553881  estimated SSD read BW 7476.85 MB/s  estimated SSD write BW 6059.29 MB/s
+  SSD<->CPU (estimated): SSD->CPU 4.28 ms (33553881 B, 7476.85 MB/s)  CPU->SSD 5.28 ms (33519401 B, 6059.29 MB/s)
+Generating '/tmp/nsys-report-461b.qdstrm'
+[1/1] [0%                          ] nsys_val256B_q_paper_with_plan.nsys-rep[1/1] [0%                          ] nsys_val256B_q_paper_with_plan.nsys-rep[1/1] [12%                         ] nsys_val256B_q_paper_with_plan.nsys-rep[1/1] [====25%                     ] nsys_val256B_q_paper_with_plan.nsys-rep[1/1] [====26%                     ] nsys_val256B_q_paper_with_plan.nsys-rep[1/1] [=======================96%  ] nsys_val256B_q_paper_with_plan.nsys-rep[1/1] [========================100%] nsys_val256B_q_paper_with_plan.nsys-rep[1/1] [========================100%] nsys_val256B_q_paper_with_plan.nsys-rep
+Generated:
+    /home/1755_project/invalidation-aware-caching/cuda_test_shafin/./sweep_results/sweep_nsight_nsys_8mb-sst_4sst/profiles/nsys_val256B_q_paper_with_plan.nsys-rep

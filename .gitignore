@@ -19,3 +19,10 @@ cuda_test_shafin/results*/
 cuda_test_shafin/gpcomp_bench
 cuda_test_shafin/gpcomp_datagen
 cuda_test_shafin/gpcomp_unit_tests
+
+# Raw Nsight profiler artifacts can embed local environment metadata.
+# Keep only derived CSV summaries/logs in the repo.
+cuda_test_shafin/sweep_results/sweep_nsight_*/profiles/*.nsys-rep
+cuda_test_shafin/sweep_results/sweep_nsight_*/profiles/*.sqlite
+cuda_test_shafin/sweep_results/sweep_nsight_*/profiles/*.qdstrm
+cuda_test_shafin/sweep_results/sweep_nsight_*/profiles/*.ncu-rep

@@ -143,6 +143,37 @@ The plots currently generated are:
 - CPU utilization
 - SSD read/write bandwidth
 
+## Nsight sweeps
+
+Use `sweep_with_nsight.sh` to rerun the same value-size sweeps under Nsight.
+
+4-SST Nsight Systems sweep:
+
+```bash
+bash sweep_with_nsight.sh --tool nsys --num_ssts 4 --values "32 64 128 256 512 1024" --runs 5
+```
+
+24-SST Nsight Systems sweep:
+
+```bash
+bash sweep_with_nsight.sh --tool nsys --num_ssts 24 --values "32 64 128 256 512 1024" --runs 5
+```
+
+Default Nsight output directories:
+
+- `sweep_results/sweep_nsight_nsys_8mb-sst_4sst`
+- `sweep_results/sweep_nsight_nsys_8mb-sst_24sst`
+
+Inside each Nsight sweep directory:
+
+- `profiles/`: raw Nsight reports (`.nsys-rep`, `.qdstrm`, or `.ncu-rep`) plus Nsight stats CSVs
+- `result_val*B_*.log`: benchmark stdout/stderr for each mode
+- `nsight_manifest.csv`: manifest mapping each run to its profile files
+
+Important: raw Nsight trace files can capture local environment metadata from the profiled session. For public sharing, commit the derived summary CSVs, manifests, and logs, but keep raw `.nsys-rep`, `.sqlite`, `.qdstrm`, and `.ncu-rep` files out of git unless you have scrubbed them or are using a private channel.
+
+Plotting is disabled by default for Nsight sweeps. Pass `--plot` to also run `plot_nsight_sweep.py`. Pass `--timestamp_output` if you want a timestamp appended to the sweep directory name instead of overwriting the previous Nsight sweep directory.
+
 ## Main files
 
 - `gpcomp_bench.cu`: benchmark driver and CPU/GPU comparison
