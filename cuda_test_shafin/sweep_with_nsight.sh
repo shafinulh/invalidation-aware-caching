@@ -1,7 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
+
 TOOL="${TOOL:-nsys}"
+DEFAULT_LOCAL_NSYS_BIN="$HOME/.local/nsight-systems-2026.2.1/opt/nvidia/nsight-systems-cli/2026.2.1/target-linux-x64/nsys"
+NSYS_BIN="${NSYS_BIN:-}"
+NSYS_CPUCTXSW="${NSYS_CPUCTXSW:-none}"
 RUNS="${RUNS:-5}"
 VALUES_STR="${VALUES:-32 64 128 256 512 1024}"
 DATASET_PREFIX="${DATASET_PREFIX:-dataset_shafin_V}"
@@ -14,10 +20,13 @@ PLOT_RESULTS="${PLOT_RESULTS:-0}"
 TIMESTAMP_OUTPUT="${TIMESTAMP_OUTPUT:-0}"
 NUM_SSTS=""
 LABEL=""
+DATAGEN_BIN="$SCRIPT_DIR/gpcomp_datagen"
+BENCH_BIN="$SCRIPT_DIR/gpcomp_bench"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --tool) TOOL="$2"; shift 2 ;;
+        --cpuctxsw) NSYS_CPUCTXSW="$2"; shift 2 ;;
         --runs) RUNS="$2"; shift 2 ;;
         --values) VALUES_STR="$2"; shift 2 ;;
         --dataset_prefix) DATASET_PREFIX="$2"; shift 2 ;;
@@ -41,23 +50,39 @@ if [[ "$TOOL" != "nsys" && "$TOOL" != "ncu" ]]; then
     exit 1
 fi
 
-if ! command -v "$TOOL" >/dev/null 2>&1; then
-    echo "$TOOL is not in PATH"
+if [[ -z "$NSYS_BIN" && -x "$DEFAULT_LOCAL_NSYS_BIN" ]]; then
+    NSYS_BIN="$DEFAULT_LOCAL_NSYS_BIN"
+fi
+if [[ -z "$NSYS_BIN" ]]; then
+    NSYS_BIN="nsys"
+fi
+
+TOOL_CMD="$TOOL"
+if [[ "$TOOL" == "nsys" ]]; then
+    TOOL_CMD="$NSYS_BIN"
+fi
+
+if ! command -v "$TOOL_CMD" >/dev/null 2>&1; then
+    echo "$TOOL_CMD is not in PATH"
     exit 1
 fi
 
 run_nsys_stats_report() {
     local report_path="$1"
-    local output_prefix="$2"
+    local canonical_path="$2"
     shift 2
+    local nsys_bin="${NSYS_BIN:-nsys}"
     local report=""
     local candidate=""
+    local output_prefix="${canonical_path%.csv}.tmp"
 
     for report in "$@"; do
-        nsys stats --report "$report" --format csv --output "$output_prefix" "$report_path" >/dev/null 2>&1 || true
+        rm -f "${output_prefix}"*.csv
+        "$nsys_bin" stats --force-export=true --report "$report" --format csv --output "$output_prefix" "$report_path" >/dev/null 2>&1 || true
         candidate="${output_prefix}_${report}.csv"
         if [[ -f "$candidate" ]]; then
-            printf '%s\n' "$candidate"
+            mv -f "$candidate" "$canonical_path"
+            printf '%s\n' "$canonical_path"
             return 0
         fi
     done
@@ -103,6 +128,10 @@ echo "value_bytes,mode,tool,dataset,profile_prefix,report_kind,report_path,kerne
 echo "========================================================="
 echo " Lightweight Nsight Sweep"
 echo " tool: $TOOL"
+if [[ "$TOOL" == "nsys" ]]; then
+    echo " tool path: $TOOL_CMD"
+    echo " cpu context switches: $NSYS_CPUCTXSW"
+fi
 echo " label: $LABEL"
 echo " output: $OUTDIR"
 echo " profiles: $PROFILES_DIR"
@@ -129,7 +158,7 @@ for VAL in $VALUES_STR; do
     DATASET_DIR="${DATASET_PREFIX}${VAL}"
     echo "Generating dataset in $DATASET_DIR..."
     rm -rf "$DATASET_DIR"
-    ./gpcomp_datagen \
+    "$DATAGEN_BIN" \
         --out_dir "$DATASET_DIR" \
         --seed 42 \
         --zipf_alpha "$DATASET_ZIPF_ALPHA" \
@@ -152,13 +181,13 @@ for VAL in $VALUES_STR; do
 
         if [[ "$TOOL" == "nsys" ]]; then
             set +e
-            nsys profile \
+            "$TOOL_CMD" profile \
                 --force-overwrite true \
                 -o "$PREFIX" \
                 --trace=cuda,osrt,nvtx \
                 --sample=none \
-                --cpuctxsw=none \
-                ./gpcomp_bench --dataset "$DATASET_DIR" --out_dir "$BENCH_OUTDIR" --runs "$RUNS" --gpu_mode "$MODE" \
+                --cpuctxsw="$NSYS_CPUCTXSW" \
+                "$BENCH_BIN" --dataset "$DATASET_DIR" --out_dir "$BENCH_OUTDIR" --runs "$RUNS" --gpu_mode "$MODE" \
                 > "$LOG_PATH" 2>&1
             EXIT_CODE="$?"
             set -e
@@ -173,10 +202,10 @@ for VAL in $VALUES_STR; do
                 REPORT_KIND="nsys-rep"
                 REPORT_PATH="${PREFIX}.nsys-rep"
 
-                if KERNEL_CSV_PATH=$(run_nsys_stats_report "${REPORT_PATH}" "${PREFIX}_kernel_stats" gpukernsum cuda_gpu_kern_sum); then
+                if KERNEL_CSV_PATH=$(NSYS_BIN="$TOOL_CMD" run_nsys_stats_report "${REPORT_PATH}" "${PREFIX}_kernel_stats_gpukernsum.csv" gpukernsum cuda_gpu_kern_sum); then
                     KERNEL_CSV="${KERNEL_CSV_PATH}"
                 fi
-                if API_CSV_PATH=$(run_nsys_stats_report "${REPORT_PATH}" "${PREFIX}_api_stats" cudaapisum cuda_api_sum); then
+                if API_CSV_PATH=$(NSYS_BIN="$TOOL_CMD" run_nsys_stats_report "${REPORT_PATH}" "${PREFIX}_api_stats_cudaapisum.csv" cudaapisum cuda_api_sum); then
                     API_CSV="${API_CSV_PATH}"
                 fi
             elif [[ -f "${PREFIX}.qdstrm" ]]; then
@@ -189,7 +218,7 @@ for VAL in $VALUES_STR; do
                 --set full \
                 --target-processes all \
                 --export "$PREFIX" \
-                ./gpcomp_bench --dataset "$DATASET_DIR" --out_dir "$BENCH_OUTDIR" --runs "$RUNS" --gpu_mode "$MODE" \
+                "$BENCH_BIN" --dataset "$DATASET_DIR" --out_dir "$BENCH_OUTDIR" --runs "$RUNS" --gpu_mode "$MODE" \
                 > "$LOG_PATH" 2>&1
             EXIT_CODE="$?"
             set -e

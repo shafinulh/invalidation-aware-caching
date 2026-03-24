@@ -6,43 +6,45 @@ Q-compaction benchmark
   cpu baseline: enabled (full GC + group-aligned planning)
   gpu garbage collection: disabled (Q-compaction only)
 
-CPU total (Wall): min=410.21 ms  mean=412.34 +- 1.99 ms
-CPU total (CPU-Time): 410.95 ms
-CPU pipeline (Wall): 315.84 ms  (CPU-Time): 316.15 ms  utilization: 100.1%
-GPU total (Wall): min=211.50 ms  mean=216.60 +- 3.10 ms
-GPU total (CPU-Time): 189.69 ms
-GPU pipeline (Wall): 118.09 ms  (CPU-Time): 96.00 ms  utilization: 81.3%
-Speedup: 1.94x (min totals)
+CPU total (Wall): min=373.89 ms  mean=383.81 +- 16.41 ms
+CPU total (CPU-Time): 373.80 ms
+CPU pipeline (Wall): 316.91 ms  (CPU-Time): 317.43 ms  utilization: 100.2%
+GPU total (Wall): min=181.07 ms  mean=191.83 +- 15.12 ms
+GPU total (CPU-Time): 157.14 ms
+GPU pipeline (Wall): 123.43 ms  (CPU-Time): 99.52 ms  utilization: 80.6%
+Speedup: 2.06x (min totals)
 Output logically identical: PASS  (different block/file layout than CPU baseline)
 
 Best CPU run breakdown (ms):
-  read+parse 62.20  unpack 60.89  sort(merge) 64.50  gc 48.48  plan 2.54  bloom 11.08  pack+assemble 124.44  write 32.17
+  read+parse 25.28  unpack 61.69  sort(merge) 65.86  gc 48.22  plan 2.56  bloom 11.03  pack+assemble 123.71  write 31.69
   output bytes 200307785  data blocks 6850  output files 24
 
-  I/O profile: input bytes 201331065  estimated SSD read BW 3087.07 MB/s  estimated SSD write BW 5938.11 MB/s
+  I/O profile: input bytes 201331065  estimated SSD read BW 7594.40 MB/s  estimated SSD write BW 6028.19 MB/s
 
-  SSD<->CPU (estimated): SSD->CPU 62.20 ms (201331065 B, 3087.07 MB/s)  CPU->SSD 32.17 ms (200307785 B, 5938.11 MB/s)
+  SSD<->CPU (estimated): SSD->CPU 25.28 ms (201331065 B, 7594.40 MB/s)  CPU->SSD 31.69 ms (200307785 B, 6028.19 MB/s)
 
 Best GPU run breakdown (ms):
-  read+parse 61.38  unpack 23.37  sort(merge) 14.32  gc 0.00  plan 1.50  bloom 0.06  pack+assemble 64.64  write 32.01
-  kernel-only: unpack 9.66  sort(merge) 14.18  bloom 0.04  pack 10.30
-  non-kernel overhead (ms): unpack 13.70  sort(merge) 0.15  bloom 0.02  pack 54.34
+  read+parse 26.04  unpack 25.07  sort(merge) 15.67  gc 0.00  plan 1.75  bloom 0.06  pack+assemble 65.50  write 31.57
+  kernel-only: unpack 10.75  sort(merge) 15.53  bloom 0.04  pack 11.35
+  non-kernel overhead (ms): unpack 14.33  sort(merge) 0.14  bloom 0.02  pack 54.15
   transfer stage detail (measured):
-    unpack  H2D 21.42 ms (201405945 B)  D2H 0.00 ms (0 B)
+    unpack  H2D 23.33 ms (201405945 B)  D2H 0.00 ms (0 B)
     merge   H2D 0.06 ms (388 B)  D2H 0.00 ms (0 B)
     gc      H2D 0.00 ms (0 B)  D2H 0.00 ms (0 B)
-    plan    H2D 0.06 ms (55064 B)  D2H 0.14 ms (192720 B)
+    plan    H2D 0.14 ms (55064 B)  D2H 0.32 ms (192720 B)
     bloom   H2D 0.00 ms (27532 B)  D2H 0.00 ms (0 B)
-    pack    H2D 0.06 ms (387648 B)  D2H 17.74 ms (201312579 B)
-  measured transfer totals: H2D 21.61 ms (201876577 B, 8910.77 MB/s)  D2H 17.88 ms (201505299 B, 10748.91 MB/s)
+    pack    H2D 0.13 ms (387648 B)  D2H 17.24 ms (201312579 B)
+  measured transfer totals: H2D 23.66 ms (201876577 B, 8136.57 MB/s)  D2H 17.56 ms (201505299 B, 10944.12 MB/s)
   transfer lower-bound bytes: H2D 201876577  D2H 201505299
-  estimated transfer+sync BW (lower-bound): 5639.30 MB/s
+  estimated transfer+sync BW (lower-bound): 5604.55 MB/s
   CPU<->GPU (lower-bound): CPU->GPU H2D 201876577 B  GPU->CPU D2H 201505299 B
-  CPU<->GPU envelope: non-kernel total 68.22 ms  estimated BW 5639.30 MB/s
+  CPU<->GPU envelope: non-kernel total 68.64 ms  estimated BW 5604.55 MB/s
   output bytes 201285047  data blocks 6883  output files 25
-  I/O profile: input bytes 201331065  estimated SSD read BW 3128.24 MB/s  estimated SSD write BW 5997.51 MB/s
-  SSD<->CPU (estimated): SSD->CPU 61.38 ms (201331065 B, 3128.24 MB/s)  CPU->SSD 32.01 ms (201285047 B, 5997.51 MB/s)
-Generating '/tmp/nsys-report-820a.qdstrm'
-[1/1] [0%                          ] nsys_val1024B_q_paper_with_plan.nsys-rep[1/1] [0%                          ] nsys_val1024B_q_paper_with_plan.nsys-rep[1/1] [9%                          ] nsys_val1024B_q_paper_with_plan.nsys-rep[1/1] [=======================95%  ] nsys_val1024B_q_paper_with_plan.nsys-rep[1/1] [========================100%] nsys_val1024B_q_paper_with_plan.nsys-rep[1/1] [========================100%] nsys_val1024B_q_paper_with_plan.nsys-rep
+  I/O profile: input bytes 201331065  estimated SSD read BW 7373.11 MB/s  estimated SSD write BW 6080.79 MB/s
+  SSD<->CPU (estimated): SSD->CPU 26.04 ms (201331065 B, 7373.11 MB/s)  CPU->SSD 31.57 ms (201285047 B, 6080.79 MB/s)
+Collecting data...
+Generating '/tmp/nsys-haques24/nsys-report-1a0c.qdstrm'
+Press Ctrl-C to stop symbol files downloading
+[1/1] [0%                          ] nsys_val1024B_q_paper_with_plan.nsys-rep[1/1] [0%                          ] nsys_val1024B_q_paper_with_plan.nsys-rep[1/1] [11%                         ] nsys_val1024B_q_paper_with_plan.nsys-rep[1/1] [14%                         ] nsys_val1024B_q_paper_with_plan.nsys-rep[1/1] [==18%                       ] nsys_val1024B_q_paper_with_plan.nsys-rep[1/1] [==19%                       ] nsys_val1024B_q_paper_with_plan.nsys-rep[1/1] [=====29%                    ] nsys_val1024B_q_paper_with_plan.nsys-rep[1/1] [==============64%           ] nsys_val1024B_q_paper_with_plan.nsys-rep[1/1] [========================100%] nsys_val1024B_q_paper_with_plan.nsys-rep[1/1] [========================100%] nsys_val1024B_q_paper_with_plan.nsys-rep
 Generated:
-    /home/1755_project/invalidation-aware-caching/cuda_test_shafin/./sweep_results/sweep_nsight_nsys_8mb-sst_24sst/profiles/nsys_val1024B_q_paper_with_plan.nsys-rep
+	/home/1755_project/invalidation-aware-caching/cuda_test_shafin/./sweep_results/sweep_nsight_nsys_8mb-sst_24sst/profiles/nsys_val1024B_q_paper_with_plan.nsys-rep

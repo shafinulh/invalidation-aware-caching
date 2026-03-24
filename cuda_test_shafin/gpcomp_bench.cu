@@ -1,5 +1,6 @@
 #include "gpcomp_pipeline.cuh"
 
+#include <nvToolsExt.h>
 #include <sys/resource.h>
 static double get_cpu_time_ms() {
     struct rusage ru;
@@ -68,6 +69,26 @@ struct Stats {
     double min = 0.0;
     double mean = 0.0;
     double stddev = 0.0;
+};
+
+struct NvtxRange {
+    explicit NvtxRange(const char* name)
+    {
+        nvtxRangePushA(name);
+    }
+
+    explicit NvtxRange(std::string name)
+        : name_(std::move(name))
+    {
+        nvtxRangePushA(name_.c_str());
+    }
+
+    ~NvtxRange()
+    {
+        nvtxRangePop();
+    }
+
+    std::string name_;
 };
 
 static Stats compute_stats(const std::vector<double>& values)
@@ -292,23 +313,34 @@ static RunSummary run_cpu_once(const std::vector<std::string>& input_paths,
                                const std::string&               output_dir,
                                const std::string&               gpu_mode)
 {
+    NvtxRange total_range("cpu_baseline_total");
     RunSummary summary;
     auto total_start = std::chrono::steady_clock::now();
     double cpu_time_start = get_cpu_time_ms();
 
-    std::vector<ParsedSST> inputs = load_inputs_with_timing(input_paths, summary.read_parse_ms);
+    std::vector<ParsedSST> inputs;
+    {
+        NvtxRange load_range("cpu_baseline_load_inputs");
+        inputs = load_inputs_with_timing(input_paths, summary.read_parse_ms);
+    }
     summary.input_bytes = total_input_bytes(inputs);
     CPUCompactionResult cpu;
     double pipeline_cpu_start = get_cpu_time_ms();
     auto   pipeline_wall_start = std::chrono::steady_clock::now();
     (void)gpu_mode;
-    cpu = cpu_c_compaction_paper_from_parsed(inputs);
+    {
+        NvtxRange pipeline_range("cpu_baseline_pipeline");
+        cpu = cpu_c_compaction_paper_from_parsed(inputs);
+    }
     auto pipeline_wall_end = std::chrono::steady_clock::now();
     summary.pipeline_cpu_time_ms = get_cpu_time_ms() - pipeline_cpu_start;
     summary.pipeline_wall_ms = std::chrono::duration<double, std::milli>(pipeline_wall_end - pipeline_wall_start).count();
 
     auto write_start = std::chrono::steady_clock::now();
-    write_output_set(cpu.output, output_dir, "cpu_compacted");
+    {
+        NvtxRange write_range("cpu_baseline_write_output");
+        write_output_set(cpu.output, output_dir, "cpu_compacted");
+    }
     auto write_end = std::chrono::steady_clock::now();
 
     auto total_end = std::chrono::steady_clock::now();
@@ -326,53 +358,64 @@ static RunSummary run_gpu_once(const std::vector<std::string>& input_paths,
                                const std::string&               output_dir,
                                const std::string&               gpu_mode)
 {
+    NvtxRange total_range(std::string("gpu_total:") + gpu_mode);
     RunSummary summary;
     auto total_start = std::chrono::steady_clock::now();
     double cpu_time_start = get_cpu_time_ms();
 
-    std::vector<ParsedSST> inputs = load_inputs_with_timing(input_paths, summary.read_parse_ms);
+    std::vector<ParsedSST> inputs;
+    {
+        NvtxRange load_range(std::string("gpu_load_inputs:") + gpu_mode);
+        inputs = load_inputs_with_timing(input_paths, summary.read_parse_ms);
+    }
     summary.input_bytes = total_input_bytes(inputs);
     summary.h2d_lower_bound_bytes = lower_bound_unpack_h2d_bytes(inputs);
     GPUCompactionResult gpu;
     double pipeline_cpu_start = get_cpu_time_ms();
     auto   pipeline_wall_start = std::chrono::steady_clock::now();
-    if (gpu_mode == "q_plan_on_gpu_slow") {
-        gpu = gpu_q_compaction_pipeline_from_parsed(inputs);
+    {
+        NvtxRange pipeline_range(std::string("gpu_pipeline:") + gpu_mode);
+        if (gpu_mode == "q_plan_on_gpu_slow") {
+            gpu = gpu_q_compaction_pipeline_from_parsed(inputs);
+        }
+        else if (gpu_mode == "q_paper_with_plan") {
+            gpu = gpu_q_compaction_paper_from_parsed(inputs, false);
+        }
+        else if (gpu_mode == "q_paper_without_plan") {
+            gpu = gpu_q_compaction_without_plan_from_parsed(inputs, false);
+        }
+        else if (gpu_mode == "q_paper_with_plan_profile") {
+            gpu = gpu_q_compaction_paper_profile_from_parsed(inputs, false);
+        }
+        else if (gpu_mode == "q_paper_without_plan_profile") {
+            gpu = gpu_q_compaction_without_plan_profile_from_parsed(inputs, false);
+        }
+        else if (gpu_mode == "c_paper" || gpu_mode == "c_paper_with_plan") {
+            gpu = gpu_c_compaction_paper_from_parsed(inputs, false);
+        }
+        else if (gpu_mode == "c_paper_without_plan") {
+            gpu = gpu_c_compaction_without_plan_from_parsed(inputs, false);
+        }
+        else if (gpu_mode == "c_paper_keys_only_with_plan") {
+            gpu = gpu_c_compaction_paper_keys_only_from_parsed(inputs, false);
+        }
+        else if (gpu_mode == "c_paper_keys_only_without_plan") {
+            gpu = gpu_c_compaction_without_plan_keys_only_from_parsed(inputs, false);
+        }
+        else gpu = gpu_q_compaction_from_parsed(inputs);
     }
-    else if (gpu_mode == "q_paper_with_plan") {
-        gpu = gpu_q_compaction_paper_from_parsed(inputs, false);
-    }
-    else if (gpu_mode == "q_paper_without_plan") {
-        gpu = gpu_q_compaction_without_plan_from_parsed(inputs, false);
-    }
-    else if (gpu_mode == "q_paper_with_plan_profile") {
-        gpu = gpu_q_compaction_paper_profile_from_parsed(inputs, false);
-    }
-    else if (gpu_mode == "q_paper_without_plan_profile") {
-        gpu = gpu_q_compaction_without_plan_profile_from_parsed(inputs, false);
-    }
-    else if (gpu_mode == "c_paper" || gpu_mode == "c_paper_with_plan") {
-        gpu = gpu_c_compaction_paper_from_parsed(inputs, false);
-    }
-    else if (gpu_mode == "c_paper_without_plan") {
-        gpu = gpu_c_compaction_without_plan_from_parsed(inputs, false);
-    }
-    else if (gpu_mode == "c_paper_keys_only_with_plan") {
-        gpu = gpu_c_compaction_paper_keys_only_from_parsed(inputs, false);
-    }
-    else if (gpu_mode == "c_paper_keys_only_without_plan") {
-        gpu = gpu_c_compaction_without_plan_keys_only_from_parsed(inputs, false);
-    }
-    else gpu = gpu_q_compaction_from_parsed(inputs);
     auto pipeline_wall_end = std::chrono::steady_clock::now();
     summary.pipeline_cpu_time_ms = get_cpu_time_ms() - pipeline_cpu_start;
     summary.pipeline_wall_ms = std::chrono::duration<double, std::milli>(pipeline_wall_end - pipeline_wall_start).count();
 
     auto write_start = std::chrono::steady_clock::now();
-    if (!gpu.serialized_output.empty()) {
-        write_serialized_output_set(gpu.serialized_output, output_dir, "gpu_compacted");
-    } else {
-        write_output_set(gpu.output, output_dir, "gpu_compacted");
+    {
+        NvtxRange write_range(std::string("gpu_write_output:") + gpu_mode);
+        if (!gpu.serialized_output.empty()) {
+            write_serialized_output_set(gpu.serialized_output, output_dir, "gpu_compacted");
+        } else {
+            write_output_set(gpu.output, output_dir, "gpu_compacted");
+        }
     }
     auto write_end = std::chrono::steady_clock::now();
 
@@ -481,6 +524,7 @@ int main(int argc, char** argv)
     gpu_runs.reserve(runs);
 
     for (int r = 0; r < runs; ++r) {
+        NvtxRange iteration_range(std::string("benchmark_iteration:") + std::to_string(r));
         char cpu_dir[256];
         char gpu_dir[256];
         std::snprintf(cpu_dir, sizeof(cpu_dir), "%s/cpu_run%d", out_dir.c_str(), r);

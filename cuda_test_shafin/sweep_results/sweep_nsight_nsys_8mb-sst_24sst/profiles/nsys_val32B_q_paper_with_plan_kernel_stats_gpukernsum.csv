@@ -1,9 +1,9 @@
-Time (%),Total Time (ns),Instances,Avg (ns),Med (ns),Min (ns),Max (ns),StdDev (ns),GridXYZ,BlockXYZ,Name
-54.6,149085852,5,29817170.4,30806735.0,28244857,30841263,1372621.8,16084    1    1, 256    1    1,"merge_kernel(KVPair *const *, const int *, const int *, int, KVPair *)"
-20.8,56840913,120,473674.3,493118.0,436542,497694,26096.6, 249    1    1, 192    1    1,"unpack_kernel(const unsigned char *, const unsigned int *, const unsigned int *, const unsigned int *, int, KVPair *)"
-18.2,49719338,5,9943867.6,10398682.0,9224991,10403354,626093.6,5888    1    1, 192    1    1,"pack_kernel(const KVPair *, const unsigned int *, const unsigned int *, int, unsigned char *, unsigned int *)"
-3.2,8809632,5,1761926.4,1752218.0,1738842,1793530,22103.8,4021    1    1, 256    1    1,"compute_restart_group_sizes_kernel(const KVPair *, int, unsigned int *)"
-2.3,6288938,5,1257787.6,1269116.0,1238747,1271611,16733.0,5888    1    1, 256    1    1,"assemble_sst_blocks_kernel(unsigned char *, const DeviceSSTFileLayout *, const DeviceSSTBlockTask *, int, const unsigned char *, const unsigned char *, const Key128 *)"
-0.9,2437526,5,487505.2,505118.0,460382,505886,24485.3,5888    1    1, 896    1    1,"bloom_filter_kernel_batched(const KVPair *, const unsigned int *, const unsigned int *, const unsigned int *, int, int, int, unsigned char *)"
-0.0,27457,5,5491.4,5504.0,5217,5728,193.8,  23    1    1, 256    1    1,"gather_largest_keys_kernel(const KVPair *, const unsigned int *, const unsigned int *, int, Key128 *)"
-0.0,26752,5,5350.4,5504.0,5056,5536,241.0,   1    1    1, 128    1    1,"write_sst_footers_kernel(unsigned char *, const DeviceSSTFileLayout *, int)"
+Time (%),Total Time (ns),Instances,Avg (ns),Med (ns),Min (ns),Max (ns),StdDev (ns),Name
+54.7,146076168,5,29215233.6,28136436.0,28130452,30841718,1480335.9,"merge_kernel(KVPair *const *, const int *, const int *, int, KVPair *)"
+20.6,54970055,120,458083.8,436608.5,432544,493440,27392.0,"unpack_kernel(const unsigned char *, const unsigned int *, const unsigned int *, const unsigned int *, int, KVPair *)"
+18.1,48426115,5,9685223.0,9215686.0,9196326,10405192,653880.1,"pack_kernel(const KVPair *, const unsigned int *, const unsigned int *, int, unsigned char *, unsigned int *)"
+3.3,8827494,5,1765498.8,1769665.0,1742849,1788994,18046.5,"compute_restart_group_sizes_kernel(const KVPair *, int, unsigned int *)"
+2.4,6300357,5,1260071.4,1248481.0,1246625,1279137,17140.8,"assemble_sst_blocks_kernel(unsigned char *, const DeviceSSTFileLayout *, const DeviceSSTBlockTask *, int, const unsigned char *, const unsigned char *, const Key128 *)"
+0.9,2382947,5,476589.4,458241.0,457345,505088,25886.6,"bloom_filter_kernel_batched(const KVPair *, const unsigned int *, const unsigned int *, const unsigned int *, int, int, int, unsigned char *)"
+0.0,24704,5,4940.8,4992.0,4640,5120,187.4,"gather_largest_keys_kernel(const KVPair *, const unsigned int *, const unsigned int *, int, Key128 *)"
+0.0,22432,5,4486.4,4352.0,4288,4832,250.3,"write_sst_footers_kernel(unsigned char *, const DeviceSSTFileLayout *, int)"

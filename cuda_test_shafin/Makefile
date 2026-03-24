@@ -1,6 +1,7 @@
 NVCC   := nvcc
 HOSTCXX := g++-12
 CFLAGS := -O2 -std=c++17 -ccbin $(HOSTCXX) -allow-unsupported-compiler -Xcompiler -U_FORTIFY_SOURCE -Xcompiler -D_FORTIFY_SOURCE=0
+NVTX_LIBS := -lnvToolsExt
 
 HEADERS := gpcomp_common.cuh gpcomp_merge.cuh gpcomp_bloom.cuh gpcomp_pack.cuh gpcomp_sstable.cuh gpcomp_pipeline.cuh gpcomp_dummy_data.cuh gpcomp_rocksdb_bridge.h
 
@@ -15,7 +16,7 @@ gpcomp_unit_tests: gpcomp_tests.cu $(HEADERS)
 	$(NVCC) $(CFLAGS) -o $@ gpcomp_tests.cu
 
 gpcomp_bench: gpcomp_bench.cu $(HEADERS)
-	$(NVCC) $(CFLAGS) -o $@ gpcomp_bench.cu
+	$(NVCC) $(CFLAGS) -o $@ gpcomp_bench.cu $(NVTX_LIBS)
 
 gpcomp_rocksdb_bridge.o: gpcomp_rocksdb_bridge.cu $(HEADERS)
 	$(NVCC) $(CFLAGS) -Xcompiler -fPIC -c -o $@ gpcomp_rocksdb_bridge.cu
