@@ -54,27 +54,30 @@ Current Implementation (updated) = Use a safe WORST-CASE block-capacity model ba
 then align to restart groups (4 KV per group).
 Old rule (75% raw uncompressed cap) was too conservative and created too many tiny blocks.
 
-THE PROBLEM WITH STATIC PLANNING (Why CPU usage is higher here!):
-If keys share a heavy prefix (e.g. "AAAA..."), prefix-compression shrinks them drastically.
-- Uncompressed: 300 keys * 80 Bytes = 24,000 Bytes (Hits the ~75% safety limit of 32KB)
-- Compressed: 300 keys shrink down to maybe 5,000 Bytes actually stored!
-- Result: The block is strictly cut off at 5KB, leaving the 32KB data block mostly empty. 
+THE PROBLEM WITH STATIC PLANNING (updated interpretation):
+The previous static rule used an overly conservative cap (about 75% of block size from raw/uncompressed intuition).
+When keys share long prefixes, real encoded entries are much smaller than that worst raw estimate.
 
-This forces the GPU to generate WAY more chunks/data blocks (e.g., 2,381 blocks vs 1,755 blocks in our 128B benchmark).
-More blocks = More index block entries, more filter offsets, and more file trailers.
-The CPU has to step in at the very end to format all these extra index bounds, increasing the `pack+assemble` CPU time natively. 
-So skipping the CPU Plan up front accidentally makes the CPU work harder at the end!
+Example intuition:
+- Raw estimate can hit the cap early (for example, 300 keys * 80 B = 24,000 B).
+- Actual prefix-compressed payload for those keys can be much smaller.
+- That early cap creates underfilled data blocks, so we emit too many blocks.
 
-How this relates to the updated implementation:
-- Yes, this is the main motivation for the update.
-- We replaced the old 75% static cap with a safer worst-case encoding-based cap (restart-group aligned), which reduces over-fragmentation.
-- Result: fewer data blocks and modest end-to-end speedup improvements.
+Why this hurts performance:
+- More data blocks means more index entries, filter metadata, and file assembly work.
+- Even if planning is skipped on CPU, host-side pack/assemble metadata handling can increase.
+- Net effect: WITHOUT PLAN can lose some expected gains if static packing over-fragments.
 
-Why speedup still looks limited and CPU utilization does not drop dramatically:
-- Write stage is still the dominant wall-time cost in many runs.
-- Final SST assembly/index/filter metadata work is still host-side.
-- CPU-Time includes orchestration + file output overhead, not just planning.
-- So reducing planning/block-fragmentation helps, but total wall-time is still constrained by I/O and final assembly.
+What we changed in the implementation:
+- Replaced the old 75% static cap with a safer encoding-aware worst-case block-capacity rule.
+- Kept restart-group alignment (4 KV per restart group) for correctness/safety.
+- Result: reduced over-fragmentation and fewer tiny blocks than the old static heuristic.
+
+Why speedup can still look modest after this fix:
+- Fine-grained profiling shows storage I/O and final host-side assembly remain major costs.
+- CPU<->GPU transfer is now measured explicitly and is not always the dominant term.
+- CPU-Time still includes orchestration and file output, not just compaction kernels.
+- So the optimization helps, but end-to-end wall time is still strongly bounded by write/assembly overhead.
 
 
 *****************************************************************************************************
