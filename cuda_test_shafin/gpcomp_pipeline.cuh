@@ -24,6 +24,7 @@ struct GPUCompactionResult {
     std::vector<std::vector<KVPair>> unpacked;
     std::vector<KVPair>              merged;
     SSTBuildSet                      output;
+    SerializedSSTHostSet             serialized_output;
     CompactionStageTimes             stage;
     float                            unpack_kernel_ms = 0.0f;
     float                            merge_kernel_ms = 0.0f;
@@ -127,6 +128,21 @@ static inline std::vector<Key128> copy_largest_keys_from_device(const KVPair*   
     return largest_keys;
 }
 
+static inline Key128* gather_largest_keys_to_device(const KVPair*   d_kv,
+                                                    const uint32_t* d_first_kv,
+                                                    const uint32_t* d_num_kv,
+                                                    int             num_blocks)
+{
+    if (num_blocks <= 0) return nullptr;
+
+    Key128* d_largest_keys = nullptr;
+    cudaMalloc(&d_largest_keys, (size_t)num_blocks * sizeof(Key128));
+    int block = 256;
+    int grid = (num_blocks + block - 1) / block;
+    gather_largest_keys_kernel<<<grid, block>>>(d_kv, d_first_kv, d_num_kv, num_blocks, d_largest_keys);
+    return d_largest_keys;
+}
+
 static inline CPUCompactionResult cpu_q_compaction_from_parsed(const std::vector<ParsedSST>& inputs)
 {
     CPUCompactionResult result;
@@ -155,7 +171,8 @@ static inline CPUCompactionResult cpu_q_compaction_from_parsed(const std::vector
 
     t0 = std::chrono::steady_clock::now();
     PackResult pack = cpu_pack_all(result.merged, plans);
-    result.output = assemble_sst_files_targeted(result.merged, pack, filter_bytes, filter_offsets, filter_lengths);
+    result.output = assemble_sst_files_targeted_gpu_fast(
+        result.merged, pack, filter_bytes, filter_offsets, filter_lengths);
     t1 = std::chrono::steady_clock::now();
     result.stage.pack_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
     return result;
@@ -189,7 +206,8 @@ static inline CPUCompactionResult cpu_q_compaction_paper_from_parsed(const std::
 
     t0 = std::chrono::steady_clock::now();
     PackResult pack = cpu_pack_all(result.merged, plans);
-    result.output = assemble_sst_files_targeted(result.merged, pack, filter_bytes, filter_offsets, filter_lengths);
+    result.output = assemble_sst_files_targeted_gpu_fast(
+        result.merged, pack, filter_bytes, filter_offsets, filter_lengths);
     t1 = std::chrono::steady_clock::now();
     result.stage.pack_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
     return result;
@@ -484,7 +502,8 @@ static inline GPUCompactionResult gpu_q_compaction_pipeline_from_parsed(const st
     return result;
 }
 
-static inline GPUCompactionResult gpu_q_compaction_paper_from_parsed(const std::vector<ParsedSST>& inputs)
+static inline GPUCompactionResult gpu_q_compaction_paper_from_parsed(const std::vector<ParsedSST>& inputs,
+                                                                     bool materialize_output = true)
 {
     GPUCompactionResult result;
     std::vector<GPUUnpackStreamState> unpack_states(inputs.size());
@@ -595,8 +614,8 @@ static inline GPUCompactionResult gpu_q_compaction_paper_from_parsed(const std::
     result.planning_d2h_bytes = group_sizes.group_sizes.size() * sizeof(uint32_t);
 
     t0 = std::chrono::steady_clock::now();
-    BloomBatchResult bloom = launch_bloom_filter_batched_from_device_plans(
-        merged.d_output, device_plans.d_first_kv, device_plans.d_num_kv, device_plans.num_blocks);
+    DeviceBloomBatchResult bloom = launch_bloom_filter_batched_to_device_from_plans(
+        merged.d_output, device_plans.d_first_kv, device_plans.d_num_kv, plans);
     t1 = std::chrono::steady_clock::now();
     result.stage.bloom_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
     result.bloom_kernel_ms = bloom.kernel_ms;
@@ -618,25 +637,27 @@ static inline GPUCompactionResult gpu_q_compaction_paper_from_parsed(const std::
         partition_output_blocks(planned_layout, predicted_filter_lengths, GP_TARGET_FILE_BYTES);
 
     t0 = std::chrono::steady_clock::now();
-    PackTimedResult pack = launch_pack_timed_from_device_plan_spans(
-        merged.d_output, device_plans.d_first_kv, device_plans.d_num_kv, plans, pack_spans);
-    float largest_d2h_ms = 0.0f;
-    size_t largest_d2h_bytes = 0;
-    std::vector<Key128> largest_keys =
-        copy_largest_keys_from_device(merged.d_output, device_plans.d_first_kv, device_plans.d_num_kv,
-                                      device_plans.num_blocks, &largest_d2h_ms, &largest_d2h_bytes);
-    result.output = assemble_sst_files_targeted_from_largest_keys(largest_keys,
-                                                                  pack.result,
-                                                                  bloom.filter_bytes,
-                                                                  bloom.bitvec_offsets,
-                                                                  bloom.bitvec_lengths);
+    DevicePackTimedResult pack = launch_pack_to_device_from_device_plans(
+        merged.d_output, device_plans.d_first_kv, device_plans.d_num_kv, plans);
+    Key128* d_largest_keys =
+        gather_largest_keys_to_device(merged.d_output, device_plans.d_first_kv, device_plans.d_num_kv,
+                                      device_plans.num_blocks);
+    DeviceAssembleSSTResult assembled = assemble_sst_files_from_spans_on_device(
+        plans, pack.block_sizes, pack.d_blocks, d_largest_keys, bloom.d_filter_bytes,
+        bloom.bitvec_offsets, bloom.bitvec_lengths, pack_spans, materialize_output);
+    result.output = std::move(assembled.output);
+    result.serialized_output = std::move(assembled.serialized_output);
     t1 = std::chrono::steady_clock::now();
     result.stage.pack_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
-    result.pack_kernel_ms = pack.kernel_ms;
-    result.pack_h2d_ms = pack.h2d_ms;
-    result.pack_d2h_ms = pack.d2h_ms + largest_d2h_ms;
-    result.pack_h2d_bytes = pack.h2d_bytes;
-    result.pack_d2h_bytes = pack.d2h_bytes + largest_d2h_bytes;
+    result.pack_kernel_ms = pack.kernel_ms + assembled.kernel_ms;
+    result.pack_h2d_ms = pack.h2d_ms + assembled.h2d_ms;
+    result.pack_d2h_ms = pack.d2h_ms + assembled.d2h_ms;
+    result.pack_h2d_bytes = pack.h2d_bytes + assembled.h2d_bytes;
+    result.pack_d2h_bytes = pack.d2h_bytes + assembled.d2h_bytes;
+
+    if (d_largest_keys) cudaFree(d_largest_keys);
+    destroy_device_pack_timed_result(pack);
+    destroy_device_bloom_batch_result(bloom);
 
     destroy_device_plan_arrays(device_plans);
     cudaFree(merged.d_output);
@@ -669,15 +690,20 @@ static inline CPUCompactionResult cpu_q_compaction_without_plan_from_parsed(cons
     t1 = std::chrono::steady_clock::now();
     result.stage.bloom_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
 
+    std::vector<std::pair<size_t, size_t>> file_spans =
+        partition_output_blocks_from_plan_estimates(plans, GP_TARGET_FILE_BYTES);
+
     t0 = std::chrono::steady_clock::now();
     PackResult pack = cpu_pack_all(result.merged, plans);
-    result.output = assemble_sst_files_targeted(result.merged, pack, filter_bytes, filter_offsets, filter_lengths, GP_TARGET_FILE_BYTES);
+    result.output = assemble_sst_files_from_spans_fast(result.merged, pack, filter_bytes, filter_offsets,
+                                                       filter_lengths, file_spans);
     t1 = std::chrono::steady_clock::now();
     result.stage.pack_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
     return result;
 }
 
-static inline GPUCompactionResult gpu_q_compaction_without_plan_from_parsed(const std::vector<ParsedSST>& inputs)
+static inline GPUCompactionResult gpu_q_compaction_without_plan_from_parsed(const std::vector<ParsedSST>& inputs,
+                                                                            bool materialize_output = true)
 {
     GPUCompactionResult result;
     std::vector<GPUUnpackStreamState> unpack_states(inputs.size());
@@ -777,14 +803,17 @@ static inline GPUCompactionResult gpu_q_compaction_without_plan_from_parsed(cons
     std::vector<DataBlockPlanEntry> plans = plan_data_blocks_static((uint32_t)merged.total);
     t1 = std::chrono::steady_clock::now();
     result.stage.planning_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
-    
+
+    std::vector<std::pair<size_t, size_t>> pack_spans =
+        partition_output_blocks_from_plan_estimates(plans, GP_TARGET_FILE_BYTES);
+
     DevicePlanArrays device_plans = upload_plans_to_device(plans);
     result.planning_h2d_ms = device_plans.h2d_ms;
     result.planning_h2d_bytes = device_plans.h2d_bytes;
 
     t0 = std::chrono::steady_clock::now();
-    BloomBatchResult bloom = launch_bloom_filter_batched_from_device_plans(
-        merged.d_output, device_plans.d_first_kv, device_plans.d_num_kv, device_plans.num_blocks);
+    DeviceBloomBatchResult bloom = launch_bloom_filter_batched_to_device_from_plans(
+        merged.d_output, device_plans.d_first_kv, device_plans.d_num_kv, plans);
     t1 = std::chrono::steady_clock::now();
     result.stage.bloom_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
     result.bloom_kernel_ms = bloom.kernel_ms;
@@ -794,33 +823,29 @@ static inline GPUCompactionResult gpu_q_compaction_without_plan_from_parsed(cons
     result.bloom_d2h_bytes = bloom.d2h_bytes;
 
     t0 = std::chrono::steady_clock::now();
-    PackTimedResult pack =
-        launch_pack_timed_from_device_plans(merged.d_output,
-                                            device_plans.d_first_kv,
-                                            device_plans.d_num_kv,
-                                            device_plans.num_blocks);
-    pack.result.plans = plans;
-    float largest_d2h_ms = 0.0f;
-    size_t largest_d2h_bytes = 0;
-    std::vector<Key128> largest_keys =
-        copy_largest_keys_from_device(merged.d_output, device_plans.d_first_kv, device_plans.d_num_kv,
-                                      device_plans.num_blocks, &largest_d2h_ms, &largest_d2h_bytes);
-    result.output = assemble_sst_files_targeted_from_largest_keys(largest_keys,
-                                                                  pack.result,
-                                                                  bloom.filter_bytes,
-                                                                  bloom.bitvec_offsets,
-                                                                  bloom.bitvec_lengths);
+    DevicePackTimedResult pack = launch_pack_to_device_from_device_plans(
+        merged.d_output, device_plans.d_first_kv, device_plans.d_num_kv, plans);
+    Key128* d_largest_keys =
+        gather_largest_keys_to_device(merged.d_output, device_plans.d_first_kv, device_plans.d_num_kv,
+                                      device_plans.num_blocks);
+    DeviceAssembleSSTResult assembled = assemble_sst_files_from_spans_on_device(
+        plans, pack.block_sizes, pack.d_blocks, d_largest_keys, bloom.d_filter_bytes,
+        bloom.bitvec_offsets, bloom.bitvec_lengths, pack_spans, materialize_output);
+    result.output = std::move(assembled.output);
+    result.serialized_output = std::move(assembled.serialized_output);
     t1 = std::chrono::steady_clock::now();
     result.stage.pack_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
-    result.pack_kernel_ms = pack.kernel_ms;
-    result.pack_h2d_ms = pack.h2d_ms;
-    result.pack_d2h_ms = pack.d2h_ms + largest_d2h_ms;
-    result.pack_h2d_bytes = pack.h2d_bytes;
-    result.pack_d2h_bytes = pack.d2h_bytes + largest_d2h_bytes;
+    result.pack_kernel_ms = pack.kernel_ms + assembled.kernel_ms;
+    result.pack_h2d_ms = pack.h2d_ms + assembled.h2d_ms;
+    result.pack_d2h_ms = pack.d2h_ms + assembled.d2h_ms;
+    result.pack_h2d_bytes = pack.h2d_bytes + assembled.h2d_bytes;
+    result.pack_d2h_bytes = pack.d2h_bytes + assembled.d2h_bytes;
+
+    if (d_largest_keys) cudaFree(d_largest_keys);
+    destroy_device_pack_timed_result(pack);
+    destroy_device_bloom_batch_result(bloom);
 
     destroy_device_plan_arrays(device_plans);
     cudaFree(merged.d_output);
     return result;
 }
-
-

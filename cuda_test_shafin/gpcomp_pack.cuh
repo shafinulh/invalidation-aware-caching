@@ -811,6 +811,24 @@ struct PackTimedResult {
     size_t     d2h_bytes = 0;
 };
 
+struct DevicePackTimedResult {
+    uint8_t*                         d_blocks = nullptr;
+    std::vector<uint32_t>            block_sizes;
+    std::vector<DataBlockPlanEntry>  plans;
+    float                            kernel_ms = 0.0f;
+    float                            wall_ms = 0.0f;
+    float                            h2d_ms = 0.0f;
+    float                            d2h_ms = 0.0f;
+    size_t                           h2d_bytes = 0;
+    size_t                           d2h_bytes = 0;
+};
+
+static inline void destroy_device_pack_timed_result(DevicePackTimedResult& timed)
+{
+    if (timed.d_blocks) cudaFree(timed.d_blocks);
+    timed = DevicePackTimedResult{};
+}
+
 static inline PackTimedResult launch_pack_timed(const std::vector<KVPair>& kv_array,
                                                 const std::vector<DataBlockPlanEntry>& plans)
 {
@@ -1065,6 +1083,61 @@ static inline PackTimedResult launch_pack_timed_from_device_plans(const KVPair* 
     return timed;
 }
 
+static inline DevicePackTimedResult
+launch_pack_to_device_from_device_plans(const KVPair*                         d_kv,
+                                        const uint32_t*                       d_first_kv,
+                                        const uint32_t*                       d_num_kv,
+                                        const std::vector<DataBlockPlanEntry>& plans)
+{
+    DevicePackTimedResult timed;
+    timed.plans = plans;
+    int num_blocks = (int)plans.size();
+    if (num_blocks <= 0) return timed;
+
+    uint8_t*  d_blocks = nullptr;
+    uint32_t* d_sizes = nullptr;
+    cudaMalloc(&d_blocks, (size_t)num_blocks * GP_DATA_BLOCK_BYTES);
+    cudaMalloc(&d_sizes, (size_t)num_blocks * sizeof(uint32_t));
+
+    uint32_t max_restarts = 0;
+    for (const auto& plan : plans) {
+        max_restarts = std::max(max_restarts,
+                                (plan.num_kv + (uint32_t)GP_RESTART_INTERVAL - 1u)
+                              / (uint32_t)GP_RESTART_INTERVAL);
+    }
+    int block_dim = ((int)max_restarts + 31) / 32 * 32;
+    if (block_dim < 32) block_dim = 32;
+    int shared_bytes = (int)(max_restarts * 3 * sizeof(uint32_t));
+
+    auto wall_start = std::chrono::steady_clock::now();
+    cudaEvent_t ev0, ev1;
+    cudaEventCreate(&ev0);
+    cudaEventCreate(&ev1);
+    cudaEventRecord(ev0, 0);
+    pack_kernel<<<num_blocks, block_dim, shared_bytes>>>(
+        d_kv, d_first_kv, d_num_kv, num_blocks, d_blocks, d_sizes);
+    cudaEventRecord(ev1, 0);
+    cudaEventSynchronize(ev1);
+    cudaEventElapsedTime(&timed.kernel_ms, ev0, ev1);
+
+    timed.block_sizes.resize((size_t)num_blocks);
+    auto d2h_start = std::chrono::steady_clock::now();
+    cudaMemcpy(timed.block_sizes.data(), d_sizes,
+               (size_t)num_blocks * sizeof(uint32_t), cudaMemcpyDeviceToHost);
+    auto d2h_end = std::chrono::steady_clock::now();
+    timed.d2h_ms = (float)std::chrono::duration<double, std::milli>(d2h_end - d2h_start).count();
+    timed.d2h_bytes = (size_t)num_blocks * sizeof(uint32_t);
+
+    auto wall_end = std::chrono::steady_clock::now();
+    timed.wall_ms = (float)std::chrono::duration<double, std::milli>(wall_end - wall_start).count();
+    timed.d_blocks = d_blocks;
+
+    cudaEventDestroy(ev1);
+    cudaEventDestroy(ev0);
+    cudaFree(d_sizes);
+    return timed;
+}
+
 struct PackStreamState {
     size_t       block_begin = 0;
     size_t       block_end = 0;
@@ -1291,13 +1364,22 @@ static inline PackResult cpu_pack_all(const std::vector<KVPair>& kv_array,
 {
     PackResult result;
     result.plans = plans;
+    result.block_offsets.reserve(plans.size());
+    result.block_sizes.reserve(plans.size());
+    size_t total_block_bytes = 0;
+    for (const auto& plan : plans) total_block_bytes += plan.serialized_size;
+    result.block_buf.reserve(total_block_bytes);
     size_t offset = 0;
     for (const auto& plan : plans) {
         std::vector<uint8_t> block = cpu_pack_block(kv_array.data() + plan.first_kv, plan.num_kv);
         result.block_offsets.push_back((uint32_t)offset);
         result.block_sizes.push_back((uint32_t)block.size());
-        result.block_buf.insert(result.block_buf.end(), block.begin(), block.end());
-        offset += block.size();
+        size_t next_offset = offset + block.size();
+        result.block_buf.resize(next_offset);
+        if (!block.empty()) {
+            std::memcpy(result.block_buf.data() + offset, block.data(), block.size());
+        }
+        offset = next_offset;
     }
     return result;
 }

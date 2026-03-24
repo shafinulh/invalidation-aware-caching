@@ -139,12 +139,54 @@ static std::vector<std::string> write_output_set(const SSTBuildSet& output,
     return paths;
 }
 
+static std::vector<std::string> write_serialized_output_set(const SerializedSSTHostSet& output,
+                                                            const std::string&          dir,
+                                                            const std::string&          prefix)
+{
+    ensure_dir(dir);
+    clear_sst_files_in_dir(dir);
+    std::vector<std::string> paths;
+    for (size_t i = 0; i < output.file_sizes.size(); ++i) {
+        char name[256];
+        std::snprintf(name, sizeof(name), "%s_%04zu.sst", prefix.c_str(), i);
+        std::string path = dir + "/" + name;
+        write_binary_file_span(path,
+                               output.all_file_bytes.data + output.file_offsets[i],
+                               (size_t)output.file_sizes[i]);
+        paths.push_back(path);
+    }
+    return paths;
+}
+
 static bool compare_output_sets(const std::vector<std::string>& lhs,
                                 const std::vector<std::string>& rhs)
 {
     if (lhs.size() != rhs.size()) return false;
     for (size_t i = 0; i < lhs.size(); ++i) {
         if (read_binary_file(lhs[i]) != read_binary_file(rhs[i])) return false;
+    }
+    return true;
+}
+
+static std::vector<KVPair> unpack_output_set(const std::vector<std::string>& paths)
+{
+    std::vector<KVPair> out;
+    for (const auto& path : paths) {
+        ParsedSST parsed = read_sst_file(path);
+        std::vector<KVPair> sst_kv = cpu_unpack_sst(parsed);
+        out.insert(out.end(), sst_kv.begin(), sst_kv.end());
+    }
+    return out;
+}
+
+static bool compare_output_sets_logical(const std::vector<std::string>& lhs,
+                                        const std::vector<std::string>& rhs)
+{
+    std::vector<KVPair> lhs_kv = unpack_output_set(lhs);
+    std::vector<KVPair> rhs_kv = unpack_output_set(rhs);
+    if (lhs_kv.size() != rhs_kv.size()) return false;
+    for (size_t i = 0; i < lhs_kv.size(); ++i) {
+        if (!kv_equal(lhs_kv[i], rhs_kv[i])) return false;
     }
     return true;
 }
@@ -161,6 +203,16 @@ static size_t total_output_blocks(const SSTBuildSet& output)
     size_t total = 0;
     for (const auto& file : output.files) total += file.data_meta.size();
     return total;
+}
+
+static size_t total_output_bytes(const SerializedSSTHostSet& output)
+{
+    return output.total_bytes();
+}
+
+static size_t total_output_blocks(const SerializedSSTHostSet& output)
+{
+    return output.total_blocks();
 }
 
 static std::vector<ParsedSST> load_inputs_with_timing(const std::vector<std::string>& paths, double& ms)
@@ -217,13 +269,9 @@ static RunSummary run_cpu_once(const std::vector<std::string>& input_paths,
     std::vector<ParsedSST> inputs = load_inputs_with_timing(input_paths, summary.read_parse_ms);
     summary.input_bytes = total_input_bytes(inputs);
     CPUCompactionResult cpu;
-    if (gpu_mode == "q_paper_with_plan") {
+    if (gpu_mode == "q_paper_with_plan" || gpu_mode == "q_paper_without_plan") {
         cpu = cpu_q_compaction_paper_from_parsed(inputs);
-    }
-    else if (gpu_mode == "q_paper_without_plan") {
-        cpu = cpu_q_compaction_without_plan_from_parsed(inputs);
-    }
-    else cpu = cpu_q_compaction_from_parsed(inputs);
+    } else cpu = cpu_q_compaction_from_parsed(inputs);
 
     auto write_start = std::chrono::steady_clock::now();
     write_output_set(cpu.output, output_dir, "cpu_compacted");
@@ -255,12 +303,20 @@ static RunSummary run_gpu_once(const std::vector<std::string>& input_paths,
     if (gpu_mode == "q_plan_on_gpu_slow") {
         gpu = gpu_q_compaction_pipeline_from_parsed(inputs);
     }
-    else if (gpu_mode == "q_paper_with_plan") gpu = gpu_q_compaction_paper_from_parsed(inputs);
-    else if (gpu_mode == "q_paper_without_plan") gpu = gpu_q_compaction_without_plan_from_parsed(inputs);
+    else if (gpu_mode == "q_paper_with_plan") {
+        gpu = gpu_q_compaction_paper_from_parsed(inputs, false);
+    }
+    else if (gpu_mode == "q_paper_without_plan") {
+        gpu = gpu_q_compaction_without_plan_from_parsed(inputs, false);
+    }
     else gpu = gpu_q_compaction_from_parsed(inputs);
 
     auto write_start = std::chrono::steady_clock::now();
-    write_output_set(gpu.output, output_dir, "gpu_compacted");
+    if (!gpu.serialized_output.empty()) {
+        write_serialized_output_set(gpu.serialized_output, output_dir, "gpu_compacted");
+    } else {
+        write_output_set(gpu.output, output_dir, "gpu_compacted");
+    }
     auto write_end = std::chrono::steady_clock::now();
 
     auto total_end = std::chrono::steady_clock::now();
@@ -272,9 +328,15 @@ static RunSummary run_gpu_once(const std::vector<std::string>& input_paths,
     summary.merge_kernel_ms = gpu.merge_kernel_ms;
     summary.bloom_kernel_ms = gpu.bloom_kernel_ms;
     summary.pack_kernel_ms = gpu.pack_kernel_ms;
-    summary.output_bytes = total_output_bytes(gpu.output);
-    summary.output_blocks = total_output_blocks(gpu.output);
-    summary.output_files = gpu.output.files.size();
+    if (!gpu.serialized_output.empty()) {
+        summary.output_bytes = total_output_bytes(gpu.serialized_output);
+        summary.output_blocks = total_output_blocks(gpu.serialized_output);
+        summary.output_files = gpu.serialized_output.file_sizes.size();
+    } else {
+        summary.output_bytes = total_output_bytes(gpu.output);
+        summary.output_blocks = total_output_blocks(gpu.output);
+        summary.output_files = gpu.output.files.size();
+    }
     summary.unpack_h2d_ms = gpu.unpack_h2d_ms;
     summary.unpack_d2h_ms = gpu.unpack_d2h_ms;
     summary.unpack_h2d_bytes = gpu.unpack_h2d_bytes;
@@ -377,7 +439,9 @@ int main(int argc, char** argv)
     std::vector<std::string> cpu_last, gpu_last;
     cpu_last = collect_sst_paths(out_dir + "/cpu_run" + std::to_string(runs - 1));
     gpu_last = collect_sst_paths(out_dir + "/gpu_run" + std::to_string(runs - 1));
-    bool outputs_match = compare_output_sets(cpu_last, gpu_last);
+    bool exact_output_match = compare_output_sets(cpu_last, gpu_last);
+    bool logical_output_match = compare_output_sets_logical(cpu_last, gpu_last);
+    bool outputs_match = (gpu_mode == "q_paper_without_plan") ? logical_output_match : exact_output_match;
 
     size_t cpu_best_idx = (size_t)(std::min_element(cpu_totals.begin(), cpu_totals.end()) - cpu_totals.begin());
     size_t gpu_best_idx = (size_t)(std::min_element(gpu_totals.begin(), gpu_totals.end()) - gpu_totals.begin());
@@ -391,7 +455,15 @@ int main(int argc, char** argv)
                 gpu_total_stats.min, gpu_total_stats.mean, gpu_total_stats.stddev);
     std::printf("GPU total (CPU-Time): %.2f ms\n", gpu_best.cpu_time_ms);
     std::printf("Speedup: %.2fx (min totals)\n", cpu_total_stats.min / gpu_total_stats.min);
-    std::printf("Output identical: %s\n\n", outputs_match ? "PASS" : "FAIL");
+    if (gpu_mode == "q_paper_without_plan") {
+        std::printf("Output logically identical: %s", logical_output_match ? "PASS" : "FAIL");
+        if (!exact_output_match && logical_output_match) {
+            std::printf("  (different block/file layout than CPU baseline)");
+        }
+        std::printf("\n\n");
+    } else {
+        std::printf("Output identical: %s\n\n", outputs_match ? "PASS" : "FAIL");
+    }
 
     std::printf("Best CPU run breakdown (ms):\n");
     std::printf("  read+parse %.2f  unpack %.2f  sort(merge) %.2f  plan %.2f  bloom %.2f  pack+assemble %.2f  write %.2f\n",

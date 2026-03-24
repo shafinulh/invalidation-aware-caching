@@ -161,6 +161,24 @@ struct BloomBatchResult {
     size_t                d2h_bytes = 0;
 };
 
+struct DeviceBloomBatchResult {
+    uint8_t*              d_filter_bytes = nullptr;
+    std::vector<uint32_t> bitvec_offsets;
+    std::vector<uint32_t> bitvec_lengths;
+    float                 kernel_ms = 0.0f;
+    float                 wall_ms = 0.0f;
+    float                 h2d_ms = 0.0f;
+    float                 d2h_ms = 0.0f;
+    size_t                h2d_bytes = 0;
+    size_t                d2h_bytes = 0;
+};
+
+static inline void destroy_device_bloom_batch_result(DeviceBloomBatchResult& result)
+{
+    if (result.d_filter_bytes) cudaFree(result.d_filter_bytes);
+    result = DeviceBloomBatchResult{};
+}
+
 static inline BloomBatchResult launch_bloom_filter_batched(const std::vector<KVPair>&              kv_array,
                                                            const std::vector<DataBlockPlanEntry>&   plans)
 {
@@ -391,6 +409,63 @@ launch_bloom_filter_batched_from_device_plans(const KVPair*      d_kv,
     cudaFree(d_filter);
     cudaFree(d_total_bytes);
     cudaFree(d_lengths);
+    cudaFree(d_offsets);
+    return result;
+}
+
+static inline DeviceBloomBatchResult
+launch_bloom_filter_batched_to_device_from_plans(const KVPair*                         d_kv,
+                                                 const uint32_t*                       d_first_kv,
+                                                 const uint32_t*                       d_num_kv,
+                                                 const std::vector<DataBlockPlanEntry>& plans)
+{
+    DeviceBloomBatchResult result;
+    if (plans.empty()) return result;
+
+    uint32_t max_num_kv = 0;
+    uint32_t total_bytes = 0;
+    result.bitvec_offsets.resize(plans.size());
+    result.bitvec_lengths.resize(plans.size());
+    for (size_t i = 0; i < plans.size(); ++i) {
+        max_num_kv = std::max(max_num_kv, plans[i].num_kv);
+        result.bitvec_offsets[i] = total_bytes;
+        uint32_t byte_vector_len = plans[i].num_kv * GP_BLOOM_BITS_PER_KEY;
+        uint32_t bitvec_len = (byte_vector_len + 7) / 8;
+        result.bitvec_lengths[i] = bitvec_len;
+        total_bytes += bitvec_len;
+    }
+
+    uint32_t* d_offsets = nullptr;
+    cudaMalloc(&d_offsets, plans.size() * sizeof(uint32_t));
+    auto h2d_start = std::chrono::steady_clock::now();
+    cudaMemcpy(d_offsets, result.bitvec_offsets.data(),
+               plans.size() * sizeof(uint32_t), cudaMemcpyHostToDevice);
+    auto h2d_end = std::chrono::steady_clock::now();
+    result.h2d_ms = (float)std::chrono::duration<double, std::milli>(h2d_end - h2d_start).count();
+    result.h2d_bytes = plans.size() * sizeof(uint32_t);
+
+    cudaMalloc(&result.d_filter_bytes, (size_t)std::max(total_bytes, 1u));
+    int max_byte_vector_len = (int)(max_num_kv * GP_BLOOM_BITS_PER_KEY);
+    int max_bitvec_len = (max_byte_vector_len + 7) / 8;
+    int block_dim = ((std::max((int)max_num_kv, max_bitvec_len) + 31) / 32) * 32;
+    if (block_dim < 32) block_dim = 32;
+
+    auto wall_start = std::chrono::steady_clock::now();
+    cudaEvent_t ev0, ev1;
+    cudaEventCreate(&ev0);
+    cudaEventCreate(&ev1);
+    cudaEventRecord(ev0, 0);
+    bloom_filter_kernel_batched<<<(int)plans.size(), block_dim, (size_t)max_byte_vector_len>>>(
+        d_kv, d_first_kv, d_num_kv, d_offsets, GP_BLOOM_BITS_PER_KEY, GP_BLOOM_HASHES,
+        max_byte_vector_len, result.d_filter_bytes);
+    cudaEventRecord(ev1, 0);
+    cudaEventSynchronize(ev1);
+    cudaEventElapsedTime(&result.kernel_ms, ev0, ev1);
+    auto wall_end = std::chrono::steady_clock::now();
+    result.wall_ms = (float)std::chrono::duration<double, std::milli>(wall_end - wall_start).count();
+
+    cudaEventDestroy(ev0);
+    cudaEventDestroy(ev1);
     cudaFree(d_offsets);
     return result;
 }

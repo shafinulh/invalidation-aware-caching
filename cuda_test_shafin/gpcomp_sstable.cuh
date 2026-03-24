@@ -32,6 +32,60 @@ struct SSTBuildSet {
     std::vector<SSTBuildArtifacts> files;
 };
 
+struct PinnedHostBytes {
+    uint8_t* data = nullptr;
+    size_t   size = 0;
+
+    PinnedHostBytes() = default;
+    PinnedHostBytes(const PinnedHostBytes&) = delete;
+    PinnedHostBytes& operator=(const PinnedHostBytes&) = delete;
+
+    PinnedHostBytes(PinnedHostBytes&& other) noexcept : data(other.data), size(other.size)
+    {
+        other.data = nullptr;
+        other.size = 0;
+    }
+
+    PinnedHostBytes& operator=(PinnedHostBytes&& other) noexcept
+    {
+        if (this != &other) {
+            reset();
+            data = other.data;
+            size = other.size;
+            other.data = nullptr;
+            other.size = 0;
+        }
+        return *this;
+    }
+
+    ~PinnedHostBytes() { reset(); }
+
+    void reset()
+    {
+        if (data) cudaFreeHost(data);
+        data = nullptr;
+        size = 0;
+    }
+};
+
+struct SerializedSSTHostSet {
+    PinnedHostBytes       all_file_bytes;
+    std::vector<uint64_t> file_offsets;
+    std::vector<uint64_t> file_sizes;
+    std::vector<uint32_t> file_blocks;
+
+    bool empty() const { return file_sizes.empty(); }
+
+    size_t total_bytes() const { return all_file_bytes.size; }
+
+    size_t total_blocks() const
+    {
+        size_t total = 0;
+        for (uint32_t blocks : file_blocks) total += blocks;
+        return total;
+    }
+};
+
 static inline std::vector<uint8_t> build_cpu_filter_bytes(const std::vector<KVPair>& kv_array,
                                                           const std::vector<DataBlockPlanEntry>& plans,
                                                           std::vector<uint32_t>& bitvec_offsets,
@@ -221,6 +275,31 @@ partition_output_blocks(const PackResult&            pack_result,
     return spans;
 }
 
+static inline std::vector<uint32_t>
+predict_filter_lengths_from_plans(const std::vector<DataBlockPlanEntry>& plans)
+{
+    std::vector<uint32_t> filter_lengths(plans.size());
+    for (size_t i = 0; i < plans.size(); ++i) {
+        uint32_t byte_vector_len = plans[i].num_kv * GP_BLOOM_BITS_PER_KEY;
+        filter_lengths[i] = (byte_vector_len + 7u) / 8u;
+    }
+    return filter_lengths;
+}
+
+static inline std::vector<std::pair<size_t, size_t>>
+partition_output_blocks_from_plan_estimates(const std::vector<DataBlockPlanEntry>& plans,
+                                            size_t                                 target_file_bytes = GP_TARGET_FILE_BYTES)
+{
+    PackResult planned_layout;
+    planned_layout.plans = plans;
+    planned_layout.block_sizes.resize(plans.size());
+    for (size_t i = 0; i < plans.size(); ++i) {
+        planned_layout.block_sizes[i] = plans[i].serialized_size;
+    }
+    std::vector<uint32_t> filter_lengths = predict_filter_lengths_from_plans(plans);
+    return partition_output_blocks(planned_layout, filter_lengths, target_file_bytes);
+}
+
 static inline SSTBuildArtifacts assemble_sst_file_range(const std::vector<KVPair>&            kv_array,
                                                         const PackResult&                      pack_result,
                                                         const std::vector<uint8_t>&           filter_bytes,
@@ -402,9 +481,26 @@ static inline SSTBuildSet assemble_sst_files_targeted(const std::vector<KVPair>&
                                                       const std::vector<uint32_t>&          filter_lengths,
                                                       size_t                                 target_file_bytes = GP_TARGET_FILE_BYTES)
 {
-    SSTBuildSet out;
     std::vector<std::pair<size_t, size_t>> spans =
         partition_output_blocks(pack_result, filter_lengths, target_file_bytes);
+    SSTBuildSet out;
+    out.files.reserve(spans.size());
+    for (const auto& span : spans) {
+        out.files.push_back(assemble_sst_file_range(kv_array, pack_result, filter_bytes,
+                                                    filter_offsets, filter_lengths,
+                                                    span.first, span.second));
+    }
+    return out;
+}
+
+static inline SSTBuildSet assemble_sst_files_from_spans(const std::vector<KVPair>&                  kv_array,
+                                                        const PackResult&                            pack_result,
+                                                        const std::vector<uint8_t>&                 filter_bytes,
+                                                        const std::vector<uint32_t>&                filter_offsets,
+                                                        const std::vector<uint32_t>&                filter_lengths,
+                                                        const std::vector<std::pair<size_t, size_t>>& spans)
+{
+    SSTBuildSet out;
     out.files.reserve(spans.size());
     for (const auto& span : spans) {
         out.files.push_back(assemble_sst_file_range(kv_array, pack_result, filter_bytes,
@@ -421,9 +517,27 @@ static inline SSTBuildSet assemble_sst_files_targeted_gpu_fast(const std::vector
                                                                const std::vector<uint32_t>&          filter_lengths,
                                                                size_t                                 target_file_bytes = GP_TARGET_FILE_BYTES)
 {
-    SSTBuildSet out;
     std::vector<std::pair<size_t, size_t>> spans =
         partition_output_blocks(pack_result, filter_lengths, target_file_bytes);
+    SSTBuildSet out;
+    out.files.reserve(spans.size());
+    for (const auto& span : spans) {
+        out.files.push_back(assemble_sst_file_range_fast(kv_array, pack_result, filter_bytes,
+                                                         filter_offsets, filter_lengths,
+                                                         span.first, span.second));
+    }
+    return out;
+}
+
+static inline SSTBuildSet assemble_sst_files_from_spans_fast(
+    const std::vector<KVPair>&                  kv_array,
+    const PackResult&                            pack_result,
+    const std::vector<uint8_t>&                 filter_bytes,
+    const std::vector<uint32_t>&                filter_offsets,
+    const std::vector<uint32_t>&                filter_lengths,
+    const std::vector<std::pair<size_t, size_t>>& spans)
+{
+    SSTBuildSet out;
     out.files.reserve(spans.size());
     for (const auto& span : spans) {
         out.files.push_back(assemble_sst_file_range_fast(kv_array, pack_result, filter_bytes,
@@ -565,9 +679,26 @@ static inline SSTBuildSet assemble_sst_files_targeted_from_largest_keys(
     const std::vector<uint32_t>&          filter_lengths,
     size_t                                target_file_bytes = GP_TARGET_FILE_BYTES)
 {
-    SSTBuildSet out;
     std::vector<std::pair<size_t, size_t>> spans =
         partition_output_blocks(pack_result, filter_lengths, target_file_bytes);
+    SSTBuildSet out;
+    out.files.reserve(spans.size());
+    for (const auto& span : spans) {
+        out.files.push_back(assemble_sst_file_range_from_largest_keys(
+            largest_keys, pack_result, filter_bytes, filter_offsets, filter_lengths, span.first, span.second));
+    }
+    return out;
+}
+
+static inline SSTBuildSet assemble_sst_files_from_spans_from_largest_keys(
+    const std::vector<Key128>&              largest_keys,
+    const PackResult&                       pack_result,
+    const std::vector<uint8_t>&             filter_bytes,
+    const std::vector<uint32_t>&            filter_offsets,
+    const std::vector<uint32_t>&            filter_lengths,
+    const std::vector<std::pair<size_t, size_t>>& spans)
+{
+    SSTBuildSet out;
     out.files.reserve(spans.size());
     for (const auto& span : spans) {
         out.files.push_back(assemble_sst_file_range_from_largest_keys(
@@ -614,6 +745,15 @@ static inline void write_binary_file(const std::string& path, const std::vector<
     gp_fail_if(written != bytes.size(), "Short write to '" + path + "'");
 }
 
+static inline void write_binary_file_span(const std::string& path, const uint8_t* bytes, size_t size)
+{
+    FILE* f = std::fopen(path.c_str(), "wb");
+    gp_fail_if(!f, "Failed to open '" + path + "' for writing");
+    size_t written = size == 0 ? 0 : std::fwrite(bytes, 1, size, f);
+    std::fclose(f);
+    gp_fail_if(written != size, "Short write to '" + path + "'");
+}
+
 static inline std::vector<uint8_t> read_binary_file(const std::string& path)
 {
     FILE* f = std::fopen(path.c_str(), "rb");
@@ -632,6 +772,321 @@ static inline std::vector<uint8_t> read_binary_file(const std::string& path)
 static inline ParsedSST read_sst_file(const std::string& path)
 {
     return parse_sst_bytes(read_binary_file(path));
+}
+
+static inline SSTBuildArtifacts artifacts_from_serialized_sst(std::vector<uint8_t> file_bytes)
+{
+    ParsedSST parsed = parse_sst_bytes(std::move(file_bytes));
+    SSTBuildArtifacts artifacts;
+    artifacts.file_bytes = std::move(parsed.file_bytes);
+    artifacts.data_meta = std::move(parsed.data_blocks);
+    artifacts.filter_meta = std::move(parsed.filter_blocks);
+    return artifacts;
+}
+
+struct DeviceSSTFileLayout {
+    uint64_t buffer_offset = 0;
+    uint64_t total_size = 0;
+    uint64_t filter_region_offset = 0;
+    uint32_t filter_region_size = 0;
+    uint64_t index_region_offset = 0;
+    uint32_t index_region_size = 0;
+    uint64_t filter_meta_offset = 0;
+    uint32_t filter_meta_size = 0;
+    uint64_t data_meta_offset = 0;
+    uint32_t data_meta_size = 0;
+    uint32_t num_data_blocks = 0;
+    uint32_t total_kv = 0;
+};
+
+struct DeviceSSTBlockTask {
+    uint32_t file_index = 0;
+    uint32_t local_block_index = 0;
+    uint32_t global_block_index = 0;
+    uint64_t data_dst_offset = 0;
+    uint64_t filter_dst_offset = 0;
+    uint32_t block_size = 0;
+    uint32_t filter_src_offset = 0;
+    uint32_t filter_length = 0;
+    uint32_t local_first_kv = 0;
+    uint32_t num_kv = 0;
+};
+
+struct DeviceAssembleSSTResult {
+    SSTBuildSet output;
+    SerializedSSTHostSet serialized_output;
+    float       kernel_ms = 0.0f;
+    float       wall_ms = 0.0f;
+    float       h2d_ms = 0.0f;
+    float       d2h_ms = 0.0f;
+    size_t      h2d_bytes = 0;
+    size_t      d2h_bytes = 0;
+};
+
+__global__ static void assemble_sst_blocks_kernel(uint8_t*                    all_file_bytes,
+                                                  const DeviceSSTFileLayout*  file_layouts,
+                                                  const DeviceSSTBlockTask*   tasks,
+                                                  int                         num_tasks,
+                                                  const uint8_t*              packed_blocks,
+                                                  const uint8_t*              filter_bytes,
+                                                  const Key128*               largest_keys)
+{
+    int task_idx = (int)blockIdx.x;
+    if (task_idx >= num_tasks) return;
+
+    DeviceSSTBlockTask task = tasks[task_idx];
+    DeviceSSTFileLayout layout = file_layouts[task.file_index];
+    uint8_t* file = all_file_bytes + layout.buffer_offset;
+
+    if (threadIdx.x == 0) {
+        DataBlockMeta* data_meta =
+            reinterpret_cast<DataBlockMeta*>(file + layout.data_meta_offset);
+        data_meta[task.local_block_index].offset = task.data_dst_offset;
+        data_meta[task.local_block_index].size = task.block_size;
+        data_meta[task.local_block_index].first_kv = task.local_first_kv;
+        data_meta[task.local_block_index].num_kv = task.num_kv;
+
+        FilterBlockMeta* filter_meta =
+            reinterpret_cast<FilterBlockMeta*>(file + layout.filter_meta_offset);
+        filter_meta[task.local_block_index].offset = task.filter_dst_offset;
+        filter_meta[task.local_block_index].size =
+            (uint32_t)(sizeof(FilterBlockHeader) + task.filter_length);
+        filter_meta[task.local_block_index].byte_vector_len =
+            task.num_kv * GP_BLOOM_BITS_PER_KEY;
+        filter_meta[task.local_block_index].num_keys = task.num_kv;
+
+        IndexEntry* index_entries =
+            reinterpret_cast<IndexEntry*>(file + layout.index_region_offset);
+        index_entries[task.local_block_index].largest_key = largest_keys[task.global_block_index];
+        index_entries[task.local_block_index].data_offset = task.data_dst_offset;
+        index_entries[task.local_block_index].data_size = task.block_size;
+        index_entries[task.local_block_index].num_kv = task.num_kv;
+
+        FilterBlockHeader* hdr =
+            reinterpret_cast<FilterBlockHeader*>(file + task.filter_dst_offset);
+        hdr->num_keys = task.num_kv;
+        hdr->byte_vector_len = task.num_kv * GP_BLOOM_BITS_PER_KEY;
+        hdr->bitvec_len = task.filter_length;
+        hdr->reserved = 0;
+    }
+
+    const uint8_t* block_src =
+        packed_blocks + (size_t)task.global_block_index * GP_DATA_BLOCK_BYTES;
+    for (uint32_t i = (uint32_t)threadIdx.x; i < task.block_size; i += (uint32_t)blockDim.x) {
+        file[task.data_dst_offset + i] = block_src[i];
+    }
+
+    uint8_t* filter_dst = file + task.filter_dst_offset + sizeof(FilterBlockHeader);
+    const uint8_t* filter_src = filter_bytes + task.filter_src_offset;
+    for (uint32_t i = (uint32_t)threadIdx.x; i < task.filter_length; i += (uint32_t)blockDim.x) {
+        filter_dst[i] = filter_src[i];
+    }
+}
+
+__global__ static void write_sst_footers_kernel(uint8_t*                   all_file_bytes,
+                                                const DeviceSSTFileLayout* file_layouts,
+                                                int                        num_files)
+{
+    int file_idx = (int)(blockIdx.x * blockDim.x + threadIdx.x);
+    if (file_idx >= num_files) return;
+
+    DeviceSSTFileLayout layout = file_layouts[file_idx];
+    uint8_t* file = all_file_bytes + layout.buffer_offset;
+    union {
+        SSTFooter footer;
+        uint8_t   bytes[sizeof(SSTFooter)];
+    } footer_image = {};
+    footer_image.footer.magic = GP_SST_MAGIC;
+    footer_image.footer.version = GP_SST_VERSION;
+    footer_image.footer.key_bytes = GP_KEY_BYTES;
+    footer_image.footer.value_bytes = GP_VALUE_BYTES;
+    footer_image.footer.restart_interval = GP_RESTART_INTERVAL;
+    footer_image.footer.data_block_size = GP_DATA_BLOCK_BYTES;
+    footer_image.footer.bloom_bits_per_key = GP_BLOOM_BITS_PER_KEY;
+    footer_image.footer.bloom_hashes = GP_BLOOM_HASHES;
+    footer_image.footer.num_data_blocks = layout.num_data_blocks;
+    footer_image.footer.total_kv = layout.total_kv;
+    footer_image.footer.filter_meta_offset = layout.filter_meta_offset;
+    footer_image.footer.filter_meta_size = layout.filter_meta_size;
+    footer_image.footer.data_meta_offset = layout.data_meta_offset;
+    footer_image.footer.data_meta_size = layout.data_meta_size;
+    footer_image.footer.filter_region_offset = layout.filter_region_offset;
+    footer_image.footer.filter_region_size = layout.filter_region_size;
+    footer_image.footer.index_region_offset = layout.index_region_offset;
+    footer_image.footer.index_region_size = layout.index_region_size;
+
+    uint8_t* footer_dst = file + layout.total_size - sizeof(SSTFooter);
+    for (size_t i = 0; i < sizeof(SSTFooter); ++i) footer_dst[i] = footer_image.bytes[i];
+}
+
+static inline DeviceAssembleSSTResult
+assemble_sst_files_from_spans_on_device(const std::vector<DataBlockPlanEntry>&      plans,
+                                        const std::vector<uint32_t>&                 block_sizes,
+                                        const uint8_t*                               d_packed_blocks,
+                                        const Key128*                                d_largest_keys,
+                                        const uint8_t*                               d_filter_bytes,
+                                        const std::vector<uint32_t>&                 filter_offsets,
+                                        const std::vector<uint32_t>&                 filter_lengths,
+                                        const std::vector<std::pair<size_t, size_t>>& spans,
+                                        bool                                          materialize_output = true)
+{
+    DeviceAssembleSSTResult result;
+    if (spans.empty()) return result;
+
+    std::vector<DeviceSSTFileLayout> layouts(spans.size());
+    std::vector<DeviceSSTBlockTask> tasks;
+    tasks.reserve(plans.size());
+
+    uint64_t total_output_bytes = 0;
+    for (size_t file_idx = 0; file_idx < spans.size(); ++file_idx) {
+        size_t block_begin = spans[file_idx].first;
+        size_t block_end = spans[file_idx].second;
+        gp_fail_if(block_begin >= block_end, "invalid SST block range");
+
+        size_t block_count = block_end - block_begin;
+        size_t kv_begin = plans[block_begin].first_kv;
+        size_t kv_end = plans[block_end - 1].first_kv + plans[block_end - 1].num_kv;
+
+        uint64_t data_region_size = 0;
+        uint64_t filter_region_size = 0;
+        for (size_t global = block_begin; global < block_end; ++global) {
+            data_region_size += block_sizes[global];
+            filter_region_size += sizeof(FilterBlockHeader) + filter_lengths[global];
+        }
+
+        DeviceSSTFileLayout& layout = layouts[file_idx];
+        layout.buffer_offset = total_output_bytes;
+        layout.filter_region_offset = data_region_size;
+        layout.filter_region_size = (uint32_t)filter_region_size;
+        layout.index_region_offset = layout.filter_region_offset + filter_region_size;
+        layout.index_region_size = (uint32_t)(block_count * sizeof(IndexEntry));
+        layout.filter_meta_offset = layout.index_region_offset + layout.index_region_size;
+        layout.filter_meta_size = (uint32_t)(block_count * sizeof(FilterBlockMeta));
+        layout.data_meta_offset = layout.filter_meta_offset + layout.filter_meta_size;
+        layout.data_meta_size = (uint32_t)(block_count * sizeof(DataBlockMeta));
+        layout.num_data_blocks = (uint32_t)block_count;
+        layout.total_kv = (uint32_t)(kv_end - kv_begin);
+        layout.total_size = layout.data_meta_offset + layout.data_meta_size + sizeof(SSTFooter);
+
+        uint64_t running_data_offset = 0;
+        uint64_t running_filter_offset = layout.filter_region_offset;
+        for (size_t local = 0; local < block_count; ++local) {
+            size_t global = block_begin + local;
+            DeviceSSTBlockTask task{};
+            task.file_index = (uint32_t)file_idx;
+            task.local_block_index = (uint32_t)local;
+            task.global_block_index = (uint32_t)global;
+            task.data_dst_offset = running_data_offset;
+            task.filter_dst_offset = running_filter_offset;
+            task.block_size = block_sizes[global];
+            task.filter_src_offset = filter_offsets[global];
+            task.filter_length = filter_lengths[global];
+            task.local_first_kv = (uint32_t)(plans[global].first_kv - kv_begin);
+            task.num_kv = plans[global].num_kv;
+            tasks.push_back(task);
+
+            running_data_offset += block_sizes[global];
+            running_filter_offset += sizeof(FilterBlockHeader) + filter_lengths[global];
+        }
+
+        total_output_bytes += layout.total_size;
+    }
+
+    uint8_t* d_all_files = nullptr;
+    DeviceSSTFileLayout* d_layouts = nullptr;
+    DeviceSSTBlockTask* d_tasks = nullptr;
+    cudaMalloc(&d_all_files, (size_t)std::max<uint64_t>(total_output_bytes, 1u));
+    cudaMalloc(&d_layouts, layouts.size() * sizeof(DeviceSSTFileLayout));
+    cudaMalloc(&d_tasks, tasks.size() * sizeof(DeviceSSTBlockTask));
+
+    auto h2d_start = std::chrono::steady_clock::now();
+    cudaMemcpy(d_layouts, layouts.data(),
+               layouts.size() * sizeof(DeviceSSTFileLayout), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_tasks, tasks.data(),
+               tasks.size() * sizeof(DeviceSSTBlockTask), cudaMemcpyHostToDevice);
+    auto h2d_end = std::chrono::steady_clock::now();
+    result.h2d_ms = (float)std::chrono::duration<double, std::milli>(h2d_end - h2d_start).count();
+    result.h2d_bytes = layouts.size() * sizeof(DeviceSSTFileLayout)
+                     + tasks.size() * sizeof(DeviceSSTBlockTask);
+
+    auto wall_start = std::chrono::steady_clock::now();
+    cudaEvent_t ev0, ev1;
+    cudaEventCreate(&ev0);
+    cudaEventCreate(&ev1);
+    cudaEventRecord(ev0, 0);
+    assemble_sst_blocks_kernel<<<(int)tasks.size(), 256>>>(
+        d_all_files, d_layouts, d_tasks, (int)tasks.size(), d_packed_blocks, d_filter_bytes, d_largest_keys);
+    int footer_block = 128;
+    int footer_grid = ((int)layouts.size() + footer_block - 1) / footer_block;
+    write_sst_footers_kernel<<<footer_grid, footer_block>>>(d_all_files, d_layouts, (int)layouts.size());
+    cudaEventRecord(ev1, 0);
+    cudaEventSynchronize(ev1);
+    cudaEventElapsedTime(&result.kernel_ms, ev0, ev1);
+
+    uint8_t* h_all_files = nullptr;
+    cudaMallocHost(&h_all_files, (size_t)std::max<uint64_t>(total_output_bytes, 1u));
+    auto d2h_start = std::chrono::steady_clock::now();
+    cudaMemcpy(h_all_files, d_all_files,
+               (size_t)total_output_bytes, cudaMemcpyDeviceToHost);
+    auto d2h_end = std::chrono::steady_clock::now();
+    result.d2h_ms = (float)std::chrono::duration<double, std::milli>(d2h_end - d2h_start).count();
+    result.d2h_bytes = (size_t)total_output_bytes;
+    auto wall_end = std::chrono::steady_clock::now();
+    result.wall_ms = (float)std::chrono::duration<double, std::milli>(wall_end - wall_start).count();
+
+    if (materialize_output) {
+        result.output.files.reserve(layouts.size());
+        for (const auto& layout : layouts) {
+            SSTBuildArtifacts artifacts;
+            artifacts.file_bytes.resize((size_t)layout.total_size);
+            std::memcpy(artifacts.file_bytes.data(),
+                        h_all_files + layout.buffer_offset,
+                        (size_t)layout.total_size);
+
+            artifacts.index_entries.resize(layout.num_data_blocks);
+            if (!artifacts.index_entries.empty()) {
+                std::memcpy(artifacts.index_entries.data(),
+                            artifacts.file_bytes.data() + layout.index_region_offset,
+                            (size_t)layout.index_region_size);
+            }
+
+            artifacts.filter_meta.resize(layout.num_data_blocks);
+            if (!artifacts.filter_meta.empty()) {
+                std::memcpy(artifacts.filter_meta.data(),
+                            artifacts.file_bytes.data() + layout.filter_meta_offset,
+                            (size_t)layout.filter_meta_size);
+            }
+
+            artifacts.data_meta.resize(layout.num_data_blocks);
+            if (!artifacts.data_meta.empty()) {
+                std::memcpy(artifacts.data_meta.data(),
+                            artifacts.file_bytes.data() + layout.data_meta_offset,
+                            (size_t)layout.data_meta_size);
+            }
+
+            result.output.files.push_back(std::move(artifacts));
+        }
+    } else {
+        result.serialized_output.all_file_bytes.data = h_all_files;
+        result.serialized_output.all_file_bytes.size = (size_t)total_output_bytes;
+        result.serialized_output.file_offsets.reserve(layouts.size());
+        result.serialized_output.file_sizes.reserve(layouts.size());
+        result.serialized_output.file_blocks.reserve(layouts.size());
+        for (const auto& layout : layouts) {
+            result.serialized_output.file_offsets.push_back(layout.buffer_offset);
+            result.serialized_output.file_sizes.push_back(layout.total_size);
+            result.serialized_output.file_blocks.push_back(layout.num_data_blocks);
+        }
+        h_all_files = nullptr;
+    }
+
+    cudaEventDestroy(ev1);
+    cudaEventDestroy(ev0);
+    if (h_all_files) cudaFreeHost(h_all_files);
+    cudaFree(d_tasks);
+    cudaFree(d_layouts);
+    cudaFree(d_all_files);
+    return result;
 }
 
 static inline std::vector<DataBlockPlanEntry> plans_from_parsed(const ParsedSST& parsed)
