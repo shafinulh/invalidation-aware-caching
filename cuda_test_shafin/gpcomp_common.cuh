@@ -294,6 +294,22 @@ static inline std::vector<KVPair> garbage_collect_sorted_kv(const std::vector<KV
     return survivors;
 }
 
+static inline std::vector<KVPair> garbage_collect_sorted_kv(const KVPair* sorted_kv, size_t count)
+{
+    std::vector<KVPair> survivors;
+    survivors.reserve(count);
+
+    size_t i = 0;
+    while (i < count) {
+        size_t j = i + 1;
+        while (j < count && kv_user_key_equal(sorted_kv[i], sorted_kv[j])) ++j;
+
+        survivors.push_back(sorted_kv[j - 1]);
+        i = j;
+    }
+    return survivors;
+}
+
 static inline std::vector<uint32_t> garbage_collect_sorted_keys_to_indices(const std::vector<Key128>& sorted_keys)
 {
     std::vector<uint32_t> survivor_indices;

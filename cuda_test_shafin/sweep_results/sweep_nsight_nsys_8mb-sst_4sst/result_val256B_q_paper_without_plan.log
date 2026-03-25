@@ -1,38 +1,38 @@
 Q-compaction benchmark
   input SSTs: 4
   key bytes: 16  value bytes: 256  restart interval: 4  block size: 32768
-  runs: 5  (timed)
+  runs: 5  (1 warmup + 4 timed)
   gpu mode: q_paper_without_plan
   storage IO: direct (O_DIRECT + fdatasync)
   cpu baseline: disabled (--gpu_only)
   gpu garbage collection: disabled (Q-compaction only)
 
-GPU total (Wall): min=44.60 ms  mean=48.51 +- 3.65 ms
-GPU total (CPU-Time): 31.45 ms
-GPU pipeline (Wall): 23.52 ms  (CPU-Time): 19.50 ms  utilization: 82.9%
+GPU total (Wall): min=44.16 ms  mean=46.76 +- 2.30 ms
+GPU total (CPU-Time): 30.97 ms
+GPU pipeline (Wall): 23.43 ms  (CPU-Time): 19.18 ms  utilization: 81.8%
 CPU baseline: skipped (gpu_only mode)
 
 Best GPU run breakdown (ms):
-  read+parse 9.67  unpack 5.57  sort(merge) 2.34  gc 0.00  plan 0.01  bloom 0.04  pack+assemble 11.84  write 11.40
-  kernel-only: unpack 1.92  sort(merge) 2.23  bloom 0.02  pack 2.11
-  non-kernel overhead (ms): unpack 3.65  sort(merge) 0.11  bloom 0.02  pack 9.72
+  read+parse 9.17  unpack 4.57  sort(merge) 2.37  gc 0.00  plan 0.01  bloom 0.04  pack+assemble 12.75  write 11.55
+  kernel-only: unpack 1.92  sort(merge) 2.23  bloom 0.02  pack 2.09
+  non-kernel overhead (ms): unpack 2.65  sort(merge) 0.14  bloom 0.02  pack 10.66
   transfer stage detail (measured):
-    unpack  H2D 4.37 ms (33566169 B)  D2H 0.00 ms (0 B)
-    merge   H2D 0.03 ms (68 B)  D2H 0.00 ms (0 B)
+    unpack  H2D 3.71 ms (33566169 B)  D2H 0.00 ms (0 B)
+    merge   H2D 0.02 ms (68 B)  D2H 0.00 ms (0 B)
     gc      H2D 0.00 ms (0 B)  D2H 0.00 ms (0 B)
-    plan    H2D 0.05 ms (8448 B)  D2H 0.00 ms (0 B)
+    plan    H2D 0.04 ms (8448 B)  D2H 0.00 ms (0 B)
     bloom   H2D 0.00 ms (4224 B)  D2H 0.00 ms (0 B)
-    pack    H2D 0.02 ms (59576 B)  D2H 2.87 ms (33527265 B)
-  measured transfer totals: H2D 4.47 ms (33638485 B, 7174.41 MB/s)  D2H 2.87 ms (33527265 B, 11125.17 MB/s)
+    pack    H2D 0.02 ms (59576 B)  D2H 3.07 ms (33527265 B)
+  measured transfer totals: H2D 3.79 ms (33638485 B, 8469.73 MB/s)  D2H 3.07 ms (33527265 B, 10429.45 MB/s)
   transfer lower-bound bytes: H2D 33638485  D2H 33527265
-  estimated transfer+sync BW (lower-bound): 4743.60 MB/s
+  estimated transfer+sync BW (lower-bound): 4755.97 MB/s
   CPU<->GPU (lower-bound): CPU->GPU H2D 33638485 B  GPU->CPU D2H 33527265 B
-  CPU<->GPU envelope: non-kernel total 13.50 ms  estimated BW 4743.60 MB/s
+  CPU<->GPU envelope: non-kernel total 13.47 ms  estimated BW 4755.97 MB/s
   output bytes 33523041  data blocks 1056  output files 5
-  I/O profile: input bytes 33553881  estimated SSD read BW 3310.81 MB/s  estimated SSD write BW 2804.99 MB/s
-  SSD<->CPU (estimated): SSD->CPU 9.67 ms (33553881 B, 3310.81 MB/s)  CPU->SSD 11.40 ms (33523041 B, 2804.99 MB/s)
+  I/O profile: input bytes 33553881  estimated SSD read BW 3489.87 MB/s  estimated SSD write BW 2768.80 MB/s
+  SSD<->CPU (estimated): SSD->CPU 9.17 ms (33553881 B, 3489.87 MB/s)  CPU->SSD 11.55 ms (33523041 B, 2768.80 MB/s)
 Collecting data...
-Generating '/tmp/nsys-haques24/nsys-report-7931.qdstrm'
+Generating '/tmp/nsys-haques24/nsys-report-ec67.qdstrm'
 Press Ctrl-C to stop symbol files downloading
 [1/1] [0%                          ] nsys_val256B_q_paper_without_plan.nsys-rep[1/1] [0%                          ] nsys_val256B_q_paper_without_plan.nsys-rep[1/1] [13%                         ] nsys_val256B_q_paper_without_plan.nsys-rep[1/1] [====27%                     ] nsys_val256B_q_paper_without_plan.nsys-rep[1/1] [==============63%           ] nsys_val256B_q_paper_without_plan.nsys-rep[1/1] [========================100%] nsys_val256B_q_paper_without_plan.nsys-rep[1/1] [========================100%] nsys_val256B_q_paper_without_plan.nsys-rep
 Generated:

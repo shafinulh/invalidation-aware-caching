@@ -513,7 +513,10 @@ int main(int argc, char** argv)
     std::printf("  input SSTs: %zu\n", input_paths.size());
     std::printf("  key bytes: %d  value bytes: %d  restart interval: %d  block size: %d\n",
                 GP_KEY_BYTES, GP_VALUE_BYTES, GP_RESTART_INTERVAL, GP_DATA_BLOCK_BYTES);
-    std::printf("  runs: %d  (timed)\n", runs);
+    if (runs > 1)
+        std::printf("  runs: %d  (1 warmup + %d timed)\n", runs, runs - 1);
+    else
+        std::printf("  runs: %d  (timed, no warmup)\n", runs);
     std::printf("  gpu mode: %s\n", gpu_mode.c_str());
     std::printf("  storage IO: %s\n", gpcomp_direct_io_enabled() ? "direct (O_DIRECT + fdatasync)" : "buffered");
     if (gpu_only) {
@@ -546,8 +549,9 @@ int main(int argc, char** argv)
         gpu_runs.push_back(run_gpu_once(input_paths, gpu_dir, gpu_mode));
     }
 
+    int timed_start = (runs > 1) ? 1 : 0;
     std::vector<double> cpu_totals, gpu_totals, cpu_reads, gpu_reads;
-    for (int r = 0; r < runs; ++r) {
+    for (int r = timed_start; r < runs; ++r) {
         gpu_totals.push_back(gpu_runs[r].total_ms);
         gpu_reads.push_back(gpu_runs[r].read_parse_ms);
         if (!gpu_only) {
@@ -558,7 +562,7 @@ int main(int argc, char** argv)
 
     Stats gpu_total_stats = compute_stats(gpu_totals);
     Stats gpu_read_stats = compute_stats(gpu_reads);
-    size_t gpu_best_idx = (size_t)(std::min_element(gpu_totals.begin(), gpu_totals.end()) - gpu_totals.begin());
+    size_t gpu_best_idx = timed_start + (size_t)(std::min_element(gpu_totals.begin(), gpu_totals.end()) - gpu_totals.begin());
     const RunSummary& gpu_best = gpu_runs[gpu_best_idx];
     std::printf("GPU total (Wall): min=%.2f ms  mean=%.2f +- %.2f ms\n",
                 gpu_total_stats.min, gpu_total_stats.mean, gpu_total_stats.stddev);
@@ -578,7 +582,7 @@ int main(int argc, char** argv)
         bool logical_output_match = compare_output_sets_logical(cpu_last, gpu_last);
         outputs_match = is_exact_match_mode(gpu_mode) ? exact_output_match : logical_output_match;
 
-        size_t cpu_best_idx = (size_t)(std::min_element(cpu_totals.begin(), cpu_totals.end()) - cpu_totals.begin());
+        size_t cpu_best_idx = timed_start + (size_t)(std::min_element(cpu_totals.begin(), cpu_totals.end()) - cpu_totals.begin());
         const RunSummary& cpu_best = cpu_runs[cpu_best_idx];
 
         std::printf("CPU total (Wall): min=%.2f ms  mean=%.2f +- %.2f ms\n",

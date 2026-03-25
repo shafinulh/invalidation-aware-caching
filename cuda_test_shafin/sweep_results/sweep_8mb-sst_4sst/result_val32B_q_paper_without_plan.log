@@ -1,45 +1,45 @@
 Q-compaction benchmark
   input SSTs: 4
   key bytes: 16  value bytes: 32  restart interval: 4  block size: 32768
-  runs: 5  (timed)
+  runs: 5  (1 warmup + 4 timed)
   gpu mode: q_paper_without_plan
   storage IO: direct (O_DIRECT + fdatasync)
   cpu baseline: enabled (full GC + group-aligned planning)
   gpu garbage collection: disabled (Q-compaction only)
 
-GPU total (Wall): min=44.48 ms  mean=45.11 +- 0.61 ms
-GPU total (CPU-Time): 29.72 ms
-GPU pipeline (Wall): 22.46 ms  (CPU-Time): 17.50 ms  utilization: 77.9%
-CPU total (Wall): min=118.22 ms  mean=126.72 +- 11.35 ms
-CPU total (CPU-Time): 109.85 ms
-CPU pipeline (Wall): 98.13 ms  (CPU-Time): 98.16 ms  utilization: 100.0%
-Speedup: 2.66x (min totals)
+GPU total (Wall): min=42.78 ms  mean=45.27 +- 1.80 ms
+GPU total (CPU-Time): 29.49 ms
+GPU pipeline (Wall): 22.28 ms  (CPU-Time): 17.35 ms  utilization: 77.9%
+CPU total (Wall): min=117.18 ms  mean=118.11 +- 1.30 ms
+CPU total (CPU-Time): 108.53 ms
+CPU pipeline (Wall): 96.61 ms  (CPU-Time): 96.63 ms  utilization: 100.0%
+Speedup: 2.74x (min totals)
 Output logically identical: PASS  (different block/file layout than CPU baseline)
 
 Best CPU run breakdown (ms):
-  read+parse 9.38  unpack 15.87  sort(merge) 19.99  gc 7.73  plan 2.59  bloom 32.90  pack+assemble 19.04  write 10.70
+  read+parse 9.06  unpack 15.69  sort(merge) 19.23  gc 7.52  plan 2.46  bloom 32.75  pack+assemble 18.96  write 11.51
   output bytes 33348309  data blocks 990  output files 4
 
-  I/O profile: input bytes 33554426  estimated SSD read BW 3411.53 MB/s  estimated SSD write BW 2971.91 MB/s
+  I/O profile: input bytes 33554426  estimated SSD read BW 3533.47 MB/s  estimated SSD write BW 2763.55 MB/s
 
-  SSD<->CPU (estimated): SSD->CPU 9.38 ms (33554426 B, 3411.53 MB/s)  CPU->SSD 10.70 ms (33348309 B, 2971.91 MB/s)
+  SSD<->CPU (estimated): SSD->CPU 9.06 ms (33554426 B, 3533.47 MB/s)  CPU->SSD 11.51 ms (33348309 B, 2763.55 MB/s)
 
 Best GPU run breakdown (ms):
-  read+parse 9.78  unpack 4.91  sort(merge) 2.09  gc 0.00  plan 0.01  bloom 0.11  pack+assemble 11.62  write 12.24
-  kernel-only: unpack 1.97  sort(merge) 1.93  bloom 0.09  pack 2.17
-  non-kernel overhead (ms): unpack 2.94  sort(merge) 0.15  bloom 0.01  pack 9.45
+  read+parse 9.12  unpack 4.66  sort(merge) 2.09  gc 0.00  plan 0.01  bloom 0.10  pack+assemble 11.67  write 11.37
+  kernel-only: unpack 1.98  sort(merge) 1.97  bloom 0.09  pack 2.15
+  non-kernel overhead (ms): unpack 2.69  sort(merge) 0.12  bloom 0.01  pack 9.51
   transfer stage detail (measured):
-    unpack  H2D 3.94 ms (33566378 B)  D2H 0.00 ms (0 B)
-    merge   H2D 0.06 ms (68 B)  D2H 0.00 ms (0 B)
+    unpack  H2D 3.79 ms (33566378 B)  D2H 0.00 ms (0 B)
+    merge   H2D 0.05 ms (68 B)  D2H 0.00 ms (0 B)
     gc      H2D 0.00 ms (0 B)  D2H 0.00 ms (0 B)
-    plan    H2D 0.03 ms (8576 B)  D2H 0.00 ms (0 B)
+    plan    H2D 0.05 ms (8576 B)  D2H 0.00 ms (0 B)
     bloom   H2D 0.00 ms (4288 B)  D2H 0.00 ms (0 B)
-    pack    H2D 0.03 ms (60472 B)  D2H 2.91 ms (33415408 B)
-  measured transfer totals: H2D 4.06 ms (33639782 B, 7905.68 MB/s)  D2H 2.91 ms (33415408 B, 10957.53 MB/s)
+    pack    H2D 0.03 ms (60472 B)  D2H 3.09 ms (33415408 B)
+  measured transfer totals: H2D 3.93 ms (33639782 B, 8158.61 MB/s)  D2H 3.09 ms (33415408 B, 10321.16 MB/s)
   transfer lower-bound bytes: H2D 33639782  D2H 33415408
-  estimated transfer+sync BW (lower-bound): 5089.99 MB/s
+  estimated transfer+sync BW (lower-bound): 5184.51 MB/s
   CPU<->GPU (lower-bound): CPU->GPU H2D 33639782 B  GPU->CPU D2H 33415408 B
-  CPU<->GPU envelope: non-kernel total 12.56 ms  estimated BW 5089.99 MB/s
+  CPU<->GPU envelope: non-kernel total 12.33 ms  estimated BW 5184.51 MB/s
   output bytes 33411120  data blocks 1072  output files 5
-  I/O profile: input bytes 33554426  estimated SSD read BW 3272.67 MB/s  estimated SSD write BW 2603.77 MB/s
-  SSD<->CPU (estimated): SSD->CPU 9.78 ms (33554426 B, 3272.67 MB/s)  CPU->SSD 12.24 ms (33411120 B, 2603.77 MB/s)
+  I/O profile: input bytes 33554426  estimated SSD read BW 3508.78 MB/s  estimated SSD write BW 2802.46 MB/s
+  SSD<->CPU (estimated): SSD->CPU 9.12 ms (33554426 B, 3508.78 MB/s)  CPU->SSD 11.37 ms (33411120 B, 2802.46 MB/s)

@@ -169,6 +169,37 @@ static inline std::vector<KVPair> copy_kv_array_from_device(const KVPair* d_kv,
     return kv_array;
 }
 
+struct PinnedKVArray {
+    KVPair* data  = nullptr;
+    int     count = 0;
+    void free() { if (data) { cudaFreeHost(data); data = nullptr; } }
+};
+
+static inline PinnedKVArray copy_kv_to_pinned_from_device(const KVPair* d_kv,
+                                                          int           total_kv,
+                                                          double*       d2h_ms_out = nullptr,
+                                                          size_t*       d2h_bytes_out = nullptr)
+{
+    PinnedKVArray result;
+    if (total_kv <= 0) return result;
+
+    size_t nbytes = (size_t)total_kv * sizeof(KVPair);
+    cudaMallocHost(&result.data, nbytes);
+    result.count = total_kv;
+
+    auto d2h_start = std::chrono::steady_clock::now();
+    cudaMemcpy(result.data, d_kv, nbytes, cudaMemcpyDeviceToHost);
+    auto d2h_end = std::chrono::steady_clock::now();
+
+    if (d2h_ms_out) {
+        *d2h_ms_out += std::chrono::duration<double, std::milli>(d2h_end - d2h_start).count();
+    }
+    if (d2h_bytes_out) {
+        *d2h_bytes_out += nbytes;
+    }
+    return result;
+}
+
 static inline std::vector<Key128> copy_key_array_from_device(const KVPair* d_kv,
                                                              int           total_kv,
                                                              double*       d2h_ms_out = nullptr,
@@ -923,12 +954,13 @@ static inline GPUCompactionResult gpu_c_compaction_paper_from_parsed(const std::
     result.merge_d2h_bytes = merged.d2h_bytes;
     for (auto& state : unpack_states) destroy_unpack_stream_state(state);
 
-    result.merged = copy_kv_array_from_device(merged.d_output, merged.total,
-                                              &result.gc_d2h_ms, &result.gc_d2h_bytes);
+    PinnedKVArray pinned = copy_kv_to_pinned_from_device(merged.d_output, merged.total,
+                                                         &result.gc_d2h_ms, &result.gc_d2h_bytes);
     t0 = std::chrono::steady_clock::now();
-    result.merged = garbage_collect_sorted_kv(result.merged);
+    result.merged = garbage_collect_sorted_kv(pinned.data, (size_t)pinned.count);
     t1 = std::chrono::steady_clock::now();
     result.stage.gc_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+    pinned.free();
 
     KVPair* d_gc_output = upload_kv_array_to_device(result.merged,
                                                     &result.gc_h2d_ms, &result.gc_h2d_bytes);
@@ -1497,12 +1529,13 @@ static inline GPUCompactionResult gpu_c_compaction_without_plan_from_parsed(cons
     result.merge_d2h_bytes = merged.d2h_bytes;
     for (auto& state : unpack_states) destroy_unpack_stream_state(state);
 
-    result.merged = copy_kv_array_from_device(merged.d_output, merged.total,
-                                              &result.gc_d2h_ms, &result.gc_d2h_bytes);
+    PinnedKVArray pinned = copy_kv_to_pinned_from_device(merged.d_output, merged.total,
+                                                         &result.gc_d2h_ms, &result.gc_d2h_bytes);
     t0 = std::chrono::steady_clock::now();
-    result.merged = garbage_collect_sorted_kv(result.merged);
+    result.merged = garbage_collect_sorted_kv(pinned.data, (size_t)pinned.count);
     t1 = std::chrono::steady_clock::now();
     result.stage.gc_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+    pinned.free();
 
     KVPair* d_gc_output = upload_kv_array_to_device(result.merged,
                                                     &result.gc_h2d_ms, &result.gc_h2d_bytes);

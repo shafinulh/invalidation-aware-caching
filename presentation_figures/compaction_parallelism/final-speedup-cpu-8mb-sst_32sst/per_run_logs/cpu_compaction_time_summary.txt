@@ -1,47 +1,47 @@
 sst=8MB input=32sst (256MB) value=32B
-  single-threaded: mean=1702390 micros, stddev=10288 micros, variance=105838606 micros^2, repeats=5
-  multithreaded sub=2: mean=931851 micros, stddev=3096 micros, variance=9582998 micros^2, speedup_vs_sub1=1.83x +/- 0.01x, repeats=5
-  multithreaded sub=4: mean=540100 micros, stddev=2660 micros, variance=7074295 micros^2, speedup_vs_sub1=3.15x +/- 0.02x, repeats=5
-  multithreaded sub=8: mean=466842 micros, stddev=26031 micros, variance=677612093 micros^2, speedup_vs_sub1=3.65x +/- 0.20x, repeats=5
-  multithreaded sub=16: mean=546987 micros, stddev=21772 micros, variance=474032910 micros^2, speedup_vs_sub1=3.11x +/- 0.13x, repeats=5
-  multithreaded sub=32: mean=856654 micros, stddev=37715 micros, variance=1422410824 micros^2, speedup_vs_sub1=1.99x +/- 0.09x, repeats=5
+  single-threaded: mean=1682608 micros, stddev=10726 micros, variance=115046770 micros^2, repeats=5
+  multithreaded sub=2: mean=923425 micros, stddev=3881 micros, variance=15060238 micros^2, speedup_vs_sub1=1.82x +/- 0.01x, repeats=5
+  multithreaded sub=4: mean=544584 micros, stddev=5792 micros, variance=33552518 micros^2, speedup_vs_sub1=3.09x +/- 0.04x, repeats=5
+  multithreaded sub=8: mean=482655 micros, stddev=21061 micros, variance=443574145 micros^2, speedup_vs_sub1=3.49x +/- 0.15x, repeats=5
+  multithreaded sub=16: mean=541167 micros, stddev=5289 micros, variance=27973217 micros^2, speedup_vs_sub1=3.11x +/- 0.04x, repeats=5
+  multithreaded sub=32: mean=861088 micros, stddev=33183 micros, variance=1101128673 micros^2, speedup_vs_sub1=1.95x +/- 0.08x, repeats=5
 
 sst=8MB input=32sst (256MB) value=64B
-  single-threaded: mean=1108090 micros, stddev=9093 micros, variance=82691351 micros^2, repeats=5
-  multithreaded sub=2: mean=615539 micros, stddev=2108 micros, variance=4443496 micros^2, speedup_vs_sub1=1.80x +/- 0.02x, repeats=5
-  multithreaded sub=4: mean=374709 micros, stddev=7915 micros, variance=62651376 micros^2, speedup_vs_sub1=2.96x +/- 0.07x, repeats=5
-  multithreaded sub=8: mean=356356 micros, stddev=17737 micros, variance=314591884 micros^2, speedup_vs_sub1=3.11x +/- 0.16x, repeats=5
-  multithreaded sub=16: mean=448801 micros, stddev=9554 micros, variance=91285817 micros^2, speedup_vs_sub1=2.47x +/- 0.06x, repeats=5
-  multithreaded sub=32: mean=759480 micros, stddev=33046 micros, variance=1092032482 micros^2, speedup_vs_sub1=1.46x +/- 0.06x, repeats=5
+  single-threaded: mean=1093739 micros, stddev=13266 micros, variance=175982391 micros^2, repeats=5
+  multithreaded sub=2: mean=617209 micros, stddev=7012 micros, variance=49174448 micros^2, speedup_vs_sub1=1.77x +/- 0.03x, repeats=5
+  multithreaded sub=4: mean=370267 micros, stddev=2462 micros, variance=6061938 micros^2, speedup_vs_sub1=2.95x +/- 0.04x, repeats=5
+  multithreaded sub=8: mean=377889 micros, stddev=22775 micros, variance=518684458 micros^2, speedup_vs_sub1=2.89x +/- 0.18x, repeats=5
+  multithreaded sub=16: mean=447969 micros, stddev=10539 micros, variance=111079893 micros^2, speedup_vs_sub1=2.44x +/- 0.06x, repeats=5
+  multithreaded sub=32: mean=711634 micros, stddev=21610 micros, variance=466986861 micros^2, speedup_vs_sub1=1.54x +/- 0.05x, repeats=5
 
 sst=8MB input=32sst (256MB) value=128B
-  single-threaded: mean=749593 micros, stddev=2527 micros, variance=6386096 micros^2, repeats=5
-  multithreaded sub=2: mean=423677 micros, stddev=4394 micros, variance=19303417 micros^2, speedup_vs_sub1=1.77x +/- 0.02x, repeats=5
-  multithreaded sub=4: mean=268358 micros, stddev=679 micros, variance=460977 micros^2, speedup_vs_sub1=2.79x +/- 0.01x, repeats=5
-  multithreaded sub=8: mean=286381 micros, stddev=12399 micros, variance=153746513 micros^2, speedup_vs_sub1=2.62x +/- 0.11x, repeats=5
-  multithreaded sub=16: mean=379923 micros, stddev=8688 micros, variance=75480492 micros^2, speedup_vs_sub1=1.97x +/- 0.05x, repeats=5
-  multithreaded sub=32: mean=636359 micros, stddev=20052 micros, variance=402091621 micros^2, speedup_vs_sub1=1.18x +/- 0.04x, repeats=5
+  single-threaded: mean=745866 micros, stddev=13879 micros, variance=192614485 micros^2, repeats=5
+  multithreaded sub=2: mean=427178 micros, stddev=1531 micros, variance=2343258 micros^2, speedup_vs_sub1=1.75x +/- 0.03x, repeats=5
+  multithreaded sub=4: mean=265437 micros, stddev=3401 micros, variance=11569938 micros^2, speedup_vs_sub1=2.81x +/- 0.06x, repeats=5
+  multithreaded sub=8: mean=285637 micros, stddev=25259 micros, variance=638042182 micros^2, speedup_vs_sub1=2.61x +/- 0.24x, repeats=5
+  multithreaded sub=16: mean=377221 micros, stddev=11201 micros, variance=125468534 micros^2, speedup_vs_sub1=1.98x +/- 0.07x, repeats=5
+  multithreaded sub=32: mean=619621 micros, stddev=19251 micros, variance=370608428 micros^2, speedup_vs_sub1=1.20x +/- 0.04x, repeats=5
 
 sst=8MB input=32sst (256MB) value=256B
-  single-threaded: mean=522219 micros, stddev=6024 micros, variance=36285436 micros^2, repeats=5
-  multithreaded sub=2: mean=300762 micros, stddev=2523 micros, variance=6365920 micros^2, speedup_vs_sub1=1.74x +/- 0.02x, repeats=5
-  multithreaded sub=4: mean=206866 micros, stddev=1360 micros, variance=1850723 micros^2, speedup_vs_sub1=2.52x +/- 0.03x, repeats=5
-  multithreaded sub=8: mean=246825 micros, stddev=14334 micros, variance=205460565 micros^2, speedup_vs_sub1=2.12x +/- 0.13x, repeats=5
-  multithreaded sub=16: mean=351871 micros, stddev=4406 micros, variance=19414779 micros^2, speedup_vs_sub1=1.48x +/- 0.03x, repeats=5
-  multithreaded sub=32: mean=608962 micros, stddev=29024 micros, variance=842372357 micros^2, speedup_vs_sub1=0.86x +/- 0.04x, repeats=5
+  single-threaded: mean=518917 micros, stddev=4805 micros, variance=23085263 micros^2, repeats=5
+  multithreaded sub=2: mean=301597 micros, stddev=3652 micros, variance=13339288 micros^2, speedup_vs_sub1=1.72x +/- 0.03x, repeats=5
+  multithreaded sub=4: mean=206209 micros, stddev=3469 micros, variance=12033649 micros^2, speedup_vs_sub1=2.52x +/- 0.05x, repeats=5
+  multithreaded sub=8: mean=262634 micros, stddev=21589 micros, variance=466097908 micros^2, speedup_vs_sub1=1.98x +/- 0.16x, repeats=5
+  multithreaded sub=16: mean=339962 micros, stddev=5851 micros, variance=34231091 micros^2, speedup_vs_sub1=1.53x +/- 0.03x, repeats=5
+  multithreaded sub=32: mean=600754 micros, stddev=30695 micros, variance=942164596 micros^2, speedup_vs_sub1=0.86x +/- 0.04x, repeats=5
 
 sst=8MB input=32sst (256MB) value=512B
-  single-threaded: mean=415770 micros, stddev=6245 micros, variance=39001758 micros^2, repeats=5
-  multithreaded sub=2: mean=249560 micros, stddev=3146 micros, variance=9899554 micros^2, speedup_vs_sub1=1.67x +/- 0.03x, repeats=5
-  multithreaded sub=4: mean=176626 micros, stddev=2292 micros, variance=5252644 micros^2, speedup_vs_sub1=2.35x +/- 0.05x, repeats=5
-  multithreaded sub=8: mean=220760 micros, stddev=11975 micros, variance=143411373 micros^2, speedup_vs_sub1=1.88x +/- 0.11x, repeats=5
-  multithreaded sub=16: mean=326875 micros, stddev=3400 micros, variance=11560243 micros^2, speedup_vs_sub1=1.27x +/- 0.02x, repeats=5
-  multithreaded sub=32: mean=592082 micros, stddev=32099 micros, variance=1030341582 micros^2, speedup_vs_sub1=0.70x +/- 0.04x, repeats=5
+  single-threaded: mean=408000 micros, stddev=4967 micros, variance=24674065 micros^2, repeats=5
+  multithreaded sub=2: mean=246303 micros, stddev=3664 micros, variance=13423897 micros^2, speedup_vs_sub1=1.66x +/- 0.03x, repeats=5
+  multithreaded sub=4: mean=178982 micros, stddev=2778 micros, variance=7719671 micros^2, speedup_vs_sub1=2.28x +/- 0.04x, repeats=5
+  multithreaded sub=8: mean=228238 micros, stddev=18373 micros, variance=337569663 micros^2, speedup_vs_sub1=1.79x +/- 0.15x, repeats=5
+  multithreaded sub=16: mean=308971 micros, stddev=7926 micros, variance=62823458 micros^2, speedup_vs_sub1=1.32x +/- 0.04x, repeats=5
+  multithreaded sub=32: mean=520212 micros, stddev=27385 micros, variance=749926064 micros^2, speedup_vs_sub1=0.78x +/- 0.04x, repeats=5
 
 sst=8MB input=32sst (256MB) value=1024B
-  single-threaded: mean=351456 micros, stddev=9304 micros, variance=86569265 micros^2, repeats=5
-  multithreaded sub=2: mean=246212 micros, stddev=5414 micros, variance=29316544 micros^2, speedup_vs_sub1=1.43x +/- 0.05x, repeats=5
-  multithreaded sub=4: mean=191886 micros, stddev=3513 micros, variance=12339843 micros^2, speedup_vs_sub1=1.83x +/- 0.06x, repeats=5
-  multithreaded sub=8: mean=208839 micros, stddev=10570 micros, variance=111728601 micros^2, speedup_vs_sub1=1.68x +/- 0.10x, repeats=5
-  multithreaded sub=16: mean=306896 micros, stddev=7538 micros, variance=56814537 micros^2, speedup_vs_sub1=1.15x +/- 0.04x, repeats=5
-  multithreaded sub=32: mean=482264 micros, stddev=25368 micros, variance=643558949 micros^2, speedup_vs_sub1=0.73x +/- 0.04x, repeats=5
+  single-threaded: mean=340361 micros, stddev=5583 micros, variance=31166322 micros^2, repeats=5
+  multithreaded sub=2: mean=241694 micros, stddev=7291 micros, variance=53153937 micros^2, speedup_vs_sub1=1.41x +/- 0.05x, repeats=5
+  multithreaded sub=4: mean=187448 micros, stddev=1518 micros, variance=2305472 micros^2, speedup_vs_sub1=1.82x +/- 0.03x, repeats=5
+  multithreaded sub=8: mean=213503 micros, stddev=17177 micros, variance=295032922 micros^2, speedup_vs_sub1=1.59x +/- 0.13x, repeats=5
+  multithreaded sub=16: mean=285616 micros, stddev=11206 micros, variance=125584232 micros^2, speedup_vs_sub1=1.19x +/- 0.05x, repeats=5
+  multithreaded sub=32: mean=462882 micros, stddev=17167 micros, variance=294719845 micros^2, speedup_vs_sub1=0.74x +/- 0.03x, repeats=5

@@ -4,46 +4,46 @@ Requested input SSTs: 4
 Best CPU subcompaction speedups vs subcomp=1
 ============================================
 
-value=32B: 2.94x +/- 0.10x at subcomp=4
-value=64B: 2.63x +/- 0.09x at subcomp=4
-value=128B: 2.56x +/- 0.11x at subcomp=4
-value=256B: 2.21x +/- 0.14x at subcomp=4
-value=512B: 2.11x +/- 0.24x at subcomp=4
-value=1024B: 1.91x +/- 0.25x at subcomp=4
+value=32B: 3.05x +/- 0.21x at subcomp=8
+value=64B: 2.66x +/- 0.18x at subcomp=4
+value=128B: 2.50x +/- 0.17x at subcomp=4
+value=256B: 2.43x +/- 0.28x at subcomp=4
+value=512B: 1.90x +/- 0.28x at subcomp=4
+value=1024B: 1.88x +/- 0.21x at subcomp=32
 
 GPU mode speedups vs synthetic CPU baseline
 ===========================================
 
 value=32B:
-  c_no_plan: 2.01x +/- 0.12x
-  c_plan: 1.99x +/- 0.15x
-  q_no_plan: 2.81x +/- 0.25x
-  q_plan: 2.77x +/- 0.25x
+  c_no_plan: 1.82x +/- 0.04x
+  c_plan: 1.80x +/- 0.04x
+  q_no_plan: 2.61x +/- 0.11x
+  q_plan: 2.63x +/- 0.09x
 value=64B:
-  c_no_plan: 1.58x +/- 0.13x
-  c_plan: 1.56x +/- 0.15x
-  q_no_plan: 2.27x +/- 0.20x
-  q_plan: 2.12x +/- 0.19x
+  c_no_plan: 1.42x +/- 0.02x
+  c_plan: 1.39x +/- 0.01x
+  q_no_plan: 2.14x +/- 0.03x
+  q_plan: 2.13x +/- 0.05x
 value=128B:
-  c_no_plan: 1.24x +/- 0.12x
-  c_plan: 1.25x +/- 0.15x
-  q_no_plan: 1.80x +/- 0.20x
-  q_plan: 1.79x +/- 0.19x
+  c_no_plan: 1.12x +/- 0.02x
+  c_plan: 1.13x +/- 0.02x
+  q_no_plan: 1.73x +/- 0.06x
+  q_plan: 1.68x +/- 0.05x
 value=256B:
-  c_no_plan: 1.10x +/- 0.13x
-  c_plan: 1.12x +/- 0.14x
-  q_no_plan: 1.57x +/- 0.21x
-  q_plan: 1.57x +/- 0.19x
+  c_no_plan: 0.94x +/- 0.01x
+  c_plan: 0.96x +/- 0.02x
+  q_no_plan: 1.52x +/- 0.07x
+  q_plan: 1.46x +/- 0.04x
 value=512B:
-  c_no_plan: 1.11x +/- 0.11x
-  c_plan: 1.09x +/- 0.12x
-  q_no_plan: 1.54x +/- 0.22x
-  q_plan: 1.45x +/- 0.18x
+  c_no_plan: 0.94x +/- 0.01x
+  c_plan: 0.92x +/- 0.03x
+  q_no_plan: 1.40x +/- 0.06x
+  q_plan: 1.39x +/- 0.03x
 value=1024B:
-  c_no_plan: 1.02x +/- 0.13x
-  c_plan: 1.03x +/- 0.13x
-  q_no_plan: 1.47x +/- 0.20x
-  q_plan: 1.41x +/- 0.19x
+  c_no_plan: 0.89x +/- 0.06x
+  c_plan: 0.93x +/- 0.04x
+  q_no_plan: 1.41x +/- 0.07x
+  q_plan: 1.36x +/- 0.06x
 
 Normalization note
 ==================

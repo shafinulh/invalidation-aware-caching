@@ -3,22 +3,22 @@ Analyzed 180 compaction runs aggregated into 36 subcompaction rows across 6 uniq
 Best absolute compaction throughput
 ===================================
 
-sst=8MB input=256MB value=32B: 12.01 million records/s at sub=8 (speedup 3.65x +/- 0.20x, repeats=5, compute/read/write 83/0/17%, cpu resource 419% of wall)
-sst=8MB input=256MB value=64B: 9.44 million records/s at sub=8 (speedup 3.11x +/- 0.16x, repeats=5, compute/read/write 79/0/21%, cpu resource 376% of wall)
-sst=8MB input=256MB value=128B: 6.95 million records/s at sub=4 (speedup 2.79x +/- 0.01x, repeats=5, compute/read/write 76/0/24%, cpu resource 221% of wall)
-sst=8MB input=256MB value=256B: 4.77 million records/s at sub=4 (speedup 2.52x +/- 0.03x, repeats=5, compute/read/write 70/0/30%, cpu resource 174% of wall)
-sst=8MB input=256MB value=512B: 2.88 million records/s at sub=4 (speedup 2.35x +/- 0.05x, repeats=5, compute/read/write 62/0/38%, cpu resource 134% of wall)
-sst=8MB input=256MB value=1024B: 1.35 million records/s at sub=4 (speedup 1.83x +/- 0.06x, repeats=5, compute/read/write 64/0/36%, cpu resource 92% of wall)
+sst=8MB input=256MB value=32B: 11.60 million records/s at sub=8 (speedup 3.49x +/- 0.15x, repeats=5, compute/read/write 85/0/15%, cpu resource 420% of wall)
+sst=8MB input=256MB value=64B: 9.06 million records/s at sub=4 (speedup 2.95x +/- 0.04x, repeats=5, compute/read/write 83/0/17%, cpu resource 260% of wall)
+sst=8MB input=256MB value=128B: 7.02 million records/s at sub=4 (speedup 2.81x +/- 0.06x, repeats=5, compute/read/write 76/0/24%, cpu resource 221% of wall)
+sst=8MB input=256MB value=256B: 4.79 million records/s at sub=4 (speedup 2.52x +/- 0.05x, repeats=5, compute/read/write 67/0/33%, cpu resource 173% of wall)
+sst=8MB input=256MB value=512B: 2.84 million records/s at sub=4 (speedup 2.28x +/- 0.04x, repeats=5, compute/read/write 63/0/37%, cpu resource 133% of wall)
+sst=8MB input=256MB value=1024B: 1.38 million records/s at sub=4 (speedup 1.82x +/- 0.03x, repeats=5, compute/read/write 65/0/35%, cpu resource 93% of wall)
 
 Largest speedups over sub=1
 ===========================
 
-sst=8MB input=256MB value=32B: 3.65x +/- 0.20x at sub=8 (baseline sub=1 -> 3.28 million records/s, best -> 12.01 million records/s)
-sst=8MB input=256MB value=64B: 3.11x +/- 0.16x at sub=8 (baseline sub=1 -> 3.03 million records/s, best -> 9.44 million records/s)
-sst=8MB input=256MB value=128B: 2.79x +/- 0.01x at sub=4 (baseline sub=1 -> 2.49 million records/s, best -> 6.95 million records/s)
-sst=8MB input=256MB value=256B: 2.52x +/- 0.03x at sub=4 (baseline sub=1 -> 1.89 million records/s, best -> 4.77 million records/s)
-sst=8MB input=256MB value=512B: 2.35x +/- 0.05x at sub=4 (baseline sub=1 -> 1.22 million records/s, best -> 2.88 million records/s)
-sst=8MB input=256MB value=1024B: 1.83x +/- 0.06x at sub=4 (baseline sub=1 -> 0.73 million records/s, best -> 1.35 million records/s)
+sst=8MB input=256MB value=32B: 3.49x +/- 0.15x at sub=8 (baseline sub=1 -> 3.32 million records/s, best -> 11.60 million records/s)
+sst=8MB input=256MB value=64B: 2.95x +/- 0.04x at sub=4 (baseline sub=1 -> 3.07 million records/s, best -> 9.06 million records/s)
+sst=8MB input=256MB value=128B: 2.81x +/- 0.06x at sub=4 (baseline sub=1 -> 2.50 million records/s, best -> 7.02 million records/s)
+sst=8MB input=256MB value=256B: 2.52x +/- 0.05x at sub=4 (baseline sub=1 -> 1.90 million records/s, best -> 4.79 million records/s)
+sst=8MB input=256MB value=512B: 2.28x +/- 0.04x at sub=4 (baseline sub=1 -> 1.25 million records/s, best -> 2.84 million records/s)
+sst=8MB input=256MB value=1024B: 1.82x +/- 0.03x at sub=4 (baseline sub=1 -> 0.76 million records/s, best -> 1.38 million records/s)
 
 Dominant time component at the best-subcomp point
 =================================================
@@ -35,10 +35,10 @@ Potential GPU-offload candidate slices (heuristic)
 
 Heuristic used: best CPU point still has >=45% compute wall-share, best_subcompactions >= 4, speedup over sub=1 >= 1.15x, and aggregate CPU time >= 100% of wall time.
 
-sst=8MB input=256MB value=32B: best sub=8, speedup=3.65x, throughput=12.01 million records/s, compute/read/write=83/0/17%, cpu resource=419% of wall, avg proc CPU=421.3%, avg device util=45.1%.
-sst=8MB input=256MB value=64B: best sub=8, speedup=3.11x, throughput=9.44 million records/s, compute/read/write=79/0/21%, cpu resource=376% of wall, avg proc CPU=443.4%, avg device util=53.9%.
-sst=8MB input=256MB value=128B: best sub=4, speedup=2.79x, throughput=6.95 million records/s, compute/read/write=76/0/24%, cpu resource=221% of wall, avg proc CPU=235.4%, avg device util=52.0%.
-sst=8MB input=256MB value=256B: best sub=4, speedup=2.52x, throughput=4.77 million records/s, compute/read/write=70/0/30%, cpu resource=174% of wall, avg proc CPU=155.2%, avg device util=60.3%.
-sst=8MB input=256MB value=512B: best sub=4, speedup=2.35x, throughput=2.88 million records/s, compute/read/write=62/0/38%, cpu resource=134% of wall, avg proc CPU=145.3%, avg device util=79.0%.
+sst=8MB input=256MB value=32B: best sub=8, speedup=3.49x, throughput=11.60 million records/s, compute/read/write=85/0/15%, cpu resource=420% of wall, avg proc CPU=442.7%, avg device util=49.3%.
+sst=8MB input=256MB value=64B: best sub=4, speedup=2.95x, throughput=9.06 million records/s, compute/read/write=83/0/17%, cpu resource=260% of wall, avg proc CPU=284.9%, avg device util=40.7%.
+sst=8MB input=256MB value=128B: best sub=4, speedup=2.81x, throughput=7.02 million records/s, compute/read/write=76/0/24%, cpu resource=221% of wall, avg proc CPU=230.4%, avg device util=52.7%.
+sst=8MB input=256MB value=256B: best sub=4, speedup=2.52x, throughput=4.79 million records/s, compute/read/write=67/0/33%, cpu resource=173% of wall, avg proc CPU=142.1%, avg device util=58.9%.
+sst=8MB input=256MB value=512B: best sub=4, speedup=2.28x, throughput=2.84 million records/s, compute/read/write=63/0/37%, cpu resource=133% of wall, avg proc CPU=145.2%, avg device util=80.2%.
 
 These candidate labels are an inference from the collected CPU and IO breakdowns, not a direct measurement of GPU benefit.
