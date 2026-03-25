@@ -1,0 +1,11 @@
+C-compaction benchmark
+  input SSTs: 32
+  key bytes: 16  value bytes: 32  restart interval: 4  block size: 32768
+  runs: 5  (profile-only, all runs profiled)
+  gpu mode: c_paper_without_plan
+  profile-only mode: enabled
+  storage IO: direct (O_DIRECT + fdatasync)
+  cpu baseline: disabled (--profile_only)
+  gpu garbage collection: enabled (CPU after GPU sort, before GPU SST construction)
+
+Profile-only GPU compaction complete.

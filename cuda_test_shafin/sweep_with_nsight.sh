@@ -13,6 +13,7 @@ VALUES_STR="${VALUES:-32 64 128 256 512 1024}"
 DATASET_PREFIX="${DATASET_PREFIX:-dataset_shafin_V}"
 MODES_STR="${MODES:-q_paper_with_plan q_paper_without_plan c_paper_with_plan c_paper_without_plan}"
 GPU_ONLY="${GPU_ONLY:-1}"
+PROFILE_ONLY="${PROFILE_ONLY:-0}"
 DATASET_ZIPF_ALPHA="${DATASET_ZIPF_ALPHA:-0.0}"
 DATASET_USER_KEY_SPACE="${DATASET_USER_KEY_SPACE:-20000000}"
 OUT_ROOT="${OUT_ROOT:-./sweep_results}"
@@ -34,6 +35,8 @@ while [[ $# -gt 0 ]]; do
         --modes) MODES_STR="$2"; shift 2 ;;
         --gpu_only) GPU_ONLY="1"; shift ;;
         --with_cpu_baseline) GPU_ONLY="0"; shift ;;
+        --profile_only) PROFILE_ONLY="1"; shift ;;
+        --no_profile_only) PROFILE_ONLY="0"; shift ;;
         --zipf_alpha) DATASET_ZIPF_ALPHA="$2"; shift 2 ;;
         --user_key_space) DATASET_USER_KEY_SPACE="$2"; shift 2 ;;
         --out_root) OUT_ROOT="$2"; shift 2 ;;
@@ -101,8 +104,14 @@ if [[ -n "$NUM_SSTS" ]]; then
 fi
 
 CURRENT_SSTS=$(grep -oP 'GP_NUM_INPUT_SSTS\s*=\s*\K[0-9]+' gpcomp_common.cuh)
+PROFILE_SUFFIX=""
+if [[ "$PROFILE_ONLY" == "1" ]]; then
+    PROFILE_SUFFIX="_gpu-profile-only"
+fi
 if [[ -z "$LABEL" ]]; then
-    LABEL="nsight_${TOOL}_8mb-sst_${CURRENT_SSTS}sst"
+    LABEL="nsight_${TOOL}_8mb-sst_${CURRENT_SSTS}sst${PROFILE_SUFFIX}"
+elif [[ "$PROFILE_ONLY" == "1" && "$LABEL" != *"${PROFILE_SUFFIX}" ]]; then
+    LABEL="${LABEL}${PROFILE_SUFFIX}"
 fi
 
 OUTDIR="${OUT_ROOT}/sweep_${LABEL}"
@@ -147,6 +156,7 @@ echo " runs per mode: $RUNS"
 echo " value sizes: $VALUES_STR"
 echo " gpu modes: $MODES_STR"
 echo " gpu-only benchmark mode: $GPU_ONLY"
+echo " profile-only benchmark mode: $PROFILE_ONLY"
 echo " storage IO mode: direct IO for SST reads and writes"
 echo " input SSTs: $CURRENT_SSTS"
 echo " dataset user key space: $DATASET_USER_KEY_SPACE"
@@ -192,6 +202,9 @@ for VAL in $VALUES_STR; do
         )
         if [[ "$GPU_ONLY" == "1" ]]; then
             bench_args+=(--gpu_only)
+        fi
+        if [[ "$PROFILE_ONLY" == "1" ]]; then
+            bench_args+=(--profile_only)
         fi
 
         if [[ "$TOOL" == "nsys" ]]; then

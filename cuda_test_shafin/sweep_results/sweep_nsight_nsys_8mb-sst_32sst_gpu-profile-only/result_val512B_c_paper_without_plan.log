@@ -1,0 +1,17 @@
+C-compaction benchmark
+  input SSTs: 32
+  key bytes: 16  value bytes: 512  restart interval: 4  block size: 32768
+  runs: 5  (profile-only, all runs profiled)
+  gpu mode: c_paper_without_plan
+  profile-only mode: enabled
+  storage IO: direct (O_DIRECT + fdatasync)
+  cpu baseline: disabled (--profile_only)
+  gpu garbage collection: enabled (CPU after GPU sort, before GPU SST construction)
+
+Profile-only GPU compaction complete.
+Collecting data...
+Generating '/tmp/nsys-haques24/nsys-report-ba4d.qdstrm'
+Press Ctrl-C to stop symbol files downloading
+[1/1] [0%                          ] nsys_val512B_c_paper_without_plan.nsys-rep[1/1] [0%                          ] nsys_val512B_c_paper_without_plan.nsys-rep[1/1] [7%                          ] nsys_val512B_c_paper_without_plan.nsys-rep[1/1] [8%                          ] nsys_val512B_c_paper_without_plan.nsys-rep[1/1] [============54%             ] nsys_val512B_c_paper_without_plan.nsys-rep[1/1] [========================100%] nsys_val512B_c_paper_without_plan.nsys-rep[1/1] [========================100%] nsys_val512B_c_paper_without_plan.nsys-rep
+Generated:
+	/home/1755_project/invalidation-aware-caching/cuda_test_shafin/./sweep_results/sweep_nsight_nsys_8mb-sst_32sst_gpu-profile-only/profiles/nsys_val512B_c_paper_without_plan.nsys-rep

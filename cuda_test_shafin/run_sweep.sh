@@ -14,6 +14,7 @@ DATASET_USER_KEY_SPACE="${DATASET_USER_KEY_SPACE:-20000000}"
 GRAPH_DIR="${GRAPH_DIR:-./graphs}"
 OUT_ROOT="${OUT_ROOT:-./sweep_results}"
 GPU_ONLY="${GPU_ONLY:-0}"
+PROFILE_ONLY="${PROFILE_ONLY:-0}"
 HOST_METRICS_INTERVAL_SEC="${HOST_METRICS_INTERVAL_SEC:-}"
 HOST_METRICS_DEVICE="${HOST_METRICS_DEVICE:-}"
 NUM_SSTS=""
@@ -30,6 +31,8 @@ while [[ $# -gt 0 ]]; do
         --modes) MODES_STR="$2"; shift 2 ;;
         --gpu_only) GPU_ONLY="1"; shift ;;
         --with_cpu_baseline) GPU_ONLY="0"; shift ;;
+        --profile_only) PROFILE_ONLY="1"; GPU_ONLY="1"; shift ;;
+        --no_profile_only) PROFILE_ONLY="0"; shift ;;
         --zipf_alpha) DATASET_ZIPF_ALPHA="$2"; shift 2 ;;
         --user_key_space) DATASET_USER_KEY_SPACE="$2"; shift 2 ;;
         --graph_dir) GRAPH_DIR="$2"; shift 2 ;;
@@ -155,7 +158,9 @@ CURRENT_SSTS=$(grep -oP 'GP_NUM_INPUT_SSTS\s*=\s*\K[0-9]+' gpcomp_common.cuh)
 if [[ -z "$LABEL" ]]; then
     LABEL="8mb-sst_${CURRENT_SSTS}sst"
 fi
-if [[ "${GPU_ONLY}" == "1" && "${LABEL}" != *gpu-only* ]]; then
+if [[ "${PROFILE_ONLY}" == "1" && "${LABEL}" != *gpu-profile-only* ]]; then
+    LABEL="${LABEL}_gpu-profile-only"
+elif [[ "${GPU_ONLY}" == "1" && "${LABEL}" != *gpu-only* ]]; then
     LABEL="${LABEL}_gpu-only"
 fi
 
@@ -177,7 +182,11 @@ echo "========================================================="
 echo " GPComp Execution Sweep"
 echo " comparing q/c compaction with and without planning"
 if [[ "${GPU_ONLY}" == "1" ]]; then
-    echo " collecting throughput plus sampled host CPU and block-device IO metrics"
+    if [[ "${PROFILE_ONLY}" == "1" ]]; then
+        echo " collecting sampled host CPU and block-device IO metrics for GPU profile-only compaction"
+    else
+        echo " collecting throughput plus sampled host CPU and block-device IO metrics"
+    fi
 else
     echo " collecting throughput only"
 fi
@@ -189,6 +198,7 @@ echo " runs per mode: $RUNS"
 echo " value sizes: $VALUES_STR"
 echo " gpu modes: $MODES_STR"
 echo " gpu-only benchmark mode: $GPU_ONLY"
+echo " profile-only benchmark mode: $PROFILE_ONLY"
 if [[ "${GPU_ONLY}" == "1" ]]; then
     echo " host metrics interval sec: $HOST_METRICS_INTERVAL_SEC"
     if [[ -n "${HOST_METRICS_DEVICE}" ]]; then
@@ -237,6 +247,9 @@ for VAL in $VALUES_STR; do
         if [[ "${GPU_ONLY}" == "1" ]]; then
             bench_args+=(--gpu_only)
         fi
+        if [[ "${PROFILE_ONLY}" == "1" ]]; then
+            bench_args+=(--profile_only)
+        fi
 
         if ! run_bench_with_optional_host_metrics "$LOG_PATH" "$HOST_METRICS_DIR" "${bench_args[@]}"; then
             echo "error: benchmark failed for mode=${MODE} value=${VAL}" >&2
@@ -274,6 +287,9 @@ plot_args=(
 )
 if [[ "${GPU_ONLY}" == "1" ]]; then
     plot_args+=(--gpu_only)
+fi
+if [[ "${PROFILE_ONLY}" == "1" ]]; then
+    plot_args+=(--profile_only)
 fi
 python3 ./plot_results.py "${plot_args[@]}"
 

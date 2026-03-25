@@ -255,6 +255,14 @@ static std::vector<ParsedSST> load_inputs_with_timing(const std::vector<std::str
     return parsed;
 }
 
+static std::vector<ParsedSST> load_inputs(const std::vector<std::string>& paths)
+{
+    std::vector<ParsedSST> parsed;
+    parsed.reserve(paths.size());
+    for (const auto& path : paths) parsed.push_back(read_sst_file(path));
+    return parsed;
+}
+
 static size_t total_input_bytes(const std::vector<ParsedSST>& inputs)
 {
     size_t total = 0;
@@ -307,6 +315,15 @@ static bool is_gc_enabled_mode(const std::string& gpu_mode)
 static bool is_exact_match_mode(const std::string& gpu_mode)
 {
     return is_c_with_plan_mode(gpu_mode);
+}
+
+static bool gpu_mode_supports_profile_only(const std::string& gpu_mode)
+{
+    return gpu_mode == "q_paper_with_plan"
+        || gpu_mode == "q_paper_without_plan"
+        || gpu_mode == "c_paper"
+        || gpu_mode == "c_paper_with_plan"
+        || gpu_mode == "c_paper_without_plan";
 }
 
 static RunSummary run_cpu_once(const std::vector<std::string>& input_paths,
@@ -476,6 +493,48 @@ static RunSummary run_gpu_once(const std::vector<std::string>& input_paths,
     return summary;
 }
 
+static void run_gpu_profile_once(const std::vector<std::string>& input_paths,
+                                 const std::string&               output_dir,
+                                 const std::string&               gpu_mode)
+{
+    NvtxRange total_range(std::string("gpu_profile_total:") + gpu_mode);
+
+    std::vector<ParsedSST> inputs;
+    {
+        NvtxRange load_range(std::string("gpu_profile_load_inputs:") + gpu_mode);
+        inputs = load_inputs(input_paths);
+    }
+
+    GPUCompactionResult gpu;
+    {
+        NvtxRange pipeline_range(std::string("gpu_profile_pipeline:") + gpu_mode);
+        if (gpu_mode == "q_paper_with_plan") {
+            gpu = gpu_q_compaction_paper_profile_from_parsed(inputs, false);
+        }
+        else if (gpu_mode == "q_paper_without_plan") {
+            gpu = gpu_q_compaction_without_plan_profile_from_parsed(inputs, false);
+        }
+        else if (gpu_mode == "c_paper" || gpu_mode == "c_paper_with_plan") {
+            gpu = gpu_c_compaction_paper_profile_from_parsed(inputs, false);
+        }
+        else if (gpu_mode == "c_paper_without_plan") {
+            gpu = gpu_c_compaction_without_plan_profile_from_parsed(inputs, false);
+        }
+        else {
+            throw std::runtime_error("profile-only mode does not support gpu_mode: " + gpu_mode);
+        }
+    }
+
+    {
+        NvtxRange write_range(std::string("gpu_profile_write_output:") + gpu_mode);
+        if (!gpu.serialized_output.empty()) {
+            write_serialized_output_set(gpu.serialized_output, output_dir, "gpu_compacted");
+        } else {
+            write_output_set(gpu.output, output_dir, "gpu_compacted");
+        }
+    }
+}
+
 int main(int argc, char** argv)
 {
     std::string dataset_dir = "dataset";
@@ -483,6 +542,7 @@ int main(int argc, char** argv)
     std::string gpu_mode = "baseline";
     int runs = 3;
     bool gpu_only = false;
+    bool profile_only = false;
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
         auto next = [&]() -> const char* {
@@ -494,12 +554,20 @@ int main(int argc, char** argv)
         else if (arg == "--runs") runs = std::stoi(next());
         else if (arg == "--gpu_mode") gpu_mode = next();
         else if (arg == "--gpu_only") gpu_only = true;
+        else if (arg == "--profile_only") profile_only = true;
         else if (arg == "--help") {
-            std::printf("Usage: %s [--dataset DIR] [--out_dir DIR] [--runs N] [--gpu_mode baseline|q_plan_on_gpu_slow|q_paper_with_plan|q_paper_without_plan|c_paper_with_plan|c_paper_without_plan|c_paper_keys_only_with_plan|c_paper_keys_only_without_plan] [--gpu_only]\n",
+            std::printf("Usage: %s [--dataset DIR] [--out_dir DIR] [--runs N] [--gpu_mode baseline|q_plan_on_gpu_slow|q_paper_with_plan|q_paper_without_plan|c_paper_with_plan|c_paper_without_plan|c_paper_keys_only_with_plan|c_paper_keys_only_without_plan] [--gpu_only] [--profile_only]\n",
                         argv[0]);
             return 0;
         } else {
             throw std::runtime_error("unknown option: " + arg);
+        }
+    }
+
+    if (profile_only) {
+        gpu_only = true;
+        if (!gpu_mode_supports_profile_only(gpu_mode)) {
+            throw std::runtime_error("profile-only mode only supports q/c paper modes without keys-only variants");
         }
     }
 
@@ -513,13 +581,18 @@ int main(int argc, char** argv)
     std::printf("  input SSTs: %zu\n", input_paths.size());
     std::printf("  key bytes: %d  value bytes: %d  restart interval: %d  block size: %d\n",
                 GP_KEY_BYTES, GP_VALUE_BYTES, GP_RESTART_INTERVAL, GP_DATA_BLOCK_BYTES);
-    if (runs > 1)
+    if (profile_only)
+        std::printf("  runs: %d  (profile-only, all runs profiled)\n", runs);
+    else if (runs > 1)
         std::printf("  runs: %d  (1 warmup + %d timed)\n", runs, runs - 1);
     else
         std::printf("  runs: %d  (timed, no warmup)\n", runs);
     std::printf("  gpu mode: %s\n", gpu_mode.c_str());
+    std::printf("  profile-only mode: %s\n", profile_only ? "enabled" : "disabled");
     std::printf("  storage IO: %s\n", gpcomp_direct_io_enabled() ? "direct (O_DIRECT + fdatasync)" : "buffered");
-    if (gpu_only) {
+    if (profile_only) {
+        std::printf("  cpu baseline: disabled (--profile_only)\n");
+    } else if (gpu_only) {
         std::printf("  cpu baseline: disabled (--gpu_only)\n");
     } else {
         std::printf("  cpu baseline: enabled (full GC + group-aligned planning)\n");
@@ -540,6 +613,10 @@ int main(int argc, char** argv)
         char gpu_dir[256];
         std::snprintf(gpu_dir, sizeof(gpu_dir), "%s/gpu_run%d", out_dir.c_str(), r);
         ensure_dir(gpu_dir);
+        if (profile_only) {
+            run_gpu_profile_once(input_paths, gpu_dir, gpu_mode);
+            continue;
+        }
         if (!gpu_only) {
             char cpu_dir[256];
             std::snprintf(cpu_dir, sizeof(cpu_dir), "%s/cpu_run%d", out_dir.c_str(), r);
@@ -547,6 +624,11 @@ int main(int argc, char** argv)
             cpu_runs.push_back(run_cpu_once(input_paths, cpu_dir, gpu_mode));
         }
         gpu_runs.push_back(run_gpu_once(input_paths, gpu_dir, gpu_mode));
+    }
+
+    if (profile_only) {
+        std::printf("Profile-only GPU compaction complete.\n");
+        return 0;
     }
 
     int timed_start = (runs > 1) ? 1 : 0;

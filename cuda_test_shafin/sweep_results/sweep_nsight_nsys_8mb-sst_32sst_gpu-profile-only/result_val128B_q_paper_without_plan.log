@@ -1,0 +1,17 @@
+Q-compaction benchmark
+  input SSTs: 32
+  key bytes: 16  value bytes: 128  restart interval: 4  block size: 32768
+  runs: 5  (profile-only, all runs profiled)
+  gpu mode: q_paper_without_plan
+  profile-only mode: enabled
+  storage IO: direct (O_DIRECT + fdatasync)
+  cpu baseline: disabled (--profile_only)
+  gpu garbage collection: disabled (Q-compaction only)
+
+Profile-only GPU compaction complete.
+Collecting data...
+Generating '/tmp/nsys-haques24/nsys-report-7897.qdstrm'
+Press Ctrl-C to stop symbol files downloading
+[1/1] [0%                          ] nsys_val128B_q_paper_without_plan.nsys-rep[1/1] [0%                          ] nsys_val128B_q_paper_without_plan.nsys-rep[1/1] [8%                          ] nsys_val128B_q_paper_without_plan.nsys-rep[1/1] [9%                          ] nsys_val128B_q_paper_without_plan.nsys-rep[1/1] [============54%             ] nsys_val128B_q_paper_without_plan.nsys-rep[1/1] [========================100%] nsys_val128B_q_paper_without_plan.nsys-rep[1/1] [========================100%] nsys_val128B_q_paper_without_plan.nsys-rep
+Generated:
+	/home/1755_project/invalidation-aware-caching/cuda_test_shafin/./sweep_results/sweep_nsight_nsys_8mb-sst_32sst_gpu-profile-only/profiles/nsys_val128B_q_paper_without_plan.nsys-rep

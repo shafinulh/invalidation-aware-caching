@@ -60,11 +60,16 @@ def parse_log(file_path):
     cpu_wall_min = float(cpu_wall.group(1)) if cpu_wall else 0.0
     gpu_wall_min = float(gpu_wall.group(1)) if gpu_wall else 0.0
     output_bytes = float(output_bytes_match.group(1)) if output_bytes_match else 0.0
+    profile_only = "profile-only mode: enabled" in content
 
     ops = output_bytes / (key_bytes + val_bytes) if (key_bytes + val_bytes) > 0 else 0.0
     cpu_throughput = ops / (cpu_wall_min / 1000.0) if cpu_wall_min > 0 else 0.0
     gpu_throughput = ops / (gpu_wall_min / 1000.0) if gpu_wall_min > 0 else 0.0
-    gpu_only = "cpu baseline: disabled (--gpu_only)" in content or "CPU baseline: skipped (gpu_only mode)" in content
+    gpu_only = (
+        "cpu baseline: disabled (--gpu_only)" in content
+        or "CPU baseline: skipped (gpu_only mode)" in content
+        or "cpu baseline: disabled (--profile_only)" in content
+    )
 
     return {
         "value_bytes": val_bytes,
@@ -72,6 +77,7 @@ def parse_log(file_path):
         "cpu_throughput": cpu_throughput,
         "gpu_throughput": gpu_throughput,
         "gpu_only": gpu_only,
+        "profile_only": profile_only,
     }
 
 
@@ -143,7 +149,7 @@ def build_sorted_values(parsed_logs):
     return sorted({entry["value_bytes"] for entry in parsed_logs if entry["value_bytes"] > 0})
 
 
-def main(sweep_dir, graph_dir, label=None, gpu_only_override=False):
+def main(sweep_dir, graph_dir, label=None, gpu_only_override=False, profile_only_override=False):
     print(f"Reading logs from: {sweep_dir}")
 
     if label is None:
@@ -157,6 +163,7 @@ def main(sweep_dir, graph_dir, label=None, gpu_only_override=False):
         return
 
     gpu_only_run = gpu_only_override or any(entry["gpu_only"] for entry in parsed_logs)
+    profile_only_run = profile_only_override or any(entry["profile_only"] for entry in parsed_logs)
     mode_order = GPU_MODE_ORDER if gpu_only_run else FULL_MODE_ORDER
     gpu_metrics = {mode: defaultdict(dict) for mode in GPU_MODE_ORDER}
     cpu_samples = defaultdict(lambda: defaultdict(list))
@@ -184,40 +191,44 @@ def main(sweep_dir, graph_dir, label=None, gpu_only_override=False):
     width = min(0.18, 0.78 / max(len(mode_order), 1))
     os.makedirs(graph_dir, exist_ok=True)
 
-    throughput_series = {}
-    if not gpu_only_run:
-        throughput_series["cpu_baseline"] = {
-            value: mean_or_zero(cpu_samples[value]["throughput"]) for value in sorted_vals
-        }
-    for mode in GPU_MODE_ORDER:
-        throughput_series[mode] = {
-            value: gpu_metrics[mode].get(value, {}).get("throughput", 0.0) for value in sorted_vals
-        }
-
-    fig, ax = plt.subplots(figsize=(8, 6))
-    plot_grouped_bars(
-        ax,
-        x,
-        width,
-        throughput_series,
-        sorted_vals,
-        mode_order,
-        "Throughput (Ops/s)",
-        f"Throughput vs Value Size ({label})",
-    )
-    ax.legend(
-        loc="lower center",
-        bbox_to_anchor=(0.5, 1.05),
-        fancybox=True,
-        shadow=True,
-        ncol=min(3, len(mode_order)),
-    )
-
-    plt.tight_layout()
     tp_out_path = os.path.join(graph_dir, f"throughput_{label}_sweep.png")
-    plt.savefig(tp_out_path)
-    print(f"Throughput graph saved to: {tp_out_path}")
-    plt.close()
+    if profile_only_run:
+        remove_if_exists(tp_out_path)
+        print("Skipping throughput plot: profile-only logs omit timed throughput summaries.")
+    else:
+        throughput_series = {}
+        if not gpu_only_run:
+            throughput_series["cpu_baseline"] = {
+                value: mean_or_zero(cpu_samples[value]["throughput"]) for value in sorted_vals
+            }
+        for mode in GPU_MODE_ORDER:
+            throughput_series[mode] = {
+                value: gpu_metrics[mode].get(value, {}).get("throughput", 0.0) for value in sorted_vals
+            }
+
+        fig, ax = plt.subplots(figsize=(8, 6))
+        plot_grouped_bars(
+            ax,
+            x,
+            width,
+            throughput_series,
+            sorted_vals,
+            mode_order,
+            "Throughput (Ops/s)",
+            f"Throughput vs Value Size ({label})",
+        )
+        ax.legend(
+            loc="lower center",
+            bbox_to_anchor=(0.5, 1.05),
+            fancybox=True,
+            shadow=True,
+            ncol=min(3, len(mode_order)),
+        )
+
+        plt.tight_layout()
+        plt.savefig(tp_out_path)
+        print(f"Throughput graph saved to: {tp_out_path}")
+        plt.close()
 
     util_out_path = os.path.join(graph_dir, f"utilization_{label}_sweep.png")
     io_out_path = os.path.join(graph_dir, f"io_utilization_{label}_sweep.png")
@@ -349,13 +360,30 @@ if __name__ == "__main__":
         action="store_true",
         help="Treat the sweep as GPU-only and render host-metrics CPU/IO plots when available",
     )
+    parser.add_argument(
+        "--profile_only",
+        action="store_true",
+        help="Treat the sweep as profile-only and skip throughput plotting",
+    )
     args = parser.parse_args()
 
     if args.sweep_dir:
-        main(args.sweep_dir, args.graphs_dir, label=args.label, gpu_only_override=args.gpu_only)
+        main(
+            args.sweep_dir,
+            args.graphs_dir,
+            label=args.label,
+            gpu_only_override=args.gpu_only,
+            profile_only_override=args.profile_only,
+        )
     else:
         sweep_dirs = sorted(glob.glob(os.path.join(args.results_dir, "sweep_*")))[-1:]
         if not sweep_dirs:
             print("No sweep directories found.")
         else:
-            main(sweep_dirs[-1], args.graphs_dir, label=args.label, gpu_only_override=args.gpu_only)
+            main(
+                sweep_dirs[-1],
+                args.graphs_dir,
+                label=args.label,
+                gpu_only_override=args.gpu_only,
+                profile_only_override=args.profile_only,
+            )
