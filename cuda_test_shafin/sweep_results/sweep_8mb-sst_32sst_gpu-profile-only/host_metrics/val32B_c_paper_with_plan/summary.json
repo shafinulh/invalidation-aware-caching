@@ -1,31 +1,31 @@
 {
-  "avg_device_queue_depth": 4.9751,
-  "avg_device_rkib_per_sec": 449616.7582,
-  "avg_device_util_pct": 13.2396,
-  "avg_device_wkib_per_sec": 378377.4738,
-  "avg_process_cpu_pct": 64.4243,
-  "avg_system_cpu_busy_pct": 4.8727,
-  "avg_system_cpu_iowait_pct": 0.6239,
-  "avg_system_cpu_system_pct": 3.1319,
-  "avg_system_cpu_user_pct": 1.7408,
+  "avg_device_queue_depth": 4.8194,
+  "avg_device_rkib_per_sec": 420494.9817,
+  "avg_device_util_pct": 13.9338,
+  "avg_device_wkib_per_sec": 413658.898,
+  "avg_process_cpu_pct": 64.4486,
+  "avg_system_cpu_busy_pct": 4.7744,
+  "avg_system_cpu_iowait_pct": 0.6229,
+  "avg_system_cpu_system_pct": 3.1158,
+  "avg_system_cpu_user_pct": 1.6586,
   "avg_thread_name_cpu_pct": {
-    "cuda-EvtHandlr": 0.1714,
-    "gpcomp_bench": 32.0407
+    "cuda-EvtHandlr": 0.3226,
+    "gpcomp_bench": 32.4273
   },
   "avg_thread_role_cpu_pct": {
-    "other": 64.4243
+    "other": 64.4486
   },
   "device": "nvme0n1",
   "interval_sec": 0.1,
-  "max_device_util_pct": 48.7389,
-  "max_process_cpu_pct": 89.5264,
+  "max_device_util_pct": 46.7069,
+  "max_process_cpu_pct": 89.5537,
   "max_thread_name_cpu_pct": {
-    "cuda-EvtHandlr": 9.9421,
-    "gpcomp_bench": 89.5264
+    "cuda-EvtHandlr": 19.8173,
+    "gpcomp_bench": 89.5537
   },
   "max_thread_role_cpu_pct": {
-    "other": 89.5264
+    "other": 89.5537
   },
-  "pid": 74884,
-  "sample_count": 29
+  "pid": 111005,
+  "sample_count": 62
 }

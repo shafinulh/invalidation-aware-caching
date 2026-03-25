@@ -3,36 +3,37 @@ C-compaction benchmark
   key bytes: 16  value bytes: 64  restart interval: 4  block size: 32768
   runs: 5  (1 warmup + 4 timed)
   gpu mode: c_paper_without_plan
+  profile-only mode: disabled
   storage IO: direct (O_DIRECT + fdatasync)
   cpu baseline: disabled (--gpu_only)
   gpu garbage collection: enabled (CPU after GPU sort, before GPU SST construction)
 
-GPU total (Wall): min=394.19 ms  mean=399.22 +- 3.11 ms
-GPU total (CPU-Time): 284.72 ms
-GPU pipeline (Wall): 269.77 ms  (CPU-Time): 224.19 ms  utilization: 83.1%
+GPU total (Wall): min=435.41 ms  mean=439.38 +- 4.31 ms
+GPU total (CPU-Time): 316.99 ms
+GPU pipeline (Wall): 282.41 ms  (CPU-Time): 231.44 ms  utilization: 82.0%
 CPU baseline: skipped (gpu_only mode)
 
 Best GPU run breakdown (ms):
-  read+parse 63.98  unpack 25.45  sort(merge) 32.74  gc 43.09  plan 0.03  bloom 1.27  pack+assemble 60.70  write 60.42
-  kernel-only: unpack 11.35  sort(merge) 32.59  bloom 0.24  pack 11.32
-  non-kernel overhead (ms): unpack 14.10  sort(merge) 0.15  bloom 1.02  pack 49.38
+  read+parse 86.43  unpack 24.85  sort(merge) 30.00  gc 46.44  plan 0.03  bloom 1.27  pack+assemble 67.49  write 66.55
+  kernel-only: unpack 10.15  sort(merge) 29.82  bloom 0.25  pack 10.77
+  non-kernel overhead (ms): unpack 14.70  sort(merge) 0.17  bloom 1.02  pack 56.72
   transfer stage detail (measured):
-    unpack  H2D 23.61 ms (201396457 B)  D2H 0.00 ms (0 B)
+    unpack  H2D 23.14 ms (201401142 B)  D2H 0.00 ms (0 B)
     merge   H2D 0.06 ms (388 B)  D2H 0.00 ms (0 B)
-    gc      H2D 22.08 ms (186699040 B)  D2H 15.50 ms (198545280 B)
-    plan    H2D 0.04 ms (47632 B)  D2H 0.00 ms (0 B)
-    bloom   H2D 0.00 ms (23816 B)  D2H 0.00 ms (0 B)
-    pack    H2D 0.03 ms (335536 B)  D2H 14.88 ms (188416403 B)
-  measured transfer totals: H2D 45.82 ms (388502869 B, 8086.59 MB/s)  D2H 30.38 ms (386961683 B, 12147.19 MB/s)
-  transfer lower-bound bytes: H2D 388502869  D2H 386961683
-  estimated transfer+sync BW (lower-bound): 7234.15 MB/s
-  CPU<->GPU (lower-bound): CPU->GPU H2D 388502869 B  GPU->CPU D2H 386961683 B
-  CPU<->GPU envelope: non-kernel total 102.23 ms  estimated BW 7234.15 MB/s
-  output bytes 188392587  data blocks 5954  output files 24
-  I/O profile: input bytes 201323881  estimated SSD read BW 3000.77 MB/s  estimated SSD write BW 2973.59 MB/s
-  SSD<->CPU (estimated): SSD->CPU 63.98 ms (201323881 B, 3000.77 MB/s)  CPU->SSD 60.42 ms (188392587 B, 2973.59 MB/s)
+    gc      H2D 23.61 ms (197275120 B)  D2H 17.69 ms (198510720 B)
+    plan    H2D 0.04 ms (50328 B)  D2H 0.00 ms (0 B)
+    bloom   H2D 0.00 ms (25164 B)  D2H 0.00 ms (0 B)
+    pack    H2D 0.05 ms (354496 B)  D2H 17.39 ms (199118923 B)
+  measured transfer totals: H2D 46.90 ms (399106638 B, 8115.77 MB/s)  D2H 35.08 ms (397629643 B, 10809.99 MB/s)
+  transfer lower-bound bytes: H2D 399106638  D2H 397629643
+  estimated transfer+sync BW (lower-bound): 6670.53 MB/s
+  CPU<->GPU (lower-bound): CPU->GPU H2D 399106638 B  GPU->CPU D2H 397629643 B
+  CPU<->GPU envelope: non-kernel total 113.91 ms  estimated BW 6670.53 MB/s
+  output bytes 199093759  data blocks 6291  output files 25
+  I/O profile: input bytes 201328566  estimated SSD read BW 2221.60 MB/s  estimated SSD write BW 2853.09 MB/s
+  SSD<->CPU (estimated): SSD->CPU 86.43 ms (201328566 B, 2221.60 MB/s)  CPU->SSD 66.55 ms (199093759 B, 2853.09 MB/s)
 Collecting data...
-Generating '/tmp/nsys-haques24/nsys-report-5aab.qdstrm'
+Generating '/tmp/nsys-haques24/nsys-report-e9c8.qdstrm'
 Press Ctrl-C to stop symbol files downloading
 [1/1] [0%                          ] nsys_val64B_c_paper_without_plan.nsys-rep[1/1] [0%                          ] nsys_val64B_c_paper_without_plan.nsys-rep[1/1] [8%                          ] nsys_val64B_c_paper_without_plan.nsys-rep[1/1] [9%                          ] nsys_val64B_c_paper_without_plan.nsys-rep[1/1] [============54%             ] nsys_val64B_c_paper_without_plan.nsys-rep[1/1] [========================100%] nsys_val64B_c_paper_without_plan.nsys-rep[1/1] [========================100%] nsys_val64B_c_paper_without_plan.nsys-rep
 Generated:

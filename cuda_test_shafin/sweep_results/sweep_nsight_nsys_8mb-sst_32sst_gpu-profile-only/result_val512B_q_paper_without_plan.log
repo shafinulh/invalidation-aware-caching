@@ -10,7 +10,7 @@ Q-compaction benchmark
 
 Profile-only GPU compaction complete.
 Collecting data...
-Generating '/tmp/nsys-haques24/nsys-report-c7c8.qdstrm'
+Generating '/tmp/nsys-haques24/nsys-report-8d4b.qdstrm'
 Press Ctrl-C to stop symbol files downloading
 [1/1] [0%                          ] nsys_val512B_q_paper_without_plan.nsys-rep[1/1] [0%                          ] nsys_val512B_q_paper_without_plan.nsys-rep[1/1] [9%                          ] nsys_val512B_q_paper_without_plan.nsys-rep[1/1] [============54%             ] nsys_val512B_q_paper_without_plan.nsys-rep[1/1] [========================100%] nsys_val512B_q_paper_without_plan.nsys-rep[1/1] [========================100%] nsys_val512B_q_paper_without_plan.nsys-rep
 Generated:

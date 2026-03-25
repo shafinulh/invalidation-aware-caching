@@ -10,8 +10,8 @@ C-compaction benchmark
 
 Profile-only GPU compaction complete.
 Collecting data...
-Generating '/tmp/nsys-haques24/nsys-report-cbff.qdstrm'
+Generating '/tmp/nsys-haques24/nsys-report-ff32.qdstrm'
 Press Ctrl-C to stop symbol files downloading
-[1/1] [0%                          ] nsys_val64B_c_paper_with_plan.nsys-rep[1/1] [0%                          ] nsys_val64B_c_paper_with_plan.nsys-rep[1/1] [7%                          ] nsys_val64B_c_paper_with_plan.nsys-rep[1/1] [8%                          ] nsys_val64B_c_paper_with_plan.nsys-rep[1/1] [============54%             ] nsys_val64B_c_paper_with_plan.nsys-rep[1/1] [========================100%] nsys_val64B_c_paper_with_plan.nsys-rep[1/1] [========================100%] nsys_val64B_c_paper_with_plan.nsys-rep
+[1/1] [0%                          ] nsys_val64B_c_paper_with_plan.nsys-rep[1/1] [0%                          ] nsys_val64B_c_paper_with_plan.nsys-rep[1/1] [7%                          ] nsys_val64B_c_paper_with_plan.nsys-rep[1/1] [8%                          ] nsys_val64B_c_paper_with_plan.nsys-rep[1/1] [===========53%              ] nsys_val64B_c_paper_with_plan.nsys-rep[1/1] [============54%             ] nsys_val64B_c_paper_with_plan.nsys-rep[1/1] [========================100%] nsys_val64B_c_paper_with_plan.nsys-rep[1/1] [========================100%] nsys_val64B_c_paper_with_plan.nsys-rep
 Generated:
 	/home/1755_project/invalidation-aware-caching/cuda_test_shafin/./sweep_results/sweep_nsight_nsys_8mb-sst_32sst_gpu-profile-only/profiles/nsys_val64B_c_paper_with_plan.nsys-rep

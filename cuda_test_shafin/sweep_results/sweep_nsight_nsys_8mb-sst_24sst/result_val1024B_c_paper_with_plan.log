@@ -3,36 +3,37 @@ C-compaction benchmark
   key bytes: 16  value bytes: 1024  restart interval: 4  block size: 32768
   runs: 5  (1 warmup + 4 timed)
   gpu mode: c_paper_with_plan
+  profile-only mode: disabled
   storage IO: direct (O_DIRECT + fdatasync)
   cpu baseline: disabled (--gpu_only)
   gpu garbage collection: enabled (CPU after GPU sort, before GPU SST construction)
 
-GPU total (Wall): min=380.34 ms  mean=384.04 +- 2.47 ms
-GPU total (CPU-Time): 268.98 ms
-GPU pipeline (Wall): 257.12 ms  (CPU-Time): 210.99 ms  utilization: 82.1%
+GPU total (Wall): min=393.57 ms  mean=399.66 +- 8.37 ms
+GPU total (CPU-Time): 276.44 ms
+GPU pipeline (Wall): 268.31 ms  (CPU-Time): 217.04 ms  utilization: 80.9%
 CPU baseline: skipped (gpu_only mode)
 
 Best GPU run breakdown (ms):
-  read+parse 58.33  unpack 24.65  sort(merge) 15.67  gc 44.78  plan 5.50  bloom 0.09  pack+assemble 63.25  write 64.87
-  kernel-only: unpack 10.72  sort(merge) 15.53  bloom 0.05  pack 11.41
-  non-kernel overhead (ms): unpack 13.93  sort(merge) 0.14  bloom 0.04  pack 51.85
+  read+parse 58.86  unpack 24.11  sort(merge) 15.69  gc 45.24  plan 5.21  bloom 0.06  pack+assemble 66.13  write 66.38
+  kernel-only: unpack 10.76  sort(merge) 15.54  bloom 0.04  pack 11.42
+  non-kernel overhead (ms): unpack 13.35  sort(merge) 0.15  bloom 0.02  pack 54.71
   transfer stage detail (measured):
-    unpack  H2D 23.07 ms (201405945 B)  D2H 0.00 ms (0 B)
-    merge   H2D 0.05 ms (388 B)  D2H 0.00 ms (0 B)
-    gc      H2D 23.94 ms (199451200 B)  D2H 15.49 ms (200428800 B)
-    plan    H2D 0.07 ms (54800 B)  D2H 0.15 ms (191780 B)
-    bloom   H2D 0.01 ms (27400 B)  D2H 0.00 ms (0 B)
-    pack    H2D 0.03 ms (385712 B)  D2H 15.81 ms (200335185 B)
-  measured transfer totals: H2D 47.16 ms (401325445 B, 8115.54 MB/s)  D2H 31.45 ms (400955765 B, 12158.31 MB/s)
-  transfer lower-bound bytes: H2D 401325445  D2H 400955765
-  estimated transfer+sync BW (lower-bound): 7259.84 MB/s
-  CPU<->GPU (lower-bound): CPU->GPU H2D 401325445 B  GPU->CPU D2H 400955765 B
-  CPU<->GPU envelope: non-kernel total 105.39 ms  estimated BW 7259.84 MB/s
-  output bytes 200307785  data blocks 6850  output files 24
-  I/O profile: input bytes 201331065  estimated SSD read BW 3291.63 MB/s  estimated SSD write BW 2944.89 MB/s
-  SSD<->CPU (estimated): SSD->CPU 58.33 ms (201331065 B, 3291.63 MB/s)  CPU->SSD 64.87 ms (200307785 B, 2944.89 MB/s)
+    unpack  H2D 22.47 ms (201406414 B)  D2H 0.00 ms (0 B)
+    merge   H2D 0.03 ms (388 B)  D2H 0.00 ms (0 B)
+    gc      H2D 23.69 ms (200326880 B)  D2H 17.97 ms (200428800 B)
+    plan    H2D 0.05 ms (55040 B)  D2H 0.16 ms (192624 B)
+    bloom   H2D 0.00 ms (27520 B)  D2H 0.00 ms (0 B)
+    pack    H2D 0.03 ms (387480 B)  D2H 17.91 ms (201214671 B)
+  measured transfer totals: H2D 46.27 ms (402203722 B, 8290.01 MB/s)  D2H 36.04 ms (401836095 B, 10633.98 MB/s)
+  transfer lower-bound bytes: H2D 402203722  D2H 401836095
+  estimated transfer+sync BW (lower-bound): 6977.79 MB/s
+  CPU<->GPU (lower-bound): CPU->GPU H2D 402203722 B  GPU->CPU D2H 401836095 B
+  CPU<->GPU envelope: non-kernel total 109.89 ms  estimated BW 6977.79 MB/s
+  output bytes 201187151  data blocks 6880  output files 25
+  I/O profile: input bytes 201331534  estimated SSD read BW 3262.27 MB/s  estimated SSD write BW 2890.59 MB/s
+  SSD<->CPU (estimated): SSD->CPU 58.86 ms (201331534 B, 3262.27 MB/s)  CPU->SSD 66.38 ms (201187151 B, 2890.59 MB/s)
 Collecting data...
-Generating '/tmp/nsys-haques24/nsys-report-fc04.qdstrm'
+Generating '/tmp/nsys-haques24/nsys-report-f5ec.qdstrm'
 Press Ctrl-C to stop symbol files downloading
 [1/1] [0%                          ] nsys_val1024B_c_paper_with_plan.nsys-rep[1/1] [0%                          ] nsys_val1024B_c_paper_with_plan.nsys-rep[1/1] [8%                          ] nsys_val1024B_c_paper_with_plan.nsys-rep[1/1] [============54%             ] nsys_val1024B_c_paper_with_plan.nsys-rep[1/1] [========================100%] nsys_val1024B_c_paper_with_plan.nsys-rep[1/1] [========================100%] nsys_val1024B_c_paper_with_plan.nsys-rep
 Generated:

@@ -3,36 +3,37 @@ C-compaction benchmark
   key bytes: 16  value bytes: 128  restart interval: 4  block size: 32768
   runs: 5  (1 warmup + 4 timed)
   gpu mode: c_paper_without_plan
+  profile-only mode: disabled
   storage IO: direct (O_DIRECT + fdatasync)
   cpu baseline: disabled (--gpu_only)
   gpu garbage collection: enabled (CPU after GPU sort, before GPU SST construction)
 
-GPU total (Wall): min=62.26 ms  mean=64.24 +- 3.22 ms
-GPU total (CPU-Time): 44.54 ms
-GPU pipeline (Wall): 42.25 ms  (CPU-Time): 33.40 ms  utilization: 79.1%
+GPU total (Wall): min=64.63 ms  mean=67.48 +- 3.82 ms
+GPU total (CPU-Time): 44.08 ms
+GPU pipeline (Wall): 44.22 ms  (CPU-Time): 34.84 ms  utilization: 78.8%
 CPU baseline: skipped (gpu_only mode)
 
 Best GPU run breakdown (ms):
-  read+parse 9.12  unpack 4.58  sort(merge) 2.50  gc 2.43  plan 0.01  bloom 0.07  pack+assemble 12.79  write 10.87
-  kernel-only: unpack 1.98  sort(merge) 2.38  bloom 0.04  pack 2.17
-  non-kernel overhead (ms): unpack 2.60  sort(merge) 0.12  bloom 0.03  pack 10.62
+  read+parse 9.31  unpack 5.02  sort(merge) 2.56  gc 2.41  plan 0.01  bloom 0.06  pack+assemble 13.12  write 11.08
+  kernel-only: unpack 1.98  sort(merge) 2.37  bloom 0.04  pack 2.17
+  non-kernel overhead (ms): unpack 3.04  sort(merge) 0.18  bloom 0.02  pack 10.94
   transfer stage detail (measured):
-    unpack  H2D 3.68 ms (33566083 B)  D2H 0.00 ms (0 B)
-    merge   H2D 0.06 ms (68 B)  D2H 0.00 ms (0 B)
-    gc      H2D 3.91 ms (33021072 B)  D2H 3.07 ms (33216192 B)
-    plan    H2D 0.04 ms (8344 B)  D2H 0.00 ms (0 B)
-    bloom   H2D 0.00 ms (4172 B)  D2H 0.00 ms (0 B)
-    pack    H2D 0.03 ms (58848 B)  D2H 3.15 ms (33295413 B)
-  measured transfer totals: H2D 7.72 ms (66658587 B, 8230.37 MB/s)  D2H 6.22 ms (66511605 B, 10203.24 MB/s)
-  transfer lower-bound bytes: H2D 66658587  D2H 66511605
-  estimated transfer+sync BW (lower-bound): 6239.83 MB/s
-  CPU<->GPU (lower-bound): CPU->GPU H2D 66658587 B  GPU->CPU D2H 66511605 B
-  CPU<->GPU envelope: non-kernel total 20.35 ms  estimated BW 6239.83 MB/s
-  output bytes 33291241  data blocks 1043  output files 5
-  I/O profile: input bytes 33553843  estimated SSD read BW 3507.26 MB/s  estimated SSD write BW 2920.09 MB/s
-  SSD<->CPU (estimated): SSD->CPU 9.12 ms (33553843 B, 3507.26 MB/s)  CPU->SSD 10.87 ms (33291241 B, 2920.09 MB/s)
+    unpack  H2D 4.04 ms (33567137 B)  D2H 0.00 ms (0 B)
+    merge   H2D 0.02 ms (68 B)  D2H 0.00 ms (0 B)
+    gc      H2D 3.97 ms (33193728 B)  D2H 3.20 ms (33215040 B)
+    plan    H2D 0.04 ms (8384 B)  D2H 0.00 ms (0 B)
+    bloom   H2D 0.00 ms (4192 B)  D2H 0.00 ms (0 B)
+    pack    H2D 0.02 ms (59128 B)  D2H 3.10 ms (33469563 B)
+  measured transfer totals: H2D 8.10 ms (66832637 B, 7872.01 MB/s)  D2H 6.30 ms (66684603 B, 10094.05 MB/s)
+  transfer lower-bound bytes: H2D 66832637  D2H 66684603
+  estimated transfer+sync BW (lower-bound): 5962.72 MB/s
+  CPU<->GPU (lower-bound): CPU->GPU H2D 66832637 B  GPU->CPU D2H 66684603 B
+  CPU<->GPU envelope: non-kernel total 21.35 ms  estimated BW 5962.72 MB/s
+  output bytes 33465371  data blocks 1048  output files 5
+  I/O profile: input bytes 33554897  estimated SSD read BW 3439.01 MB/s  estimated SSD write BW 2879.59 MB/s
+  SSD<->CPU (estimated): SSD->CPU 9.31 ms (33554897 B, 3439.01 MB/s)  CPU->SSD 11.08 ms (33465371 B, 2879.59 MB/s)
 Collecting data...
-Generating '/tmp/nsys-haques24/nsys-report-7311.qdstrm'
+Generating '/tmp/nsys-haques24/nsys-report-aed3.qdstrm'
 Press Ctrl-C to stop symbol files downloading
 [1/1] [0%                          ] nsys_val128B_c_paper_without_plan.nsys-rep[1/1] [0%                          ] nsys_val128B_c_paper_without_plan.nsys-rep[1/1] [12%                         ] nsys_val128B_c_paper_without_plan.nsys-rep[1/1] [===24%                      ] nsys_val128B_c_paper_without_plan.nsys-rep[1/1] [==============62%           ] nsys_val128B_c_paper_without_plan.nsys-rep[1/1] [========================100%] nsys_val128B_c_paper_without_plan.nsys-rep[1/1] [========================100%] nsys_val128B_c_paper_without_plan.nsys-rep
 Generated:

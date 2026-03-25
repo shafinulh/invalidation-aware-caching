@@ -1,7 +1,7 @@
 C-compaction benchmark
   input SSTs: 32
   key bytes: 16  value bytes: 256  restart interval: 4  block size: 32768
-  runs: 5  (profile-only, all runs profiled)
+  runs: 10  (profile-only, all runs profiled)
   gpu mode: c_paper_with_plan
   profile-only mode: enabled
   storage IO: direct (O_DIRECT + fdatasync)
