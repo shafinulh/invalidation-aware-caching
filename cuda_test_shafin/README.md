@@ -147,6 +147,8 @@ The plots currently generated are:
 
 Use `sweep_with_nsight.sh` to rerun the same value-size sweeps under Nsight.
 
+By default, the Nsight sweep now profiles the GPU pipeline only (`--gpu_only`) so the traces do not include the CPU baseline path. Pass `--with_cpu_baseline` if you explicitly want the old full CPU-vs-GPU benchmark driver inside the profiled trace.
+
 4-SST Nsight Systems sweep:
 
 ```bash

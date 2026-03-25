@@ -119,9 +119,9 @@ def parse_bench_log(log_path):
 
     gpu_read_bw = 0.0
     gpu_write_bw = 0.0
-    if len(io_profiles) >= 2:
-        gpu_read_bw = float(io_profiles[1][0])
-        gpu_write_bw = float(io_profiles[1][1])
+    if len(io_profiles) >= 1:
+        gpu_read_bw = float(io_profiles[-1][0])
+        gpu_write_bw = float(io_profiles[-1][1])
 
     parsed = {
         'gpu_wall_ms': float(gpu_wall.group(1)) if gpu_wall else 0.0,

@@ -1,0 +1,38 @@
+Q-compaction benchmark
+  input SSTs: 32
+  key bytes: 16  value bytes: 256  restart interval: 4  block size: 32768
+  runs: 5  (timed)
+  gpu mode: q_paper_without_plan
+  cpu baseline: disabled (--gpu_only)
+  gpu garbage collection: disabled (Q-compaction only)
+
+GPU total (Wall): min=244.79 ms  mean=269.01 +- 26.59 ms
+GPU total (CPU-Time): 214.01 ms
+GPU pipeline (Wall): 167.28 ms  (CPU-Time): 137.21 ms  utilization: 82.0%
+CPU baseline: skipped (gpu_only mode)
+
+Best GPU run breakdown (ms):
+  read+parse 34.64  unpack 34.34  sort(merge) 32.21  gc 0.00  plan 0.05  bloom 0.13  pack+assemble 84.31  write 42.84
+  kernel-only: unpack 13.63  sort(merge) 32.12  bloom 0.10  pack 14.10
+  non-kernel overhead (ms): unpack 20.71  sort(merge) 0.09  bloom 0.03  pack 70.21
+  transfer stage detail (measured):
+    unpack  H2D 32.53 ms (268529774 B)  D2H 0.00 ms (0 B)
+    merge   H2D 0.02 ms (516 B)  D2H 0.00 ms (0 B)
+    gc      H2D 0.00 ms (0 B)  D2H 0.00 ms (0 B)
+    plan    H2D 0.11 ms (67576 B)  D2H 0.00 ms (0 B)
+    bloom   H2D 0.00 ms (33788 B)  D2H 0.00 ms (0 B)
+    pack    H2D 0.09 ms (475936 B)  D2H 20.85 ms (267820782 B)
+  measured transfer totals: H2D 32.75 ms (269107590 B, 7835.62 MB/s)  D2H 20.85 ms (267820782 B, 12249.30 MB/s)
+  transfer lower-bound bytes: H2D 269107590  D2H 267820782
+  estimated transfer+sync BW (lower-bound): 5623.87 MB/s
+  CPU<->GPU (lower-bound): CPU->GPU H2D 269107590 B  GPU->CPU D2H 267820782 B
+  CPU<->GPU envelope: non-kernel total 91.05 ms  estimated BW 5623.87 MB/s
+  output bytes 267786994  data blocks 8447  output files 33
+  I/O profile: input bytes 268431470  estimated SSD read BW 7390.61 MB/s  estimated SSD write BW 5960.69 MB/s
+  SSD<->CPU (estimated): SSD->CPU 34.64 ms (268431470 B, 7390.61 MB/s)  CPU->SSD 42.84 ms (267786994 B, 5960.69 MB/s)
+Collecting data...
+Generating '/tmp/nsys-haques24/nsys-report-3e09.qdstrm'
+Press Ctrl-C to stop symbol files downloading
+[1/1] [0%                          ] nsys_val256B_q_paper_without_plan.nsys-rep[1/1] [0%                          ] nsys_val256B_q_paper_without_plan.nsys-rep[1/1] [8%                          ] nsys_val256B_q_paper_without_plan.nsys-rep[1/1] [============54%             ] nsys_val256B_q_paper_without_plan.nsys-rep[1/1] [========================100%] nsys_val256B_q_paper_without_plan.nsys-rep[1/1] [========================100%] nsys_val256B_q_paper_without_plan.nsys-rep
+Generated:
+	/home/1755_project/invalidation-aware-caching/cuda_test_shafin/./sweep_results/sweep_nsight_nsys_8mb-sst_32sst/profiles/nsys_val256B_q_paper_without_plan.nsys-rep

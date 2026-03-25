@@ -482,6 +482,7 @@ int main(int argc, char** argv)
     std::string out_dir = "results";
     std::string gpu_mode = "baseline";
     int runs = 3;
+    bool gpu_only = false;
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
         auto next = [&]() -> const char* {
@@ -492,8 +493,9 @@ int main(int argc, char** argv)
         else if (arg == "--out_dir") out_dir = next();
         else if (arg == "--runs") runs = std::stoi(next());
         else if (arg == "--gpu_mode") gpu_mode = next();
+        else if (arg == "--gpu_only") gpu_only = true;
         else if (arg == "--help") {
-            std::printf("Usage: %s [--dataset DIR] [--out_dir DIR] [--runs N] [--gpu_mode baseline|q_plan_on_gpu_slow|q_paper_with_plan|q_paper_without_plan|c_paper_with_plan|c_paper_without_plan|c_paper_keys_only_with_plan|c_paper_keys_only_without_plan]\n",
+            std::printf("Usage: %s [--dataset DIR] [--out_dir DIR] [--runs N] [--gpu_mode baseline|q_plan_on_gpu_slow|q_paper_with_plan|q_paper_without_plan|c_paper_with_plan|c_paper_without_plan|c_paper_keys_only_with_plan|c_paper_keys_only_without_plan] [--gpu_only]\n",
                         argv[0]);
             return 0;
         } else {
@@ -513,94 +515,109 @@ int main(int argc, char** argv)
                 GP_KEY_BYTES, GP_VALUE_BYTES, GP_RESTART_INTERVAL, GP_DATA_BLOCK_BYTES);
     std::printf("  runs: %d  (timed)\n", runs);
     std::printf("  gpu mode: %s\n", gpu_mode.c_str());
-    std::printf("  cpu baseline: enabled (full GC + group-aligned planning)\n");
+    if (gpu_only) {
+        std::printf("  cpu baseline: disabled (--gpu_only)\n");
+    } else {
+        std::printf("  cpu baseline: enabled (full GC + group-aligned planning)\n");
+    }
     std::printf("  gpu garbage collection: %s\n\n",
                 is_gc_enabled_mode(gpu_mode)
                     ? "enabled (CPU after GPU sort, before GPU SST construction)"
                     : "disabled (Q-compaction only)");
 
     std::vector<RunSummary> cpu_runs, gpu_runs;
-    cpu_runs.reserve(runs);
+    if (!gpu_only) {
+        cpu_runs.reserve(runs);
+    }
     gpu_runs.reserve(runs);
 
     for (int r = 0; r < runs; ++r) {
         NvtxRange iteration_range(std::string("benchmark_iteration:") + std::to_string(r));
-        char cpu_dir[256];
         char gpu_dir[256];
-        std::snprintf(cpu_dir, sizeof(cpu_dir), "%s/cpu_run%d", out_dir.c_str(), r);
         std::snprintf(gpu_dir, sizeof(gpu_dir), "%s/gpu_run%d", out_dir.c_str(), r);
-        ensure_dir(cpu_dir);
         ensure_dir(gpu_dir);
-        cpu_runs.push_back(run_cpu_once(input_paths, cpu_dir, gpu_mode));
+        if (!gpu_only) {
+            char cpu_dir[256];
+            std::snprintf(cpu_dir, sizeof(cpu_dir), "%s/cpu_run%d", out_dir.c_str(), r);
+            ensure_dir(cpu_dir);
+            cpu_runs.push_back(run_cpu_once(input_paths, cpu_dir, gpu_mode));
+        }
         gpu_runs.push_back(run_gpu_once(input_paths, gpu_dir, gpu_mode));
     }
 
     std::vector<double> cpu_totals, gpu_totals, cpu_reads, gpu_reads;
     for (int r = 0; r < runs; ++r) {
-        cpu_totals.push_back(cpu_runs[r].total_ms);
         gpu_totals.push_back(gpu_runs[r].total_ms);
-        cpu_reads.push_back(cpu_runs[r].read_parse_ms);
         gpu_reads.push_back(gpu_runs[r].read_parse_ms);
+        if (!gpu_only) {
+            cpu_totals.push_back(cpu_runs[r].total_ms);
+            cpu_reads.push_back(cpu_runs[r].read_parse_ms);
+        }
     }
 
-    Stats cpu_total_stats = compute_stats(cpu_totals);
     Stats gpu_total_stats = compute_stats(gpu_totals);
-    Stats cpu_read_stats = compute_stats(cpu_reads);
     Stats gpu_read_stats = compute_stats(gpu_reads);
-
-    std::vector<std::string> cpu_last, gpu_last;
-    cpu_last = collect_sst_paths(out_dir + "/cpu_run" + std::to_string(runs - 1));
-    gpu_last = collect_sst_paths(out_dir + "/gpu_run" + std::to_string(runs - 1));
-    bool exact_output_match = compare_output_sets(cpu_last, gpu_last);
-    bool logical_output_match = compare_output_sets_logical(cpu_last, gpu_last);
-    bool outputs_match = is_exact_match_mode(gpu_mode) ? exact_output_match : logical_output_match;
-
-    size_t cpu_best_idx = (size_t)(std::min_element(cpu_totals.begin(), cpu_totals.end()) - cpu_totals.begin());
     size_t gpu_best_idx = (size_t)(std::min_element(gpu_totals.begin(), gpu_totals.end()) - gpu_totals.begin());
-    const RunSummary& cpu_best = cpu_runs[cpu_best_idx];
     const RunSummary& gpu_best = gpu_runs[gpu_best_idx];
-
-    std::printf("CPU total (Wall): min=%.2f ms  mean=%.2f +- %.2f ms\n",
-                cpu_total_stats.min, cpu_total_stats.mean, cpu_total_stats.stddev);
-    std::printf("CPU total (CPU-Time): %.2f ms\n", cpu_best.cpu_time_ms);
-    std::printf("CPU pipeline (Wall): %.2f ms  (CPU-Time): %.2f ms  utilization: %.1f%%\n",
-                cpu_best.pipeline_wall_ms, cpu_best.pipeline_cpu_time_ms,
-                cpu_best.pipeline_wall_ms > 0 ? (cpu_best.pipeline_cpu_time_ms / cpu_best.pipeline_wall_ms) * 100.0 : 0.0);
     std::printf("GPU total (Wall): min=%.2f ms  mean=%.2f +- %.2f ms\n",
                 gpu_total_stats.min, gpu_total_stats.mean, gpu_total_stats.stddev);
     std::printf("GPU total (CPU-Time): %.2f ms\n", gpu_best.cpu_time_ms);
     std::printf("GPU pipeline (Wall): %.2f ms  (CPU-Time): %.2f ms  utilization: %.1f%%\n",
                 gpu_best.pipeline_wall_ms, gpu_best.pipeline_cpu_time_ms,
                 gpu_best.pipeline_wall_ms > 0 ? (gpu_best.pipeline_cpu_time_ms / gpu_best.pipeline_wall_ms) * 100.0 : 0.0);
-    std::printf("Speedup: %.2fx (min totals)\n", cpu_total_stats.min / gpu_total_stats.min);
-    if (!is_exact_match_mode(gpu_mode)) {
-        std::printf("Output logically identical: %s", logical_output_match ? "PASS" : "FAIL");
-        if (!exact_output_match && logical_output_match) {
-            std::printf("  (different block/file layout than CPU baseline)");
-        }
-        std::printf("\n\n");
-    } else {
-        std::printf("Output identical: %s\n\n", outputs_match ? "PASS" : "FAIL");
-    }
 
-    std::printf("Best CPU run breakdown (ms):\n");
-    std::printf("  read+parse %.2f  unpack %.2f  sort(merge) %.2f  gc %.2f  plan %.2f  bloom %.2f  pack+assemble %.2f  write %.2f\n",
-                cpu_best.read_parse_ms, cpu_best.stage.unpack_ms, cpu_best.stage.merge_ms,
-                cpu_best.stage.gc_ms, cpu_best.stage.planning_ms, cpu_best.stage.bloom_ms,
-                cpu_best.stage.pack_ms, cpu_best.write_ms);
-    std::printf("  output bytes %zu  data blocks %zu  output files %zu\n\n",
-                cpu_best.output_bytes, cpu_best.output_blocks, cpu_best.output_files);
-    std::printf("  I/O profile: input bytes %zu  estimated SSD read BW %.2f MB/s  estimated SSD write BW %.2f MB/s\n\n",
-                cpu_best.input_bytes,
-                mb_per_sec(cpu_best.input_bytes, cpu_best.read_parse_ms),
-                mb_per_sec(cpu_best.output_bytes, cpu_best.write_ms));
-    std::printf("  SSD<->CPU (estimated): SSD->CPU %.2f ms (%zu B, %.2f MB/s)  CPU->SSD %.2f ms (%zu B, %.2f MB/s)\n\n",
-                cpu_best.read_parse_ms,
-                cpu_best.input_bytes,
-                mb_per_sec(cpu_best.input_bytes, cpu_best.read_parse_ms),
-                cpu_best.write_ms,
-                cpu_best.output_bytes,
-                mb_per_sec(cpu_best.output_bytes, cpu_best.write_ms));
+    bool outputs_match = true;
+    if (!gpu_only) {
+        Stats cpu_total_stats = compute_stats(cpu_totals);
+        Stats cpu_read_stats = compute_stats(cpu_reads);
+        std::vector<std::string> cpu_last, gpu_last;
+        cpu_last = collect_sst_paths(out_dir + "/cpu_run" + std::to_string(runs - 1));
+        gpu_last = collect_sst_paths(out_dir + "/gpu_run" + std::to_string(runs - 1));
+        bool exact_output_match = compare_output_sets(cpu_last, gpu_last);
+        bool logical_output_match = compare_output_sets_logical(cpu_last, gpu_last);
+        outputs_match = is_exact_match_mode(gpu_mode) ? exact_output_match : logical_output_match;
+
+        size_t cpu_best_idx = (size_t)(std::min_element(cpu_totals.begin(), cpu_totals.end()) - cpu_totals.begin());
+        const RunSummary& cpu_best = cpu_runs[cpu_best_idx];
+
+        std::printf("CPU total (Wall): min=%.2f ms  mean=%.2f +- %.2f ms\n",
+                    cpu_total_stats.min, cpu_total_stats.mean, cpu_total_stats.stddev);
+        std::printf("CPU total (CPU-Time): %.2f ms\n", cpu_best.cpu_time_ms);
+        std::printf("CPU pipeline (Wall): %.2f ms  (CPU-Time): %.2f ms  utilization: %.1f%%\n",
+                    cpu_best.pipeline_wall_ms, cpu_best.pipeline_cpu_time_ms,
+                    cpu_best.pipeline_wall_ms > 0 ? (cpu_best.pipeline_cpu_time_ms / cpu_best.pipeline_wall_ms) * 100.0 : 0.0);
+        std::printf("Speedup: %.2fx (min totals)\n", cpu_total_stats.min / gpu_total_stats.min);
+        if (!is_exact_match_mode(gpu_mode)) {
+            std::printf("Output logically identical: %s", logical_output_match ? "PASS" : "FAIL");
+            if (!exact_output_match && logical_output_match) {
+                std::printf("  (different block/file layout than CPU baseline)");
+            }
+            std::printf("\n\n");
+        } else {
+            std::printf("Output identical: %s\n\n", outputs_match ? "PASS" : "FAIL");
+        }
+
+        std::printf("Best CPU run breakdown (ms):\n");
+        std::printf("  read+parse %.2f  unpack %.2f  sort(merge) %.2f  gc %.2f  plan %.2f  bloom %.2f  pack+assemble %.2f  write %.2f\n",
+                    cpu_best.read_parse_ms, cpu_best.stage.unpack_ms, cpu_best.stage.merge_ms,
+                    cpu_best.stage.gc_ms, cpu_best.stage.planning_ms, cpu_best.stage.bloom_ms,
+                    cpu_best.stage.pack_ms, cpu_best.write_ms);
+        std::printf("  output bytes %zu  data blocks %zu  output files %zu\n\n",
+                    cpu_best.output_bytes, cpu_best.output_blocks, cpu_best.output_files);
+        std::printf("  I/O profile: input bytes %zu  estimated SSD read BW %.2f MB/s  estimated SSD write BW %.2f MB/s\n\n",
+                    cpu_best.input_bytes,
+                    mb_per_sec(cpu_best.input_bytes, cpu_best.read_parse_ms),
+                    mb_per_sec(cpu_best.output_bytes, cpu_best.write_ms));
+        std::printf("  SSD<->CPU (estimated): SSD->CPU %.2f ms (%zu B, %.2f MB/s)  CPU->SSD %.2f ms (%zu B, %.2f MB/s)\n\n",
+                    cpu_best.read_parse_ms,
+                    cpu_best.input_bytes,
+                    mb_per_sec(cpu_best.input_bytes, cpu_best.read_parse_ms),
+                    cpu_best.write_ms,
+                    cpu_best.output_bytes,
+                    mb_per_sec(cpu_best.output_bytes, cpu_best.write_ms));
+    } else {
+        std::printf("CPU baseline: skipped (gpu_only mode)\n\n");
+    }
 
     std::printf("Best GPU run breakdown (ms):\n");
     std::printf("  read+parse %.2f  unpack %.2f  sort(merge) %.2f  gc %.2f  plan %.2f  bloom %.2f  pack+assemble %.2f  write %.2f\n",

@@ -12,6 +12,7 @@ RUNS="${RUNS:-5}"
 VALUES_STR="${VALUES:-32 64 128 256 512 1024}"
 DATASET_PREFIX="${DATASET_PREFIX:-dataset_shafin_V}"
 MODES_STR="${MODES:-q_paper_with_plan q_paper_without_plan c_paper_with_plan c_paper_without_plan}"
+GPU_ONLY="${GPU_ONLY:-1}"
 DATASET_ZIPF_ALPHA="${DATASET_ZIPF_ALPHA:-0.0}"
 DATASET_USER_KEY_SPACE="${DATASET_USER_KEY_SPACE:-20000000}"
 OUT_ROOT="${OUT_ROOT:-./sweep_results}"
@@ -31,6 +32,8 @@ while [[ $# -gt 0 ]]; do
         --values) VALUES_STR="$2"; shift 2 ;;
         --dataset_prefix) DATASET_PREFIX="$2"; shift 2 ;;
         --modes) MODES_STR="$2"; shift 2 ;;
+        --gpu_only) GPU_ONLY="1"; shift ;;
+        --with_cpu_baseline) GPU_ONLY="0"; shift ;;
         --zipf_alpha) DATASET_ZIPF_ALPHA="$2"; shift 2 ;;
         --user_key_space) DATASET_USER_KEY_SPACE="$2"; shift 2 ;;
         --out_root) OUT_ROOT="$2"; shift 2 ;;
@@ -143,6 +146,7 @@ fi
 echo " runs per mode: $RUNS"
 echo " value sizes: $VALUES_STR"
 echo " gpu modes: $MODES_STR"
+echo " gpu-only benchmark mode: $GPU_ONLY"
 echo " input SSTs: $CURRENT_SSTS"
 echo " dataset user key space: $DATASET_USER_KEY_SPACE"
 echo "========================================================="
@@ -179,6 +183,16 @@ for VAL in $VALUES_STR; do
         echo "Profiling ${MODE} at ${VAL} B..."
         rm -rf "$BENCH_OUTDIR"
 
+        bench_args=(
+            --dataset "$DATASET_DIR"
+            --out_dir "$BENCH_OUTDIR"
+            --runs "$RUNS"
+            --gpu_mode "$MODE"
+        )
+        if [[ "$GPU_ONLY" == "1" ]]; then
+            bench_args+=(--gpu_only)
+        fi
+
         if [[ "$TOOL" == "nsys" ]]; then
             set +e
             "$TOOL_CMD" profile \
@@ -187,7 +201,7 @@ for VAL in $VALUES_STR; do
                 --trace=cuda,osrt,nvtx \
                 --sample=none \
                 --cpuctxsw="$NSYS_CPUCTXSW" \
-                "$BENCH_BIN" --dataset "$DATASET_DIR" --out_dir "$BENCH_OUTDIR" --runs "$RUNS" --gpu_mode "$MODE" \
+                "$BENCH_BIN" "${bench_args[@]}" \
                 > "$LOG_PATH" 2>&1
             EXIT_CODE="$?"
             set -e
@@ -218,7 +232,7 @@ for VAL in $VALUES_STR; do
                 --set full \
                 --target-processes all \
                 --export "$PREFIX" \
-                "$BENCH_BIN" --dataset "$DATASET_DIR" --out_dir "$BENCH_OUTDIR" --runs "$RUNS" --gpu_mode "$MODE" \
+                "$BENCH_BIN" "${bench_args[@]}" \
                 > "$LOG_PATH" 2>&1
             EXIT_CODE="$?"
             set -e
