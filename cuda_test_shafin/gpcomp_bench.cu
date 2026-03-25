@@ -515,6 +515,7 @@ int main(int argc, char** argv)
                 GP_KEY_BYTES, GP_VALUE_BYTES, GP_RESTART_INTERVAL, GP_DATA_BLOCK_BYTES);
     std::printf("  runs: %d  (timed)\n", runs);
     std::printf("  gpu mode: %s\n", gpu_mode.c_str());
+    std::printf("  storage IO: %s\n", gpcomp_direct_io_enabled() ? "direct (O_DIRECT + fdatasync)" : "buffered");
     if (gpu_only) {
         std::printf("  cpu baseline: disabled (--gpu_only)\n");
     } else {

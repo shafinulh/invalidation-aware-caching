@@ -1,5 +1,6 @@
 Generating 4 dummy SSTs, target file size 8388608 bytes, entries_per_sst=15800
   distribution=zipf  alpha=0.00  user_key_space=20000000
+  storage IO=direct (O_DIRECT + fdatasync)
   dataset_shafin_V512/sst_0000.sst  size=8388781 bytes  blocks=255  kv=15800
   dataset_shafin_V512/sst_0001.sst  size=8388643 bytes  blocks=255  kv=15800
   dataset_shafin_V512/sst_0002.sst  size=8388791 bytes  blocks=255  kv=15800

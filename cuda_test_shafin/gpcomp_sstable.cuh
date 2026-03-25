@@ -6,10 +6,13 @@
 #include <cerrno>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <dirent.h>
+#include <fcntl.h>
 #include <string>
 #include <sys/stat.h>
+#include <unistd.h>
 #include <vector>
 
 struct __attribute__((packed)) FilterBlockHeader {
@@ -85,6 +88,133 @@ struct SerializedSSTHostSet {
         return total;
     }
 };
+
+static constexpr size_t GP_DIRECT_IO_ALIGNMENT = 4096;
+static constexpr uint64_t GP_DIRECT_IO_TRAILER_MAGIC = 0x4750444954524149ULL; /* "GPDITRAI" */
+
+struct __attribute__((packed)) DirectIoTrailer {
+    uint64_t magic;
+    uint64_t logical_size;
+};
+
+static inline bool gpcomp_direct_io_enabled()
+{
+    const char* value = std::getenv("GPCOMP_DIRECT_IO");
+    if (!value || value[0] == '\0') return true;
+    return std::strcmp(value, "0") != 0
+        && std::strcmp(value, "false") != 0
+        && std::strcmp(value, "FALSE") != 0;
+}
+
+static inline size_t gp_align_up(size_t value, size_t alignment)
+{
+    return ((value + alignment - 1) / alignment) * alignment;
+}
+
+static inline void strip_direct_io_trailer_if_present(std::vector<uint8_t>& bytes,
+                                                      const std::string&    path)
+{
+    if (bytes.size() < sizeof(DirectIoTrailer)) return;
+
+    DirectIoTrailer trailer{};
+    std::memcpy(&trailer,
+                bytes.data() + bytes.size() - sizeof(DirectIoTrailer),
+                sizeof(DirectIoTrailer));
+    if (trailer.magic != GP_DIRECT_IO_TRAILER_MAGIC) return;
+
+    gp_fail_if(trailer.logical_size > bytes.size() - sizeof(DirectIoTrailer),
+               "Corrupt direct-I/O trailer in '" + path + "'");
+    bytes.resize((size_t)trailer.logical_size);
+}
+
+static inline void write_binary_file_direct(const std::string& path, const uint8_t* bytes, size_t size)
+{
+    const size_t physical_size = gp_align_up(size + sizeof(DirectIoTrailer), GP_DIRECT_IO_ALIGNMENT);
+    void* aligned_buf = nullptr;
+    gp_fail_if(posix_memalign(&aligned_buf, GP_DIRECT_IO_ALIGNMENT, physical_size) != 0,
+               "Failed to allocate aligned direct-I/O buffer for '" + path + "'");
+    std::memset(aligned_buf, 0, physical_size);
+    if (size > 0) {
+        std::memcpy(aligned_buf, bytes, size);
+    }
+
+    DirectIoTrailer trailer{};
+    trailer.magic = GP_DIRECT_IO_TRAILER_MAGIC;
+    trailer.logical_size = (uint64_t)size;
+    std::memcpy((uint8_t*)aligned_buf + physical_size - sizeof(DirectIoTrailer),
+                &trailer,
+                sizeof(DirectIoTrailer));
+
+    int fd = open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_DIRECT, 0644);
+    if (fd < 0) {
+        std::free(aligned_buf);
+        gp_fail_if(true, "Failed to open '" + path + "' for direct write: " + std::string(std::strerror(errno)));
+    }
+
+    size_t written_total = 0;
+    while (written_total < physical_size) {
+        ssize_t written = write(fd,
+                                (const uint8_t*)aligned_buf + written_total,
+                                physical_size - written_total);
+        if (written < 0) {
+            int saved_errno = errno;
+            close(fd);
+            std::free(aligned_buf);
+            gp_fail_if(true, "Direct write failed for '" + path + "': " + std::string(std::strerror(saved_errno)));
+        }
+        written_total += (size_t)written;
+    }
+
+    if (fdatasync(fd) != 0) {
+        int saved_errno = errno;
+        close(fd);
+        std::free(aligned_buf);
+        gp_fail_if(true, "fdatasync failed for '" + path + "': " + std::string(std::strerror(saved_errno)));
+    }
+    close(fd);
+    std::free(aligned_buf);
+}
+
+static inline std::vector<uint8_t> read_binary_file_direct(const std::string& path)
+{
+    struct stat st{};
+    gp_fail_if(stat(path.c_str(), &st) != 0, "Failed to stat '" + path + "'");
+    gp_fail_if(st.st_size < (off_t)sizeof(DirectIoTrailer),
+               "Direct-I/O file too small to contain trailer: '" + path + "'");
+    gp_fail_if((size_t)st.st_size % GP_DIRECT_IO_ALIGNMENT != 0,
+               "Direct-I/O file size is not aligned; regenerate '" + path + "' with direct-I/O-enabled datagen");
+
+    const size_t physical_size = (size_t)st.st_size;
+    void* aligned_buf = nullptr;
+    gp_fail_if(posix_memalign(&aligned_buf, GP_DIRECT_IO_ALIGNMENT, physical_size) != 0,
+               "Failed to allocate aligned direct-I/O read buffer for '" + path + "'");
+
+    int fd = open(path.c_str(), O_RDONLY | O_DIRECT);
+    if (fd < 0) {
+        std::free(aligned_buf);
+        gp_fail_if(true, "Failed to open '" + path + "' for direct read: " + std::string(std::strerror(errno)));
+    }
+
+    size_t read_total = 0;
+    while (read_total < physical_size) {
+        ssize_t read_now = read(fd, (uint8_t*)aligned_buf + read_total, physical_size - read_total);
+        if (read_now < 0) {
+            int saved_errno = errno;
+            close(fd);
+            std::free(aligned_buf);
+            gp_fail_if(true, "Direct read failed for '" + path + "': " + std::string(std::strerror(saved_errno)));
+        }
+        gp_fail_if(read_now == 0, "Unexpected EOF during direct read of '" + path + "'");
+        read_total += (size_t)read_now;
+    }
+
+    close(fd);
+    std::vector<uint8_t> bytes(physical_size);
+    std::memcpy(bytes.data(), aligned_buf, physical_size);
+    std::free(aligned_buf);
+    strip_direct_io_trailer_if_present(bytes, path);
+    return bytes;
+}
 
 static inline std::vector<uint8_t> build_cpu_filter_bytes(const std::vector<KVPair>& kv_array,
                                                           const std::vector<DataBlockPlanEntry>& plans,
@@ -738,6 +868,10 @@ static inline ParsedSST parse_sst_bytes(std::vector<uint8_t> bytes)
 
 static inline void write_binary_file(const std::string& path, const std::vector<uint8_t>& bytes)
 {
+    if (gpcomp_direct_io_enabled()) {
+        write_binary_file_direct(path, bytes.data(), bytes.size());
+        return;
+    }
     FILE* f = std::fopen(path.c_str(), "wb");
     gp_fail_if(!f, "Failed to open '" + path + "' for writing");
     size_t written = std::fwrite(bytes.data(), 1, bytes.size(), f);
@@ -747,6 +881,10 @@ static inline void write_binary_file(const std::string& path, const std::vector<
 
 static inline void write_binary_file_span(const std::string& path, const uint8_t* bytes, size_t size)
 {
+    if (gpcomp_direct_io_enabled()) {
+        write_binary_file_direct(path, bytes, size);
+        return;
+    }
     FILE* f = std::fopen(path.c_str(), "wb");
     gp_fail_if(!f, "Failed to open '" + path + "' for writing");
     size_t written = size == 0 ? 0 : std::fwrite(bytes, 1, size, f);
@@ -756,6 +894,9 @@ static inline void write_binary_file_span(const std::string& path, const uint8_t
 
 static inline std::vector<uint8_t> read_binary_file(const std::string& path)
 {
+    if (gpcomp_direct_io_enabled()) {
+        return read_binary_file_direct(path);
+    }
     FILE* f = std::fopen(path.c_str(), "rb");
     gp_fail_if(!f, "Failed to open '" + path + "' for reading");
     std::fseek(f, 0, SEEK_END);
@@ -766,6 +907,7 @@ static inline std::vector<uint8_t> read_binary_file(const std::string& path)
     size_t read = std::fread(bytes.data(), 1, bytes.size(), f);
     std::fclose(f);
     gp_fail_if(read != bytes.size(), "Short read from '" + path + "'");
+    strip_direct_io_trailer_if_present(bytes, path);
     return bytes;
 }
 

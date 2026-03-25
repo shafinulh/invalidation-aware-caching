@@ -1,0 +1,33 @@
+Overall compaction pattern frequencies
+====================================
+
+L0->L1: count=180, avg wall=54.4 ms, avg cpu=87.9 ms, avg input=34.3 MiB, avg output=34.2 MiB
+
+Most frequent per-run pattern slices
+================================
+
+sst=8MB input=32MB value=32B sub=1 L0->L1: count=5, avg wall=183.4 ms, avg input=37.9 MiB, avg actual subcomp=1.0
+sst=8MB input=32MB value=32B sub=2 L0->L1: count=5, avg wall=101.3 ms, avg input=37.9 MiB, avg actual subcomp=2.0
+sst=8MB input=32MB value=32B sub=4 L0->L1: count=5, avg wall=62.5 ms, avg input=37.9 MiB, avg actual subcomp=4.0
+sst=8MB input=32MB value=32B sub=8 L0->L1: count=5, avg wall=69.2 ms, avg input=37.9 MiB, avg actual subcomp=5.0
+sst=8MB input=32MB value=32B sub=16 L0->L1: count=5, avg wall=68.5 ms, avg input=37.9 MiB, avg actual subcomp=5.0
+sst=8MB input=32MB value=32B sub=32 L0->L1: count=5, avg wall=70.1 ms, avg input=37.9 MiB, avg actual subcomp=5.0
+sst=8MB input=32MB value=64B sub=1 L0->L1: count=5, avg wall=126.2 ms, avg input=35.5 MiB, avg actual subcomp=1.0
+sst=8MB input=32MB value=64B sub=2 L0->L1: count=5, avg wall=73.1 ms, avg input=35.5 MiB, avg actual subcomp=2.0
+sst=8MB input=32MB value=64B sub=4 L0->L1: count=5, avg wall=48.0 ms, avg input=35.5 MiB, avg actual subcomp=4.0
+sst=8MB input=32MB value=64B sub=8 L0->L1: count=5, avg wall=55.7 ms, avg input=35.5 MiB, avg actual subcomp=5.0
+sst=8MB input=32MB value=64B sub=16 L0->L1: count=5, avg wall=61.8 ms, avg input=35.5 MiB, avg actual subcomp=5.0
+sst=8MB input=32MB value=64B sub=32 L0->L1: count=5, avg wall=63.6 ms, avg input=35.5 MiB, avg actual subcomp=5.0
+sst=8MB input=32MB value=128B sub=1 L0->L1: count=5, avg wall=90.7 ms, avg input=34.2 MiB, avg actual subcomp=1.0
+sst=8MB input=32MB value=128B sub=2 L0->L1: count=5, avg wall=52.9 ms, avg input=34.2 MiB, avg actual subcomp=2.0
+sst=8MB input=32MB value=128B sub=4 L0->L1: count=5, avg wall=35.4 ms, avg input=34.2 MiB, avg actual subcomp=4.0
+sst=8MB input=32MB value=128B sub=8 L0->L1: count=5, avg wall=46.8 ms, avg input=34.2 MiB, avg actual subcomp=5.0
+sst=8MB input=32MB value=128B sub=16 L0->L1: count=5, avg wall=45.8 ms, avg input=34.2 MiB, avg actual subcomp=5.0
+sst=8MB input=32MB value=128B sub=32 L0->L1: count=5, avg wall=39.3 ms, avg input=34.2 MiB, avg actual subcomp=5.0
+sst=8MB input=32MB value=256B sub=1 L0->L1: count=5, avg wall=67.1 ms, avg input=33.2 MiB, avg actual subcomp=1.0
+sst=8MB input=32MB value=256B sub=2 L0->L1: count=5, avg wall=41.8 ms, avg input=33.2 MiB, avg actual subcomp=2.0
+sst=8MB input=32MB value=256B sub=4 L0->L1: count=5, avg wall=30.3 ms, avg input=33.2 MiB, avg actual subcomp=4.0
+sst=8MB input=32MB value=256B sub=8 L0->L1: count=5, avg wall=41.0 ms, avg input=33.2 MiB, avg actual subcomp=5.0
+sst=8MB input=32MB value=256B sub=16 L0->L1: count=5, avg wall=39.6 ms, avg input=33.2 MiB, avg actual subcomp=5.0
+sst=8MB input=32MB value=256B sub=32 L0->L1: count=5, avg wall=35.1 ms, avg input=33.2 MiB, avg actual subcomp=5.0
+sst=8MB input=32MB value=512B sub=1 L0->L1: count=5, avg wall=56.1 ms, avg input=32.6 MiB, avg actual subcomp=1.0

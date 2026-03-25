@@ -28,6 +28,9 @@ from parse_compaction_profile import events_to_dataframe, parse_compaction_event
 BENCHMARK_LINE_RE = re.compile(
     r"^\s*(compact(?:all|0|1))\s*:\s*([\d.]+)\s+micros/op\s+(\d+)\s+ops/sec\s+([\d.]+)\s+seconds\s+(\d+)\s+operations(?:;(.*))?$"
 )
+COMPACTION_TIMES_RE = re.compile(
+    r"^rocksdb\.compaction\.times\.micros .* COUNT : (\d+) SUM : ([\d.]+)$"
+)
 
 
 def parse_env_file(path: Path) -> dict[str, str]:
@@ -41,6 +44,15 @@ def parse_env_file(path: Path) -> dict[str, str]:
     return result
 
 
+def parse_optional_int(raw_value: str | None, default: int = 0) -> int:
+    if raw_value is None:
+        return default
+    raw_value = raw_value.strip()
+    if not raw_value:
+        return default
+    return int(raw_value)
+
+
 def parse_benchmark_elapsed(log_path: Path) -> tuple[float | None, str | None]:
     benchmark_name = None
     elapsed_s = None
@@ -51,6 +63,18 @@ def parse_benchmark_elapsed(log_path: Path) -> tuple[float | None, str | None]:
         benchmark_name = match.group(1)
         elapsed_s = float(match.group(4))
     return elapsed_s, benchmark_name
+
+
+def parse_compaction_time_micros(log_path: Path) -> tuple[float | None, int]:
+    compaction_sum_micros = None
+    compaction_count = 0
+    for line in log_path.read_text(encoding="utf-8", errors="replace").splitlines():
+        match = COMPACTION_TIMES_RE.match(line.strip())
+        if not match:
+            continue
+        compaction_count = int(match.group(1))
+        compaction_sum_micros = float(match.group(2))
+    return compaction_sum_micros, compaction_count
 
 
 def compaction_pattern(df: pd.DataFrame) -> pd.Series:
@@ -151,6 +175,52 @@ def format_throughput(value: float, unit: str) -> str:
     return f"{value:.1f} MiB/s"
 
 
+def input_case_label(input_data_mb: int | float, requested_input_sst_count: int | float) -> str:
+    if int(requested_input_sst_count) > 0:
+        return f"{int(requested_input_sst_count)} SSTs ({int(input_data_mb)}MB)"
+    return f"{int(input_data_mb)}MB"
+
+
+def input_tag(input_data_mb: int | float, requested_input_sst_count: int | float) -> str:
+    if int(requested_input_sst_count) > 0:
+        return f"{int(requested_input_sst_count)}sst"
+    return f"{int(input_data_mb)}MB"
+
+
+def heatmap_input_axis(data: pd.DataFrame) -> tuple[str, list[int], str]:
+    if "requested_input_sst_count" in data.columns:
+        requested_counts = pd.to_numeric(
+            data["requested_input_sst_count"], errors="coerce"
+        ).fillna(0)
+        positive_counts = sorted({int(value) for value in requested_counts if int(value) > 0})
+        if positive_counts:
+            return "requested_input_sst_count", positive_counts, "Input SST Count"
+    input_sizes = sorted({int(value) for value in data["input_data_mb"].unique()})
+    return "input_data_mb", input_sizes, "Input Data Size (MB)"
+
+
+BASELINE_CASE_COLUMNS = [
+    "sst_size_mb",
+    "input_data_mb",
+    "requested_input_sst_count",
+    "input_path_component",
+    "value_size",
+]
+
+SUMMARY_GROUP_COLUMNS = [
+    "benchmark",
+    "parsed_benchmark_name",
+    "sst_size_mb",
+    "input_data_mb",
+    "requested_input_sst_count",
+    "input_path_component",
+    "value_size",
+    "key_size",
+    "requested_subcompactions",
+    "requested_bg_threads",
+]
+
+
 def parse_run(run_dir: Path) -> tuple[dict[str, object], dict[str, pd.DataFrame]]:
     metadata_path = run_dir / "metadata" / "compaction_parallelism.env"
     if not metadata_path.exists():
@@ -161,7 +231,11 @@ def parse_run(run_dir: Path) -> tuple[dict[str, object], dict[str, pd.DataFrame]
     key_size = int(meta["KEY_SIZE"])
     input_data_mb = int(meta["INPUT_DATA_MB"])
     sst_size_mb = int(meta["SST_SIZE_MB"])
+    requested_input_sst_count = parse_optional_int(meta.get("REQUESTED_INPUT_SST_COUNT"))
+    input_path_component = meta.get("INPUT_PATH_COMPONENT", f"input_{input_data_mb}MB")
     requested_subcompactions = int(meta["REQUESTED_SUBCOMPACTIONS"])
+    compaction_runs = parse_optional_int(meta.get("COMPACTION_RUNS"), 1)
+    repeat_index = parse_optional_int(meta.get("COMPACTION_REPEAT_INDEX"), 1)
     target_logical_input_bytes = int(meta["TARGET_LOGICAL_INPUT_BYTES"])
     load_entries = int(meta["LOAD_ENTRIES"])
 
@@ -198,8 +272,10 @@ def parse_run(run_dir: Path) -> tuple[dict[str, object], dict[str, pd.DataFrame]
         comp_df["read_io_ms"] = comp_df["read_io_us"] / 1000.0
         comp_df["write_io_ms"] = comp_df["write_io_us"] / 1000.0
 
-    benchmark_elapsed_s, parsed_benchmark_name = parse_benchmark_elapsed(
-        run_dir / "compact.log"
+    compact_log_path = run_dir / "compact.log"
+    benchmark_elapsed_s, parsed_benchmark_name = parse_benchmark_elapsed(compact_log_path)
+    compaction_time_micros, compaction_time_count = parse_compaction_time_micros(
+        compact_log_path
     )
 
     host_summary = read_json(run_dir / "host_metrics" / "summary.json")
@@ -238,15 +314,20 @@ def parse_run(run_dir: Path) -> tuple[dict[str, object], dict[str, pd.DataFrame]
 
     elapsed_source = "benchmark_log"
     if benchmark_elapsed_s is None or benchmark_elapsed_s <= 0:
-        if not device_df.empty:
-            benchmark_elapsed_s = float(device_df["secs_elapsed"].max())
-            elapsed_source = "host_metrics"
-        elif total_wall_s > 0:
+        if total_wall_s > 0:
             benchmark_elapsed_s = total_wall_s
             elapsed_source = "compaction_wall_sum"
+        elif not device_df.empty:
+            benchmark_elapsed_s = float(device_df["secs_elapsed"].max())
+            elapsed_source = "host_metrics"
         else:
             benchmark_elapsed_s = 0.0
             elapsed_source = "missing"
+
+    compaction_time_source = "rocksdb.compaction.times.micros"
+    if compaction_time_micros is None or compaction_time_micros <= 0:
+        compaction_time_micros = benchmark_elapsed_s * 1e6
+        compaction_time_source = "benchmark_elapsed_fallback"
 
     avg_role_cpu = host_summary.get("avg_thread_role_cpu_pct", {})
     max_role_cpu = host_summary.get("max_thread_role_cpu_pct", {})
@@ -265,11 +346,18 @@ def parse_run(run_dir: Path) -> tuple[dict[str, object], dict[str, pd.DataFrame]
         "parsed_benchmark_name": parsed_benchmark_name or meta["COMPACTION_BENCH"],
         "elapsed_source": elapsed_source,
         "benchmark_elapsed_s": benchmark_elapsed_s,
+        "compaction_time_source": compaction_time_source,
+        "compaction_time_micros": compaction_time_micros,
+        "compaction_time_count": compaction_time_count,
         "sst_size_mb": sst_size_mb,
         "input_data_mb": input_data_mb,
+        "requested_input_sst_count": requested_input_sst_count,
+        "input_path_component": input_path_component,
         "value_size": value_size,
         "key_size": key_size,
         "requested_subcompactions": requested_subcompactions,
+        "compaction_runs": compaction_runs,
+        "repeat_index": repeat_index,
         "requested_bg_threads": int(meta["COMPACTION_BG_THREADS"]),
         "preload_entries": load_entries,
         "target_logical_input_bytes": target_logical_input_bytes,
@@ -326,37 +414,46 @@ def parse_run(run_dir: Path) -> tuple[dict[str, object], dict[str, pd.DataFrame]
     if total_wall_s > 0:
         metrics["dominant_breakdown"] = dominant_component(pd.Series(metrics))
 
-    label = (
-        f"sst={sst_size_mb}MB, input={input_data_mb}MB, "
-        f"value={value_size}B, sub={requested_subcompactions}"
-    )
+    input_label = f"{input_data_mb}MB"
+    if requested_input_sst_count > 0:
+        input_label = f"{requested_input_sst_count}sst ({input_data_mb}MB)"
+
+    label = f"sst={sst_size_mb}MB, input={input_label}, value={value_size}B, sub={requested_subcompactions}"
 
     if not comp_df.empty:
         comp_df = comp_df.copy()
         comp_df["label"] = label
         comp_df["sst_size_mb"] = sst_size_mb
         comp_df["input_data_mb"] = input_data_mb
+        comp_df["requested_input_sst_count"] = requested_input_sst_count
         comp_df["value_size"] = value_size
         comp_df["requested_subcompactions"] = requested_subcompactions
+        comp_df["repeat_index"] = repeat_index
 
     if not device_df.empty:
         device_df = device_df.copy()
         device_df["sst_size_mb"] = sst_size_mb
         device_df["input_data_mb"] = input_data_mb
+        device_df["requested_input_sst_count"] = requested_input_sst_count
         device_df["value_size"] = value_size
         device_df["requested_subcompactions"] = requested_subcompactions
+        device_df["repeat_index"] = repeat_index
     if not process_df.empty:
         process_df = process_df.copy()
         process_df["sst_size_mb"] = sst_size_mb
         process_df["input_data_mb"] = input_data_mb
+        process_df["requested_input_sst_count"] = requested_input_sst_count
         process_df["value_size"] = value_size
         process_df["requested_subcompactions"] = requested_subcompactions
+        process_df["repeat_index"] = repeat_index
     if not role_pivot.empty:
         role_pivot = role_pivot.copy()
         role_pivot["sst_size_mb"] = sst_size_mb
         role_pivot["input_data_mb"] = input_data_mb
+        role_pivot["requested_input_sst_count"] = requested_input_sst_count
         role_pivot["value_size"] = value_size
         role_pivot["requested_subcompactions"] = requested_subcompactions
+        role_pivot["repeat_index"] = repeat_index
 
     return metrics, {
         "compactions": comp_df,
@@ -370,14 +467,18 @@ def best_run_per_configuration(summary_df: pd.DataFrame, throughput_column: str)
     ordered = summary_df.sort_values(
         [
             "sst_size_mb",
+            "requested_input_sst_count",
             "input_data_mb",
             "value_size",
             throughput_column,
             "requested_subcompactions",
         ],
-        ascending=[True, True, True, False, True],
+        ascending=[True, True, True, True, False, True],
     )
-    best = ordered.groupby(["sst_size_mb", "input_data_mb", "value_size"], as_index=False).first()
+    best = ordered.groupby(
+        ["sst_size_mb", "requested_input_sst_count", "input_data_mb", "value_size"],
+        as_index=False,
+    ).first()
     best = best.rename(columns={"requested_subcompactions": "best_subcompactions"})
     return best
 
@@ -386,12 +487,13 @@ def add_speedup_columns(summary_df: pd.DataFrame) -> pd.DataFrame:
     df = summary_df.copy()
     baseline = (
         df[df["requested_subcompactions"] == 1]
-        .set_index(["sst_size_mb", "input_data_mb", "value_size"])[
+        .set_index(BASELINE_CASE_COLUMNS)[
             [
                 "logical_input_throughput_mib_per_sec",
                 "input_throughput_mib_per_sec",
                 "logical_input_throughput_records_per_sec",
                 "logical_input_throughput_mrecords_per_sec",
+                "compaction_time_micros",
             ]
         ]
         .rename(
@@ -400,16 +502,103 @@ def add_speedup_columns(summary_df: pd.DataFrame) -> pd.DataFrame:
                 "input_throughput_mib_per_sec": "baseline_input_throughput_mib_per_sec",
                 "logical_input_throughput_records_per_sec": "baseline_logical_input_throughput_records_per_sec",
                 "logical_input_throughput_mrecords_per_sec": "baseline_logical_input_throughput_mrecords_per_sec",
+                "compaction_time_micros": "baseline_compaction_time_micros",
             }
         )
     )
-    df = df.join(baseline, on=["sst_size_mb", "input_data_mb", "value_size"])
+    baseline_std = (
+        df[df["requested_subcompactions"] == 1]
+        .set_index(BASELINE_CASE_COLUMNS)[["compaction_time_micros_std"]]
+        .rename(columns={"compaction_time_micros_std": "baseline_compaction_time_micros_std"})
+    )
+    df = df.join(baseline, on=BASELINE_CASE_COLUMNS)
+    df = df.join(baseline_std, on=BASELINE_CASE_COLUMNS)
     df["speedup_vs_subcomp1"] = (
-        df["logical_input_throughput_records_per_sec"]
-        / df["baseline_logical_input_throughput_records_per_sec"]
+        df["baseline_compaction_time_micros"] / df["compaction_time_micros"]
+    )
+    df.loc[df["requested_subcompactions"] == 1, "speedup_vs_subcomp1"] = 1.0
+    df["speedup_vs_subcomp1_std"] = 0.0
+    valid_speedup_mask = (
+        df["requested_subcompactions"].ne(1)
+        & (df["baseline_compaction_time_micros"] > 0)
+        & (df["compaction_time_micros"] > 0)
+    )
+    df.loc[valid_speedup_mask, "speedup_vs_subcomp1_std"] = (
+        df.loc[valid_speedup_mask, "speedup_vs_subcomp1"]
+        * (
+            (
+                df.loc[valid_speedup_mask, "baseline_compaction_time_micros_std"]
+                / df.loc[valid_speedup_mask, "baseline_compaction_time_micros"]
+            )
+            ** 2
+            + (
+                df.loc[valid_speedup_mask, "compaction_time_micros_std"]
+                / df.loc[valid_speedup_mask, "compaction_time_micros"]
+            )
+            ** 2
+        ).pow(0.5)
     )
     df["efficiency_vs_subcomp1"] = df["speedup_vs_subcomp1"] / df["requested_subcompactions"]
     return df
+
+
+def aggregate_repeated_runs(run_df: pd.DataFrame) -> pd.DataFrame:
+    grouped = run_df.groupby(SUMMARY_GROUP_COLUMNS, dropna=False)
+
+    numeric_columns = [
+        column
+        for column in run_df.columns
+        if pd.api.types.is_numeric_dtype(run_df[column])
+        and column not in SUMMARY_GROUP_COLUMNS
+        and column != "repeat_index"
+    ]
+
+    passthrough_columns = [
+        "elapsed_source",
+        "compaction_time_source",
+        "run_dir",
+    ]
+    summary_df = grouped.size().reset_index(name="num_repeats")
+
+    numeric_mean_df = grouped[numeric_columns].mean().reset_index()
+    numeric_std_df = grouped[numeric_columns].agg(
+        lambda values: float(values.std(ddof=0)) if len(values) else 0.0
+    ).reset_index()
+    numeric_std_df = numeric_std_df.rename(
+        columns={column: f"{column}_std" for column in numeric_columns}
+    )
+
+    summary_df = summary_df.merge(numeric_mean_df, on=SUMMARY_GROUP_COLUMNS, how="left")
+    summary_df = summary_df.merge(numeric_std_df, on=SUMMARY_GROUP_COLUMNS, how="left")
+
+    available_passthrough_columns = [
+        column
+        for column in passthrough_columns
+        if column in run_df.columns and column not in SUMMARY_GROUP_COLUMNS
+    ]
+    if available_passthrough_columns:
+        passthrough_df = grouped[available_passthrough_columns].first().reset_index()
+        summary_df = summary_df.merge(
+            passthrough_df,
+            on=SUMMARY_GROUP_COLUMNS,
+            how="left",
+        )
+
+    summary_df["dominant_breakdown"] = summary_df.apply(
+        lambda row: "none"
+        if float(row["total_compaction_wall_s"]) <= 0
+        else dominant_component(pd.Series(row)),
+        axis=1,
+    )
+    return summary_df.sort_values(
+        [
+            "sst_size_mb",
+            "requested_input_sst_count",
+            "input_data_mb",
+            "value_size",
+            "requested_subcompactions",
+        ]
+    ).reset_index(drop=True)
 
 
 def save_value_size_lines(
@@ -449,13 +638,21 @@ def save_value_size_lines(
 
 def save_breakdown_bars(summary_df: pd.DataFrame, out_dir: Path) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
+    for stale_path in out_dir.glob("*.png"):
+        stale_path.unlink()
     colors = {
             "compute_pct": "#fb8072",
             "read_pct": "#1bb7b3",
             "write_pct": "#4666d5",
         }
-    for (sst_size_mb, input_data_mb, requested_subcompactions), group in summary_df.groupby(
-        ["sst_size_mb", "input_data_mb", "requested_subcompactions"]
+    baseline_df = summary_df[summary_df["requested_subcompactions"] == 1].copy()
+    for (
+        sst_size_mb,
+        requested_input_sst_count,
+        input_data_mb,
+        requested_subcompactions,
+    ), group in baseline_df.groupby(
+        ["sst_size_mb", "requested_input_sst_count", "input_data_mb", "requested_subcompactions"]
     ):
         ordered = group.sort_values("value_size")
         x = range(len(ordered))
@@ -475,8 +672,10 @@ def save_breakdown_bars(summary_df: pd.DataFrame, out_dir: Path) -> None:
             color=colors["write_pct"],
             label="Write",
         )
+        input_label = input_case_label(input_data_mb, requested_input_sst_count)
+        file_tag = input_tag(input_data_mb, requested_input_sst_count)
         ax.set_title(
-            f"Normalized Compaction Time Breakdown\nSST={sst_size_mb}MB, Input={input_data_mb}MB, Sub={requested_subcompactions}",
+            f"Normalized Compaction Time Breakdown\nSST={sst_size_mb}MB, Input={input_label}, Sub={requested_subcompactions}",
             pad=26,
         )
         ax.set_xlabel("Value Size (Bytes)")
@@ -494,7 +693,7 @@ def save_breakdown_bars(summary_df: pd.DataFrame, out_dir: Path) -> None:
         fig.tight_layout(rect=(0, 0, 1, 0.88))
         fig.savefig(
             out_dir
-            / f"breakdown_sst_{sst_size_mb}MB_input_{input_data_mb}MB_sub_{requested_subcompactions}.png",
+            / f"breakdown_sst_{sst_size_mb}MB_input_{file_tag}_sub_{requested_subcompactions}.png",
             dpi=170,
         )
         plt.close(fig)
@@ -691,16 +890,16 @@ def save_heatmap(
     colorbar_label: str,
     output_path: Path,
 ) -> None:
-    inputs = sorted(data["input_data_mb"].unique())
+    input_column, inputs, input_axis_label = heatmap_input_axis(data)
     values = sorted(data["value_size"].unique())
     matrix = []
     annotations = []
-    for input_data_mb in inputs:
+    for input_value in inputs:
         row = []
         ann_row = []
         for value_size in values:
             row_df = data[
-                (data["input_data_mb"] == input_data_mb) & (data["value_size"] == value_size)
+                (data[input_column] == input_value) & (data["value_size"] == value_size)
             ]
             if row_df.empty:
                 row.append(float("nan"))
@@ -719,7 +918,7 @@ def save_heatmap(
     ax.set_yticks(range(len(inputs)))
     ax.set_yticklabels([str(v) for v in inputs])
     ax.set_xlabel("Value Size (Bytes)")
-    ax.set_ylabel("Input Data Size (MB)")
+    ax.set_ylabel(input_axis_label)
     ax.set_title(title)
     cbar = fig.colorbar(image, ax=ax)
     cbar.set_label(colorbar_label)
@@ -743,6 +942,8 @@ def save_best_run_overviews(
     throughput_title_label: str,
 ) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
+    for stale_path in out_dir.glob("*.png"):
+        stale_path.unlink()
     for sst_size_mb, group in best_df.groupby("sst_size_mb"):
         save_heatmap(
             group,
@@ -763,54 +964,87 @@ def save_best_run_overviews(
             out_dir / f"best_speedup_sst_{sst_size_mb}MB.png",
         )
 
-        fig, axes = plt.subplots(1, 3, figsize=(18, max(5, len(group['input_data_mb'].unique()) * 0.85)))
-        for ax, column, label in zip(
-            axes,
-            ["compute_pct", "read_pct", "write_pct"],
-            ["Computation %", "Read %", "Write %"],
+
+def write_cpu_compaction_time_summary(summary_df: pd.DataFrame, experiment_root: Path) -> None:
+    per_run_log_dir = experiment_root / "per_run_logs"
+    per_run_log_dir.mkdir(parents=True, exist_ok=True)
+
+    export_columns = [
+        "sst_size_mb",
+        "input_data_mb",
+        "requested_input_sst_count",
+        "input_path_component",
+        "value_size",
+        "requested_subcompactions",
+        "num_repeats",
+        "compaction_time_micros",
+        "compaction_time_micros_std",
+        "speedup_vs_subcomp1",
+        "speedup_vs_subcomp1_std",
+    ]
+    export_df = summary_df[export_columns].copy()
+    export_df["compaction_time_variance_micros2"] = (
+        export_df["compaction_time_micros_std"] ** 2
+    )
+    export_df.to_csv(per_run_log_dir / "cpu_compaction_time_summary.csv", index=False)
+
+    lines: list[str] = []
+    for (
+        sst_size_mb,
+        input_data_mb,
+        requested_input_sst_count,
+        value_size,
+    ), group in summary_df.groupby(
+        ["sst_size_mb", "input_data_mb", "requested_input_sst_count", "value_size"],
+        dropna=False,
+    ):
+        input_label = f"{int(input_data_mb)}MB"
+        if int(requested_input_sst_count) > 0:
+            input_label = f"{int(requested_input_sst_count)}sst ({int(input_data_mb)}MB)"
+        lines.append(
+            f"sst={int(sst_size_mb)}MB input={input_label} value={int(value_size)}B"
+        )
+
+        baseline = group[group["requested_subcompactions"] == 1]
+        if baseline.empty:
+            lines.append("  missing sub=1 baseline")
+            lines.append("")
+            continue
+        baseline_row = baseline.iloc[0]
+        baseline_variance = float(baseline_row["compaction_time_micros_std"]) ** 2
+        lines.append(
+            "  single-threaded: "
+            f"mean={float(baseline_row['compaction_time_micros']):.0f} micros, "
+            f"stddev={float(baseline_row['compaction_time_micros_std']):.0f} micros, "
+            f"variance={baseline_variance:.0f} micros^2, "
+            f"repeats={int(baseline_row['num_repeats'])}"
+        )
+
+        for row in (
+            group[group["requested_subcompactions"] != 1]
+            .sort_values("requested_subcompactions")
+            .itertuples(index=False)
         ):
-            inputs = sorted(group["input_data_mb"].unique())
-            values = sorted(group["value_size"].unique())
-            matrix = []
-            for input_data_mb in inputs:
-                row = []
-                for value_size in values:
-                    row_df = group[
-                        (group["input_data_mb"] == input_data_mb)
-                        & (group["value_size"] == value_size)
-                    ]
-                    row.append(float(row_df.iloc[0][column]) if not row_df.empty else float("nan"))
-                matrix.append(row)
-            image = ax.imshow(matrix, aspect="auto", cmap="magma", vmin=0, vmax=100)
-            ax.set_xticks(range(len(values)))
-            ax.set_xticklabels([str(v) for v in values])
-            ax.set_yticks(range(len(inputs)))
-            ax.set_yticklabels([str(v) for v in inputs])
-            ax.set_xlabel("Value Size (Bytes)")
-            ax.set_ylabel("Input Data Size (MB)")
-            ax.set_title(label)
-            for row_idx, input_data_mb in enumerate(inputs):
-                for col_idx, value_size in enumerate(values):
-                    row_df = group[
-                        (group["input_data_mb"] == input_data_mb)
-                        & (group["value_size"] == value_size)
-                    ]
-                    if row_df.empty:
-                        continue
-                    ax.text(
-                        col_idx,
-                        row_idx,
-                        f"{row_df.iloc[0][column]:.0f}",
-                        ha="center",
-                        va="center",
-                        color="white",
-                        fontsize=8,
-                    )
-            fig.colorbar(image, ax=ax, fraction=0.046, pad=0.04)
-        fig.suptitle(f"Best-Run Time Breakdown\nSST={sst_size_mb}MB", y=1.02)
-        fig.tight_layout()
-        fig.savefig(out_dir / f"best_breakdown_sst_{sst_size_mb}MB.png", dpi=180)
-        plt.close(fig)
+            variance = float(row.compaction_time_micros_std) ** 2
+            lines.append(
+                "  multithreaded "
+                f"sub={int(row.requested_subcompactions)}: "
+                f"mean={float(row.compaction_time_micros):.0f} micros, "
+                f"stddev={float(row.compaction_time_micros_std):.0f} micros, "
+                f"variance={variance:.0f} micros^2, "
+                f"speedup_vs_sub1={float(row.speedup_vs_subcomp1):.2f}x +/- "
+                f"{float(getattr(row, 'speedup_vs_subcomp1_std', 0.0) or 0.0):.2f}x, "
+                f"repeats={int(row.num_repeats)}"
+            )
+        lines.append("")
+
+    summary_text = "\n".join(lines).strip()
+    if summary_text:
+        summary_text += "\n"
+    (per_run_log_dir / "cpu_compaction_time_summary.txt").write_text(
+        summary_text,
+        encoding="utf-8",
+    )
 
 
 def build_patterns_outputs(compaction_df: pd.DataFrame, analysis_dir: Path) -> None:
@@ -895,6 +1129,7 @@ def heuristic_gpu_candidates(best_df: pd.DataFrame) -> pd.DataFrame:
 
 
 def build_summary_text(
+    raw_run_count: int,
     summary_df: pd.DataFrame,
     best_df: pd.DataFrame,
     throughput_column: str,
@@ -904,8 +1139,8 @@ def build_summary_text(
 ) -> str:
     lines: list[str] = []
     lines.append(
-        f"Analyzed {len(summary_df)} compaction runs across {len(best_df)} unique "
-        f"(SST size, input size, value size) configurations."
+        f"Analyzed {raw_run_count} compaction runs aggregated into {len(summary_df)} subcompaction rows "
+        f"across {len(best_df)} unique (SST size, input size, value size) configurations."
     )
     lines.append("")
 
@@ -914,10 +1149,12 @@ def build_summary_text(
     lines.append("")
     for row in best_df.nlargest(10, throughput_column).itertuples(index=False):
         speedup = 1.0 if math.isnan(row.speedup_vs_subcomp1) else row.speedup_vs_subcomp1
+        speedup_std = getattr(row, "speedup_vs_subcomp1_std", 0.0) or 0.0
         lines.append(
             f"sst={row.sst_size_mb}MB input={row.input_data_mb}MB value={row.value_size}B: "
             f"{format_throughput(getattr(row, throughput_column), throughput_unit)} at sub={int(row.best_subcompactions)} "
-            f"(speedup {speedup:.2f}x, compute/read/write {row.compute_pct:.0f}/{row.read_pct:.0f}/{row.write_pct:.0f}%, "
+            f"(speedup {speedup:.2f}x +/- {speedup_std:.2f}x, repeats={int(getattr(row, 'num_repeats', 1))}, "
+            f"compute/read/write {row.compute_pct:.0f}/{row.read_pct:.0f}/{row.write_pct:.0f}%, "
             f"cpu resource {row.cpu_resource_pct:.0f}% of wall)"
         )
     lines.append("")
@@ -928,9 +1165,10 @@ def build_summary_text(
     ranked_speedups = best_df.copy()
     ranked_speedups["speedup_vs_subcomp1"] = ranked_speedups["speedup_vs_subcomp1"].fillna(1.0)
     for row in ranked_speedups.nlargest(10, "speedup_vs_subcomp1").itertuples(index=False):
+        speedup_std = getattr(row, "speedup_vs_subcomp1_std", 0.0) or 0.0
         lines.append(
             f"sst={row.sst_size_mb}MB input={row.input_data_mb}MB value={row.value_size}B: "
-            f"{row.speedup_vs_subcomp1:.2f}x at sub={int(row.best_subcompactions)} "
+            f"{row.speedup_vs_subcomp1:.2f}x +/- {speedup_std:.2f}x at sub={int(row.best_subcompactions)} "
             f"(baseline sub=1 -> {format_throughput(getattr(row, baseline_column), throughput_unit)}, "
             f"best -> {format_throughput(getattr(row, throughput_column), throughput_unit)})"
         )
@@ -1010,7 +1248,8 @@ def main() -> int:
     throughput_cfg = throughput_view(args.throughput_unit)
 
     run_dirs = sorted(
-        p for p in experiment_root.rglob("subcomp_*") if (p / "metadata" / "compaction_parallelism.env").exists()
+        metadata_path.parent.parent
+        for metadata_path in experiment_root.rglob("compaction_parallelism.env")
     )
     if not run_dirs:
         raise SystemExit(f"no compaction_parallelism runs found under {experiment_root}")
@@ -1033,18 +1272,28 @@ def main() -> int:
         if not frames["roles"].empty:
             role_frames.append(frames["roles"])
 
-    summary_df = pd.DataFrame(metrics_rows).sort_values(
-        ["sst_size_mb", "input_data_mb", "value_size", "requested_subcompactions"]
+    run_summary_df = pd.DataFrame(metrics_rows).sort_values(
+        [
+            "sst_size_mb",
+            "requested_input_sst_count",
+            "input_data_mb",
+            "value_size",
+            "requested_subcompactions",
+            "repeat_index",
+        ]
     )
+    summary_df = aggregate_repeated_runs(run_summary_df)
     summary_df = add_speedup_columns(summary_df)
     best_df = best_run_per_configuration(summary_df, throughput_cfg["column"])
 
     analysis_dir = experiment_root / "analysis"
     analysis_dir.mkdir(parents=True, exist_ok=True)
 
+    run_summary_df.to_csv(analysis_dir / "summary_runs.csv", index=False)
     summary_df.to_csv(analysis_dir / "summary_metrics.csv", index=False)
     best_df.to_csv(analysis_dir / "best_runs.csv", index=False)
     heuristic_gpu_candidates(best_df).to_csv(analysis_dir / "gpu_candidate_runs.csv", index=False)
+    write_cpu_compaction_time_summary(summary_df, experiment_root)
 
     if compaction_frames:
         compaction_df = pd.concat(compaction_frames, ignore_index=True)
@@ -1095,6 +1344,7 @@ def main() -> int:
     )
 
     summary_text = build_summary_text(
+        len(run_summary_df),
         summary_df,
         best_df,
         throughput_cfg["column"],

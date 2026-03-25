@@ -1,6 +1,7 @@
-Generating 4 dummy SSTs, target file size 8388608 bytes, entries_per_sst=171559
-  distribution=zipf  alpha=0.00  user_key_space=20000000
-  dataset_shafin_V32/sst_0000.sst  size=8388645 bytes  blocks=249  kv=171559
-  dataset_shafin_V32/sst_0001.sst  size=8388819 bytes  blocks=249  kv=171559
-  dataset_shafin_V32/sst_0002.sst  size=8388801 bytes  blocks=249  kv=171559
-  dataset_shafin_V32/sst_0003.sst  size=8388249 bytes  blocks=249  kv=171559
+Generating 4 dummy SSTs, target file size 8388608 bytes, entries_per_sst=171471
+  distribution=zipf  alpha=0.00  user_key_space=200000000
+  storage IO=direct (O_DIRECT + fdatasync)
+  dataset_shafin_V32/sst_0000.sst  size=8388583 bytes  blocks=249  kv=171471
+  dataset_shafin_V32/sst_0001.sst  size=8388591 bytes  blocks=249  kv=171471
+  dataset_shafin_V32/sst_0002.sst  size=8388655 bytes  blocks=249  kv=171471
+  dataset_shafin_V32/sst_0003.sst  size=8388597 bytes  blocks=249  kv=171471

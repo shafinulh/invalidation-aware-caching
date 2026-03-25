@@ -24,18 +24,21 @@ source "${SCRIPT_DIR}/benchmark_common.sh"
 PRELOAD_READY_FILENAME=".preload_ready"
 
 PRELOAD_DIR_NAME="${PRELOAD_DIR_NAME:-compaction_parallelism_preload}"
-INPUT_DATA_MB_LIST="${INPUT_DATA_MB_LIST:-32 64 128 256 512 1024 2048}"
+INPUT_DATA_MB_LIST="${INPUT_DATA_MB_LIST:-}"
+INPUT_SST_COUNT_LIST="${INPUT_SST_COUNT_LIST:-}"
 SST_SIZE_MB_LIST="${SST_SIZE_MB_LIST:-8 16 32 64}"
 COMPACTION_BENCH="${COMPACTION_BENCH:-compactall}"
 PRELOAD_THREADS="${PRELOAD_THREADS:-${THREADS}}"
 PRELOAD_KEYSPACE_MULTIPLIER="${PRELOAD_KEYSPACE_MULTIPLIER:-20}"
 PRELOAD_MIN_NUM_KEYS="${PRELOAD_MIN_NUM_KEYS:-200000000}"
 COMPACTION_BG_THREADS="${COMPACTION_BG_THREADS:-1}"
+COMPACTION_RUNS="${COMPACTION_RUNS:-1}"
+PRESERVE_COMPACTION_OUTPUTS="${PRESERVE_COMPACTION_OUTPUTS:-0}"
 DB_BENCH_EXTRA_FLAGS="${DB_BENCH_EXTRA_FLAGS:-}"
 LOAD_DB_BENCH_EXTRA_FLAGS="${LOAD_DB_BENCH_EXTRA_FLAGS:-${DB_BENCH_EXTRA_FLAGS}}"
 COMPACTION_DB_BENCH_EXTRA_FLAGS="${COMPACTION_DB_BENCH_EXTRA_FLAGS:-${DB_BENCH_EXTRA_FLAGS}}"
 
-LOAD_PERF_LEVEL="${LOAD_PERF_LEVEL:-0}"
+LOAD_PERF_LEVEL="${LOAD_PERF_LEVEL:-1}"
 LOAD_METRICS_INTERVAL_MS="${LOAD_METRICS_INTERVAL_MS:-0}"
 LOAD_HOST_METRICS_INTERVAL_SEC="${LOAD_HOST_METRICS_INTERVAL_SEC:-0}"
 LOAD_THREAD_STATUS_PER_INTERVAL="${LOAD_THREAD_STATUS_PER_INTERVAL:-0}"
@@ -64,6 +67,15 @@ if [[ -z "${PRELOAD_DIR_NAME}" || "${PRELOAD_DIR_NAME}" == "." || "${PRELOAD_DIR
   exit 1
 fi
 
+if [[ -n "${INPUT_SST_COUNT_LIST}" && -n "${INPUT_DATA_MB_LIST}" ]]; then
+  echo "error: set either INPUT_SST_COUNT_LIST or INPUT_DATA_MB_LIST, not both" >&2
+  exit 1
+fi
+
+if [[ -z "${INPUT_SST_COUNT_LIST}" && -z "${INPUT_DATA_MB_LIST}" ]]; then
+  INPUT_DATA_MB_LIST="32 64 128 256 512 1024 2048"
+fi
+
 ceil_div() {
   local numerator="$1"
   local denominator="$2"
@@ -83,6 +95,38 @@ split_flag_string() {
 compute_target_bytes() {
   local input_data_mb="$1"
   printf "%s\n" "$(( input_data_mb * 1024 * 1024 ))"
+}
+
+repeat_dir_name() {
+  local repeat_index="$1"
+  printf "repeat_%02d\n" "${repeat_index}"
+}
+
+emit_input_specs() {
+  local sst_size_mb="$1"
+
+  if [[ -n "${INPUT_SST_COUNT_LIST}" ]]; then
+    local input_sst_count
+    local input_data_mb
+    for input_sst_count in ${INPUT_SST_COUNT_LIST}; do
+      if [[ ! "${input_sst_count}" =~ ^[0-9]+$ ]] || (( input_sst_count <= 0 )); then
+        echo "error: INPUT_SST_COUNT_LIST must contain positive integers (got: ${input_sst_count})" >&2
+        exit 1
+      fi
+      input_data_mb=$(( input_sst_count * sst_size_mb ))
+      printf "%s|%s|input_%ssst\n" "${input_data_mb}" "${input_sst_count}" "${input_sst_count}"
+    done
+    return 0
+  fi
+
+  local input_data_mb
+  for input_data_mb in ${INPUT_DATA_MB_LIST}; do
+    if [[ ! "${input_data_mb}" =~ ^[0-9]+$ ]] || (( input_data_mb <= 0 )); then
+      echo "error: INPUT_DATA_MB_LIST must contain positive integers (got: ${input_data_mb})" >&2
+      exit 1
+    fi
+    printf "%s|0|input_%sMB\n" "${input_data_mb}" "${input_data_mb}"
+  done
 }
 
 compute_load_entries() {
@@ -226,13 +270,19 @@ run_with_host_metrics_interval() {
   local host_interval_value="$1"
   shift
   local previous_host_interval="${HOST_METRICS_INTERVAL_SEC}"
+  local cmd_rc=0
   HOST_METRICS_INTERVAL_SEC="${host_interval_value}"
-  "$@"
+  if "$@"; then
+    cmd_rc=0
+  else
+    cmd_rc=$?
+  fi
   HOST_METRICS_INTERVAL_SEC="${previous_host_interval}"
+  return "${cmd_rc}"
 }
 
 EXPERIMENT_ROOT="${OUTPUT_DIR}/compaction_parallelism/${RUN_ID}"
-mkdir -p "${EXPERIMENT_ROOT}/metadata"
+mkdir -p "${EXPERIMENT_ROOT}/metadata" "${EXPERIMENT_ROOT}/per_run_logs"
 load_db_bench_extra_flags=()
 compaction_db_bench_extra_flags=()
 split_flag_string "${LOAD_DB_BENCH_EXTRA_FLAGS}" load_db_bench_extra_flags
@@ -242,6 +292,10 @@ write_kv_metadata "${EXPERIMENT_ROOT}/metadata/experiment.env" \
   RUN_ID "${RUN_ID}" \
   COMPACTION_BENCH "${COMPACTION_BENCH}" \
   KEY_SIZE "${KEY_SIZE}" \
+  INPUT_DATA_MB_LIST "${INPUT_DATA_MB_LIST}" \
+  INPUT_SST_COUNT_LIST "${INPUT_SST_COUNT_LIST}" \
+  COMPACTION_RUNS "${COMPACTION_RUNS}" \
+  PRESERVE_COMPACTION_OUTPUTS "${PRESERVE_COMPACTION_OUTPUTS}" \
   PRELOAD_THREADS "${PRELOAD_THREADS}" \
   PRELOAD_KEYSPACE_MULTIPLIER "${PRELOAD_KEYSPACE_MULTIPLIER}" \
   PRELOAD_MIN_NUM_KEYS "${PRELOAD_MIN_NUM_KEYS}" \
@@ -257,13 +311,14 @@ write_kv_metadata "${EXPERIMENT_ROOT}/metadata/experiment.env" \
 
 total_runs=0
 for _sst_size_mb in ${SST_SIZE_MB_LIST}; do
-  for _input_data_mb in ${INPUT_DATA_MB_LIST}; do
+  while IFS='|' read -r _input_data_mb _requested_input_sst_count _input_path_component; do
+    [[ -n "${_input_data_mb}" ]] || continue
     for _value_size in ${VALUE_SIZES}; do
       for _subcomp_threads in ${SUBCOMP_THREADS_LIST}; do
-        total_runs=$((total_runs + 1))
+        total_runs=$((total_runs + COMPACTION_RUNS))
       done
     done
-  done
+  done < <(emit_input_specs "${_sst_size_mb}")
 done
 
 run_index=0
@@ -296,22 +351,27 @@ for sst_size_mb in ${SST_SIZE_MB_LIST}; do
     "${max_bytes_for_level_base_bytes}" \
     compact_common_flags
 
-  for input_data_mb in ${INPUT_DATA_MB_LIST}; do
+  while IFS='|' read -r input_data_mb requested_input_sst_count input_path_component; do
+    [[ -n "${input_data_mb}" ]] || continue
     target_logical_bytes="$(compute_target_bytes "${input_data_mb}")"
+    input_desc="${input_data_mb}MB"
+    if (( requested_input_sst_count > 0 )); then
+      input_desc="${requested_input_sst_count}sst (${input_data_mb}MB)"
+    fi
 
     for value_size in ${VALUE_SIZES}; do
       load_entries="$(compute_load_entries "${input_data_mb}" "${value_size}")"
       num_keys="$(compute_num_keys "${load_entries}")"
 
-      preload_run_dir="${OUTPUT_DIR}/${PRELOAD_DIR_NAME}/sst_${sst_size_mb}MB/input_${input_data_mb}MB/value_${value_size}/${RUN_ID}"
-      preload_db_dir="${DB_BASE_DIR}/${PRELOAD_DIR_NAME}/sst_${sst_size_mb}MB/input_${input_data_mb}MB/value_${value_size}"
-      preload_wal_dir="${WAL_BASE_DIR}/${PRELOAD_DIR_NAME}/sst_${sst_size_mb}MB/input_${input_data_mb}MB/value_${value_size}"
+      preload_run_dir="${OUTPUT_DIR}/${PRELOAD_DIR_NAME}/sst_${sst_size_mb}MB/${input_path_component}/value_${value_size}/${RUN_ID}"
+      preload_db_dir="${DB_BASE_DIR}/${PRELOAD_DIR_NAME}/sst_${sst_size_mb}MB/${input_path_component}/value_${value_size}"
+      preload_wal_dir="${WAL_BASE_DIR}/${PRELOAD_DIR_NAME}/sst_${sst_size_mb}MB/${input_path_component}/value_${value_size}"
       preload_ready_file="${preload_db_dir}/${PRELOAD_READY_FILENAME}"
 
       if [[ ! -f "${preload_ready_file}" ]]; then
         if [[ "${RUN_QUIET}" != "1" ]]; then
           echo "================================================================"
-          echo "  Building preload: sst=${sst_size_mb}MB input=${input_data_mb}MB value=${value_size}B"
+          echo "  Building preload: sst=${sst_size_mb}MB input=${input_desc} value=${value_size}B"
           echo "  Preload writes: ${load_entries}  num_keys: ${num_keys}"
           echo "================================================================"
         fi
@@ -322,6 +382,8 @@ for sst_size_mb in ${SST_SIZE_MB_LIST}; do
         write_kv_metadata "${preload_run_dir}/metadata/preload.env" \
           SST_SIZE_MB "${sst_size_mb}" \
           INPUT_DATA_MB "${input_data_mb}" \
+          REQUESTED_INPUT_SST_COUNT "${requested_input_sst_count}" \
+          INPUT_PATH_COMPONENT "${input_path_component}" \
           TARGET_LOGICAL_INPUT_BYTES "${target_logical_bytes}" \
           KEY_SIZE "${KEY_SIZE}" \
           VALUE_SIZE "${value_size}" \
@@ -368,98 +430,125 @@ for sst_size_mb in ${SST_SIZE_MB_LIST}; do
       preload_db_bytes="$(dir_size_bytes "${preload_db_dir}")"
 
       for subcomp_threads in ${SUBCOMP_THREADS_LIST}; do
-        run_index=$((run_index + 1))
+        run_dir_base="${EXPERIMENT_ROOT}/sst_${sst_size_mb}MB/${input_path_component}/value_${value_size}/subcomp_${subcomp_threads}"
+        db_dir_base="${DB_BASE_DIR}/compaction_parallelism/${RUN_ID}/sst_${sst_size_mb}MB/${input_path_component}/value_${value_size}/subcomp_${subcomp_threads}"
+        wal_dir_base="${WAL_BASE_DIR}/compaction_parallelism/${RUN_ID}/sst_${sst_size_mb}MB/${input_path_component}/value_${value_size}/subcomp_${subcomp_threads}"
 
-        RUN_DIR="${EXPERIMENT_ROOT}/sst_${sst_size_mb}MB/input_${input_data_mb}MB/value_${value_size}/subcomp_${subcomp_threads}"
-        DB_DIR="${DB_BASE_DIR}/compaction_parallelism/${RUN_ID}/sst_${sst_size_mb}MB/input_${input_data_mb}MB/value_${value_size}/subcomp_${subcomp_threads}"
-        WAL_DIR="${WAL_BASE_DIR}/compaction_parallelism/${RUN_ID}/sst_${sst_size_mb}MB/input_${input_data_mb}MB/value_${value_size}/subcomp_${subcomp_threads}"
+        for (( repeat_index=1; repeat_index<=COMPACTION_RUNS; repeat_index++ )); do
+          run_index=$((run_index + 1))
 
-        cleanup_db_wal_dirs "${DB_DIR}" "${WAL_DIR}"
-        mkdir -p "${RUN_DIR}" "${DB_DIR}" "${WAL_DIR}"
-        write_run_config "${RUN_DIR}" "run_compaction_parallelism.sh"
-        write_kv_metadata "${RUN_DIR}/metadata/compaction_parallelism.env" \
-          SST_SIZE_MB "${sst_size_mb}" \
-          INPUT_DATA_MB "${input_data_mb}" \
-          TARGET_LOGICAL_INPUT_BYTES "${target_logical_bytes}" \
-          KEY_SIZE "${KEY_SIZE}" \
-          VALUE_SIZE "${value_size}" \
-          LOAD_ENTRIES "${load_entries}" \
-          NUM_KEYS "${num_keys}" \
-          REQUESTED_SUBCOMPACTIONS "${subcomp_threads}" \
-          COMPACTION_BG_THREADS "${COMPACTION_BG_THREADS}" \
-          COMPACTION_BENCH "${COMPACTION_BENCH}" \
-          WRITE_BUFFER_SIZE_BYTES "${write_buffer_size_bytes}" \
-          TARGET_FILE_SIZE_BASE_BYTES "${target_file_size_bytes}" \
-          MAX_BYTES_FOR_LEVEL_BASE_BYTES "${max_bytes_for_level_base_bytes}" \
-          PRELOAD_SST_COUNT "${preload_sst_count}" \
-          PRELOAD_SST_BYTES "${preload_sst_bytes}" \
-          PRELOAD_DB_BYTES "${preload_db_bytes}" \
-          PRELOAD_DB_DIR "${preload_db_dir}" \
-          PRELOAD_RUN_DIR "${preload_run_dir}" \
-          COMPACTION_PERF_LEVEL "${COMPACTION_PERF_LEVEL}" \
-          COMPACTION_METRICS_INTERVAL_MS "${COMPACTION_METRICS_INTERVAL_MS}" \
-          COMPACTION_HOST_METRICS_INTERVAL_SEC "${COMPACTION_HOST_METRICS_INTERVAL_SEC}"
-
-        copy_tree_contents "${preload_db_dir}" "${DB_DIR}"
-        if [[ -d "${preload_wal_dir}" ]]; then
-          copy_tree_contents "${preload_wal_dir}" "${WAL_DIR}"
-        fi
-
-        copy_latest_rocksdb_options "${DB_DIR}" "${RUN_DIR}" "before_compact"
-
-        metrics_file_flag=()
-        if [[ "${COMPACTION_METRICS_INTERVAL_MS}" != "0" ]]; then
-          metrics_file_flag=(--metrics_file="${RUN_DIR}/metrics.csv")
-        fi
-
-        if [[ "${RUN_QUIET}" != "1" ]]; then
-          echo "================================================================"
-          echo "  Manual compaction: sst=${sst_size_mb}MB input=${input_data_mb}MB value=${value_size}B subcomp=${subcomp_threads}"
-          echo "  RUN_DIR: ${RUN_DIR}"
-          echo "================================================================"
-        fi
-
-        run_with_host_metrics_interval "${COMPACTION_HOST_METRICS_INTERVAL_SEC}" \
-          run_db_bench "${RUN_DIR}/compact.log" \
-            --benchmarks="${COMPACTION_BENCH},stats" \
-            --disable_auto_compactions=0 \
-            --num="${num_keys}" \
-            --value_size="${value_size}" \
-            --db="${DB_DIR}" \
-            --wal_dir="${WAL_DIR}" \
-            --report_file="${RUN_DIR}/compact_report.csv" \
-            --use_existing_db=1 \
-            --subcompactions="${subcomp_threads}" \
-            --max_background_compactions="${COMPACTION_BG_THREADS}" \
-            "${metrics_file_flag[@]}" \
-            "${compaction_db_bench_extra_flags[@]}" \
-            "${compact_common_flags[@]}"
-
-        if [[ "${COMPACTION_BENCH}" == "compact0" || "${COMPACTION_BENCH}" == "compact1" ]]; then
-          if rg -q "found no data beyond L[0-9]+|found 0 files to compact" "${RUN_DIR}/compact.log"; then
-            echo "error: ${COMPACTION_BENCH} was a no-op for ${RUN_DIR}" >&2
-            echo "hint: db_bench ${COMPACTION_BENCH} requires an existing lower level to compact into." >&2
-            echo "hint: use COMPACTION_BENCH=compactall for the pure L0 preload flow implemented by this experiment." >&2
-            exit 1
+          RUN_DIR="${run_dir_base}"
+          DB_DIR="${db_dir_base}"
+          WAL_DIR="${wal_dir_base}"
+          if (( COMPACTION_RUNS > 1 )); then
+            repeat_component="$(repeat_dir_name "${repeat_index}")"
+            RUN_DIR="${run_dir_base}/${repeat_component}"
+            DB_DIR="${db_dir_base}/${repeat_component}"
+            WAL_DIR="${wal_dir_base}/${repeat_component}"
           fi
-        fi
 
-        copy_latest_rocksdb_options "${DB_DIR}" "${RUN_DIR}" "after_compact"
-        copy_rocksdb_log_file "${DB_DIR}" "${RUN_DIR}" "after_compact"
+          cleanup_db_wal_dirs "${DB_DIR}" "${WAL_DIR}"
+          mkdir -p "${RUN_DIR}" "${DB_DIR}" "${WAL_DIR}"
+          write_run_config "${RUN_DIR}" "run_compaction_parallelism.sh"
+          write_kv_metadata "${RUN_DIR}/metadata/compaction_parallelism.env" \
+            SST_SIZE_MB "${sst_size_mb}" \
+            INPUT_DATA_MB "${input_data_mb}" \
+            REQUESTED_INPUT_SST_COUNT "${requested_input_sst_count}" \
+            INPUT_PATH_COMPONENT "${input_path_component}" \
+            TARGET_LOGICAL_INPUT_BYTES "${target_logical_bytes}" \
+            KEY_SIZE "${KEY_SIZE}" \
+            VALUE_SIZE "${value_size}" \
+            LOAD_ENTRIES "${load_entries}" \
+            NUM_KEYS "${num_keys}" \
+            REQUESTED_SUBCOMPACTIONS "${subcomp_threads}" \
+            COMPACTION_BG_THREADS "${COMPACTION_BG_THREADS}" \
+            COMPACTION_BENCH "${COMPACTION_BENCH}" \
+            COMPACTION_RUNS "${COMPACTION_RUNS}" \
+            COMPACTION_REPEAT_INDEX "${repeat_index}" \
+            PRESERVE_COMPACTION_OUTPUTS "${PRESERVE_COMPACTION_OUTPUTS}" \
+            WRITE_BUFFER_SIZE_BYTES "${write_buffer_size_bytes}" \
+            TARGET_FILE_SIZE_BASE_BYTES "${target_file_size_bytes}" \
+            MAX_BYTES_FOR_LEVEL_BASE_BYTES "${max_bytes_for_level_base_bytes}" \
+            PRELOAD_SST_COUNT "${preload_sst_count}" \
+            PRELOAD_SST_BYTES "${preload_sst_bytes}" \
+            PRELOAD_DB_BYTES "${preload_db_bytes}" \
+            PRELOAD_DB_DIR "${preload_db_dir}" \
+            PRELOAD_RUN_DIR "${preload_run_dir}" \
+            COMPACTION_PERF_LEVEL "${COMPACTION_PERF_LEVEL}" \
+            COMPACTION_METRICS_INTERVAL_MS "${COMPACTION_METRICS_INTERVAL_MS}" \
+            COMPACTION_HOST_METRICS_INTERVAL_SEC "${COMPACTION_HOST_METRICS_INTERVAL_SEC}"
 
-        post_compact_sst_count="$(sst_file_count "${DB_DIR}")"
-        post_compact_sst_bytes="$(sst_size_bytes "${DB_DIR}")"
-        post_compact_db_bytes="$(dir_size_bytes "${DB_DIR}")"
-        write_kv_metadata "${RUN_DIR}/metadata/post_compact.env" \
-          POST_COMPACT_SST_COUNT "${post_compact_sst_count}" \
-          POST_COMPACT_SST_BYTES "${post_compact_sst_bytes}" \
-          POST_COMPACT_DB_BYTES "${post_compact_db_bytes}"
+          copy_tree_contents "${preload_db_dir}" "${DB_DIR}"
+          if [[ -d "${preload_wal_dir}" ]]; then
+            copy_tree_contents "${preload_wal_dir}" "${WAL_DIR}"
+          fi
 
-        cleanup_db_wal_dirs "${DB_DIR}" "${WAL_DIR}"
-        pause_between_runs_if_needed "${run_index}" "${total_runs}"
+          copy_latest_rocksdb_options "${DB_DIR}" "${RUN_DIR}" "before_compact"
+
+          metrics_file_flag=()
+          if [[ "${COMPACTION_METRICS_INTERVAL_MS}" != "0" ]]; then
+            metrics_file_flag=(--metrics_file="${RUN_DIR}/metrics.csv")
+          fi
+
+          if [[ "${RUN_QUIET}" != "1" ]]; then
+            echo "================================================================"
+            echo "  Manual compaction: sst=${sst_size_mb}MB input=${input_desc} value=${value_size}B subcomp=${subcomp_threads} repeat=${repeat_index}/${COMPACTION_RUNS}"
+            echo "  RUN_DIR: ${RUN_DIR}"
+            echo "================================================================"
+          fi
+
+          run_with_host_metrics_interval "${COMPACTION_HOST_METRICS_INTERVAL_SEC}" \
+            run_db_bench "${RUN_DIR}/compact.log" \
+              --benchmarks="${COMPACTION_BENCH},stats" \
+              --disable_auto_compactions=0 \
+              --num="${num_keys}" \
+              --value_size="${value_size}" \
+              --db="${DB_DIR}" \
+              --wal_dir="${WAL_DIR}" \
+              --report_file="${RUN_DIR}/compact_report.csv" \
+              --use_existing_db=1 \
+              --subcompactions="${subcomp_threads}" \
+              --max_background_compactions="${COMPACTION_BG_THREADS}" \
+              "${metrics_file_flag[@]}" \
+              "${compaction_db_bench_extra_flags[@]}" \
+              "${compact_common_flags[@]}"
+
+          if [[ "${COMPACTION_BENCH}" == "compact0" || "${COMPACTION_BENCH}" == "compact1" ]]; then
+            if grep -Eq "found no data beyond L[0-9]+|found 0 files to compact" "${RUN_DIR}/compact.log"; then
+              echo "error: ${COMPACTION_BENCH} was a no-op for ${RUN_DIR}" >&2
+              echo "hint: db_bench ${COMPACTION_BENCH} requires an existing lower level to compact into." >&2
+              echo "hint: use COMPACTION_BENCH=compactall for the pure L0 preload flow implemented by this experiment." >&2
+              exit 1
+            fi
+          fi
+
+          copy_latest_rocksdb_options "${DB_DIR}" "${RUN_DIR}" "after_compact"
+          copy_rocksdb_log_file "${DB_DIR}" "${RUN_DIR}" "after_compact"
+
+          post_compact_sst_count="$(sst_file_count "${DB_DIR}")"
+          post_compact_sst_bytes="$(sst_size_bytes "${DB_DIR}")"
+          post_compact_db_bytes="$(dir_size_bytes "${DB_DIR}")"
+          write_kv_metadata "${RUN_DIR}/metadata/post_compact.env" \
+            POST_COMPACT_SST_COUNT "${post_compact_sst_count}" \
+            POST_COMPACT_SST_BYTES "${post_compact_sst_bytes}" \
+            POST_COMPACT_DB_BYTES "${post_compact_db_bytes}"
+
+          if [[ "${PRESERVE_COMPACTION_OUTPUTS}" == "1" ]]; then
+            rm -rf "${RUN_DIR}/rocksdb_output"
+            mkdir -p "${RUN_DIR}/rocksdb_output"
+            mv "${DB_DIR}" "${RUN_DIR}/rocksdb_output/db"
+            if [[ -d "${WAL_DIR}" ]]; then
+              mv "${WAL_DIR}" "${RUN_DIR}/rocksdb_output/wal"
+            fi
+          else
+            cleanup_db_wal_dirs "${DB_DIR}" "${WAL_DIR}"
+          fi
+
+          pause_between_runs_if_needed "${run_index}" "${total_runs}"
+        done
       done
     done
-  done
+  done < <(emit_input_specs "${sst_size_mb}")
 done
 
 echo ""

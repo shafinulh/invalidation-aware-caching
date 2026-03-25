@@ -73,6 +73,8 @@ int main(int argc, char** argv)
                 GP_NUM_INPUT_SSTS, GP_TARGET_FILE_BYTES, entries_per_sst);
     std::printf("  distribution=zipf  alpha=%.2f  user_key_space=%llu\n",
                 config.zipf_alpha, (unsigned long long)user_key_space);
+    std::printf("  storage IO=%s\n",
+                gpcomp_direct_io_enabled() ? "direct (O_DIRECT + fdatasync)" : "buffered");
 
     FILE* meta = std::fopen((out_dir + "/dataset.meta").c_str(), "w");
     gp_fail_if(!meta, "failed to open dataset.meta");

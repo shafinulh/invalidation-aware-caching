@@ -137,11 +137,36 @@ Current defaults in `run_sweep.sh`:
 - user key space `20000000`
 - modes `q_paper_with_plan q_paper_without_plan c_paper_with_plan c_paper_without_plan`
 
-The plots currently generated are:
+For the normal sweep, the plots currently generated are:
 
 - throughput
-- CPU utilization
-- SSD read/write bandwidth
+
+GPU-only sweep with sampled host CPU and block-device metrics:
+
+```bash
+bash run_sweep.sh --gpu_only --num_ssts 32 --values "32 64 128 256 512 1024" --runs 5
+```
+
+All sweeps now use direct IO for SST reads and writes by default.
+
+For GPU-only sweeps:
+
+- the output folder is tagged with `gpu-only`
+- `gpcomp_bench` runs with `--gpu_only`
+- host CPU and block-device metrics are sampled while each GPU mode runs
+- the extra plots come from sampled host metrics, not the benchmark's printed estimates
+
+The GPU-only plots currently generated are:
+
+- throughput
+- process CPU utilization
+- measured SSD read bandwidth
+- measured SSD write bandwidth
+- measured SSD utilization
+
+Normal CPU-vs-GPU sweeps do not collect host CPU/IO metrics and do not generate the extra CPU/IO figures.
+
+If you explicitly need to disable direct IO for debugging, set `GPCOMP_DIRECT_IO=0` in the environment before running a command.
 
 ## Nsight sweeps
 

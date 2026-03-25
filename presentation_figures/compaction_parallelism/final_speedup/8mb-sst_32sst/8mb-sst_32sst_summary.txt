@@ -1,0 +1,52 @@
+SST size: 8MB
+Requested input SSTs: 32
+
+Best CPU subcompaction speedups vs subcomp=1
+============================================
+
+value=32B: 3.65x +/- 0.20x at subcomp=8
+value=64B: 3.11x +/- 0.16x at subcomp=8
+value=128B: 2.79x +/- 0.01x at subcomp=4
+value=256B: 2.52x +/- 0.03x at subcomp=4
+value=512B: 2.35x +/- 0.05x at subcomp=4
+value=1024B: 1.83x +/- 0.06x at subcomp=4
+
+GPU mode speedups vs synthetic CPU baseline
+===========================================
+
+value=32B:
+  c_no_plan: 3.32x +/- 0.07x
+  c_plan: 3.29x +/- 0.03x
+  q_no_plan: 5.01x +/- 0.09x
+  q_plan: 4.92x +/- 0.08x
+value=64B:
+  c_no_plan: 2.47x +/- 0.05x
+  c_plan: 2.47x +/- 0.07x
+  q_no_plan: 3.77x +/- 0.09x
+  q_plan: 3.77x +/- 0.07x
+value=128B:
+  c_no_plan: 1.84x +/- 0.04x
+  c_plan: 1.85x +/- 0.05x
+  q_no_plan: 2.84x +/- 0.07x
+  q_plan: 2.71x +/- 0.07x
+value=256B:
+  c_no_plan: 1.49x +/- 0.04x
+  c_plan: 1.47x +/- 0.04x
+  q_no_plan: 2.32x +/- 0.10x
+  q_plan: 2.26x +/- 0.08x
+value=512B:
+  c_no_plan: 1.29x +/- 0.05x
+  c_plan: 1.25x +/- 0.09x
+  q_no_plan: 2.03x +/- 0.09x
+  q_plan: 1.97x +/- 0.13x
+value=1024B:
+  c_no_plan: 1.19x +/- 0.06x
+  c_plan: 1.18x +/- 0.06x
+  q_no_plan: 1.85x +/- 0.09x
+  q_plan: 1.87x +/- 0.10x
+
+Normalization note
+==================
+
+CPU bars use RocksDB subcomp=1 as the baseline and show mean +/- stddev over repeated rocksdb.compaction.times.micros measurements.
+GPU bars use the GPComp benchmark's synthetic CPU baseline and show mean speedup derived from CPU/GPU mean wall time.

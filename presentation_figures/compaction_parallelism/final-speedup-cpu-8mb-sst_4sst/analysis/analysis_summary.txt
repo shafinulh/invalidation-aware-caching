@@ -1,0 +1,45 @@
+Analyzed 180 compaction runs aggregated into 36 subcompaction rows across 6 unique (SST size, input size, value size) configurations.
+
+Best absolute compaction throughput
+===================================
+
+sst=8MB input=32MB value=32B: 11.20 million records/s at sub=4 (speedup 2.94x +/- 0.10x, repeats=5, compute/read/write 87/0/13%, cpu resource 260% of wall)
+sst=8MB input=32MB value=64B: 8.75 million records/s at sub=4 (speedup 2.63x +/- 0.09x, repeats=5, compute/read/write 80/0/20%, cpu resource 213% of wall)
+sst=8MB input=32MB value=128B: 6.59 million records/s at sub=4 (speedup 2.56x +/- 0.11x, repeats=5, compute/read/write 73/0/27%, cpu resource 185% of wall)
+sst=8MB input=32MB value=256B: 4.07 million records/s at sub=4 (speedup 2.21x +/- 0.14x, repeats=5, compute/read/write 73/0/27%, cpu resource 138% of wall)
+sst=8MB input=32MB value=512B: 2.41 million records/s at sub=4 (speedup 2.11x +/- 0.24x, repeats=5, compute/read/write 64/0/36%, cpu resource 117% of wall)
+sst=8MB input=32MB value=1024B: 1.30 million records/s at sub=4 (speedup 1.91x +/- 0.25x, repeats=5, compute/read/write 55/0/45%, cpu resource 100% of wall)
+
+Largest speedups over sub=1
+===========================
+
+sst=8MB input=32MB value=32B: 2.94x +/- 0.10x at sub=4 (baseline sub=1 -> 3.81 million records/s, best -> 11.20 million records/s)
+sst=8MB input=32MB value=64B: 2.63x +/- 0.09x at sub=4 (baseline sub=1 -> 3.33 million records/s, best -> 8.75 million records/s)
+sst=8MB input=32MB value=128B: 2.56x +/- 0.11x at sub=4 (baseline sub=1 -> 2.57 million records/s, best -> 6.59 million records/s)
+sst=8MB input=32MB value=256B: 2.21x +/- 0.14x at sub=4 (baseline sub=1 -> 1.84 million records/s, best -> 4.07 million records/s)
+sst=8MB input=32MB value=512B: 2.11x +/- 0.24x at sub=4 (baseline sub=1 -> 1.14 million records/s, best -> 2.41 million records/s)
+sst=8MB input=32MB value=1024B: 1.91x +/- 0.25x at sub=4 (baseline sub=1 -> 0.67 million records/s, best -> 1.30 million records/s)
+
+Dominant time component at the best-subcomp point
+=================================================
+
+computation: 6 configurations
+
+Configurations whose best point stayed at sub=1
+===============================================
+
+None.
+
+Potential GPU-offload candidate slices (heuristic)
+==================================================
+
+Heuristic used: best CPU point still has >=45% compute wall-share, best_subcompactions >= 4, speedup over sub=1 >= 1.15x, and aggregate CPU time >= 100% of wall time.
+
+sst=8MB input=32MB value=32B: best sub=4, speedup=2.94x, throughput=11.20 million records/s, compute/read/write=87/0/13%, cpu resource=260% of wall, avg proc CPU=0.0%, avg device util=0.0%.
+sst=8MB input=32MB value=64B: best sub=4, speedup=2.63x, throughput=8.75 million records/s, compute/read/write=80/0/20%, cpu resource=213% of wall, avg proc CPU=0.0%, avg device util=0.0%.
+sst=8MB input=32MB value=128B: best sub=4, speedup=2.56x, throughput=6.59 million records/s, compute/read/write=73/0/27%, cpu resource=185% of wall, avg proc CPU=0.0%, avg device util=0.0%.
+sst=8MB input=32MB value=256B: best sub=4, speedup=2.21x, throughput=4.07 million records/s, compute/read/write=73/0/27%, cpu resource=138% of wall, avg proc CPU=0.0%, avg device util=0.0%.
+sst=8MB input=32MB value=512B: best sub=4, speedup=2.11x, throughput=2.41 million records/s, compute/read/write=64/0/36%, cpu resource=117% of wall, avg proc CPU=0.0%, avg device util=0.0%.
+sst=8MB input=32MB value=1024B: best sub=4, speedup=1.91x, throughput=1.30 million records/s, compute/read/write=55/0/45%, cpu resource=100% of wall, avg proc CPU=0.0%, avg device util=0.0%.
+
+These candidate labels are an inference from the collected CPU and IO breakdowns, not a direct measurement of GPU benefit.
