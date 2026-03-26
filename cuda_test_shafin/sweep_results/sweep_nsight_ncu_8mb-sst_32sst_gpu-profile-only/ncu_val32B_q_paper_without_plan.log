@@ -1,0 +1,54 @@
+==PROF== Connected to process 12043 (/home/1755_project/invalidation-aware-caching/cuda_test_shafin/gpcomp_bench)
+Q-compaction benchmark
+  input SSTs: 32
+  key bytes: 16  value bytes: 32  restart interval: 4  block size: 32768
+  runs: 1  (profile-only, all runs profiled)
+  gpu mode: q_paper_without_plan
+  profile-only mode: enabled
+  storage IO: direct (O_DIRECT + fdatasync)
+  cpu baseline: disabled (--profile_only)
+  gpu garbage collection: disabled (Q-compaction only)
+
+BENCH_ITERATION_MARKER phase=start index=0 warmup=0 timed=1 runs=1 profile_only=1 gpu_only=1 epoch_ms=1774500602404
+==PROF== Profiling "unpack_kernel" - 0: 0%....50%....100% - 19 passes
+==PROF== Profiling "unpack_kernel" - 1: 0%....50%....100% - 19 passes
+==PROF== Profiling "unpack_kernel" - 2: 0%....50%....100% - 19 passes
+==PROF== Profiling "unpack_kernel" - 3: 0%....50%....100% - 19 passes
+==PROF== Profiling "unpack_kernel" - 4: 0%....50%....100% - 19 passes
+==PROF== Profiling "unpack_kernel" - 5: 0%....50%....100% - 19 passes
+==PROF== Profiling "unpack_kernel" - 6: 0%....50%....100% - 19 passes
+==PROF== Profiling "unpack_kernel" - 7: 0%....50%....100% - 19 passes
+==PROF== Profiling "unpack_kernel" - 8: 0%....50%....100% - 19 passes
+==PROF== Profiling "unpack_kernel" - 9: 0%....50%....100% - 19 passes
+==PROF== Profiling "unpack_kernel" - 10: 0%....50%....100% - 19 passes
+==PROF== Profiling "unpack_kernel" - 11: 0%....50%....100% - 19 passes
+==PROF== Profiling "unpack_kernel" - 12: 0%....50%....100% - 19 passes
+==PROF== Profiling "unpack_kernel" - 13: 0%....50%....100% - 19 passes
+==PROF== Profiling "unpack_kernel" - 14: 0%....50%....100% - 19 passes
+==PROF== Profiling "unpack_kernel" - 15: 0%....50%....100% - 19 passes
+==PROF== Profiling "unpack_kernel" - 16: 0%....50%....100% - 19 passes
+==PROF== Profiling "unpack_kernel" - 17: 0%....50%....100% - 19 passes
+==PROF== Profiling "unpack_kernel" - 18: 0%....50%....100% - 19 passes
+==PROF== Profiling "unpack_kernel" - 19: 0%....50%....100% - 19 passes
+==PROF== Profiling "unpack_kernel" - 20: 0%....50%....100% - 19 passes
+==PROF== Profiling "unpack_kernel" - 21: 0%....50%....100% - 19 passes
+==PROF== Profiling "unpack_kernel" - 22: 0%....50%....100% - 19 passes
+==PROF== Profiling "unpack_kernel" - 23: 0%....50%....100% - 19 passes
+==PROF== Profiling "unpack_kernel" - 24: 0%....50%....100% - 19 passes
+==PROF== Profiling "unpack_kernel" - 25: 0%....50%....100% - 19 passes
+==PROF== Profiling "unpack_kernel" - 26: 0%....50%....100% - 19 passes
+==PROF== Profiling "unpack_kernel" - 27: 0%....50%....100% - 19 passes
+==PROF== Profiling "unpack_kernel" - 28: 0%....50%....100% - 19 passes
+==PROF== Profiling "unpack_kernel" - 29: 0%....50%....100% - 19 passes
+==PROF== Profiling "unpack_kernel" - 30: 0%....50%....100% - 19 passes
+==PROF== Profiling "unpack_kernel" - 31: 0%....50%....100% - 19 passes
+==PROF== Profiling "merge_kernel" - 32: 0%....50%....100% - 19 passes
+==PROF== Profiling "bloom_filter_kernel_batched" - 33: 0%....50%....100% - 19 passes
+==PROF== Profiling "pack_kernel" - 34: 0%....50%....100% - 19 passes
+==PROF== Profiling "gather_largest_keys_kernel" - 35: 0%....50%....100% - 19 passes
+==PROF== Profiling "assemble_sst_blocks_kernel" - 36: 0%....50%....100% - 19 passes
+==PROF== Profiling "write_sst_footers_kernel" - 37: 0%....50%....100% - 19 passes
+BENCH_ITERATION_MARKER phase=end index=0 warmup=0 timed=1 runs=1 profile_only=1 gpu_only=1 epoch_ms=1774500615871
+==PROF== Disconnected from process 12043
+Profile-only GPU compaction complete.
+==PROF== Report: /home/1755_project/invalidation-aware-caching/cuda_test_shafin/./sweep_results/sweep_nsight_ncu_8mb-sst_32sst_gpu-profile-only/profiles/ncu_val32B_q_paper_without_plan.ncu-rep

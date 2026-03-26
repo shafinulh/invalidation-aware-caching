@@ -31,6 +31,10 @@ COLLECT_NSYS="${COLLECT_NSYS:-0}"
 NSYS_BIN="${NSYS_BIN:-}"
 NSYS_CPUCTXSW="${NSYS_CPUCTXSW:-none}"
 NSYS_PROFILE_RUNS="${NSYS_PROFILE_RUNS:-1}"
+NSYS_GPU_METRICS="${NSYS_GPU_METRICS:-0}"
+NSYS_GPU_METRICS_DEVICE="${NSYS_GPU_METRICS_DEVICE:-}"
+NSYS_GPU_METRICS_SET="${NSYS_GPU_METRICS_SET:-}"
+NSYS_GPU_METRICS_FREQUENCY="${NSYS_GPU_METRICS_FREQUENCY:-}"
 COLLECT_NCU="${COLLECT_NCU:-0}"
 NCU_BIN="${NCU_BIN:-ncu}"
 NCU_SET="${NCU_SET:-default}"
@@ -71,6 +75,11 @@ while [[ $# -gt 0 ]]; do
         --nsys_bin) NSYS_BIN="$2"; shift 2 ;;
         --nsys_cpuctxsw|--cpuctxsw) NSYS_CPUCTXSW="$2"; shift 2 ;;
         --nsys_profile_runs) NSYS_PROFILE_RUNS="$2"; shift 2 ;;
+        --nsys_gpu_metrics|--nsys-gpu-metrics) NSYS_GPU_METRICS="1"; shift ;;
+        --no_nsys_gpu_metrics|--no-nsys-gpu-metrics) NSYS_GPU_METRICS="0"; shift ;;
+        --nsys_gpu_metrics_device|--nsys-gpu-metrics-device) NSYS_GPU_METRICS_DEVICE="$2"; shift 2 ;;
+        --nsys_gpu_metrics_set|--nsys-gpu-metrics-set) NSYS_GPU_METRICS_SET="$2"; shift 2 ;;
+        --nsys_gpu_metrics_frequency|--nsys-gpu-metrics-frequency) NSYS_GPU_METRICS_FREQUENCY="$2"; shift 2 ;;
         --collect_ncu) COLLECT_NCU="1"; shift ;;
         --no_collect_ncu) COLLECT_NCU="0"; shift ;;
         --ncu_set) NCU_SET="$2"; shift 2 ;;
@@ -191,6 +200,18 @@ run_nsys_profile() {
     local report_prefix="$1"
     local log_path="$2"
     shift 2
+    local -a nsys_gpu_metrics_args=()
+
+    if [[ "${NSYS_GPU_METRICS}" == "1" ]]; then
+        local metrics_device="${NSYS_GPU_METRICS_DEVICE:-${GPU_ID}}"
+        nsys_gpu_metrics_args+=(--gpu-metrics-device "${metrics_device}")
+        if [[ -n "${NSYS_GPU_METRICS_SET}" ]]; then
+            nsys_gpu_metrics_args+=(--gpu-metrics-set "${NSYS_GPU_METRICS_SET}")
+        fi
+        if [[ -n "${NSYS_GPU_METRICS_FREQUENCY}" ]]; then
+            nsys_gpu_metrics_args+=(--gpu-metrics-frequency "${NSYS_GPU_METRICS_FREQUENCY}")
+        fi
+    fi
 
     set +e
     "${NSYS_BIN}" profile \
@@ -199,6 +220,7 @@ run_nsys_profile() {
         --trace=cuda,osrt,nvtx \
         --sample=none \
         --cpuctxsw="${NSYS_CPUCTXSW}" \
+        "${nsys_gpu_metrics_args[@]}" \
         "${BENCH_BIN}" "$@" > "${log_path}" 2>&1
     local nsys_rc="$?"
     set -e
@@ -293,6 +315,20 @@ if [[ "${COLLECT_NSYS}" == "1" ]]; then
     echo " Nsight Systems binary: ${NSYS_BIN}"
     echo " Nsight Systems cpu context switches: ${NSYS_CPUCTXSW}"
     echo " Nsight Systems benchmark runs: ${NSYS_PROFILE_RUNS}"
+    echo " Nsight Systems GPU metrics: ${NSYS_GPU_METRICS}"
+    if [[ "${NSYS_GPU_METRICS}" == "1" ]]; then
+        echo " Nsight Systems GPU metrics device: ${NSYS_GPU_METRICS_DEVICE:-${GPU_ID}}"
+        if [[ -n "${NSYS_GPU_METRICS_SET}" ]]; then
+            echo " Nsight Systems GPU metrics set: ${NSYS_GPU_METRICS_SET}"
+        else
+            echo " Nsight Systems GPU metrics set: default-for-device"
+        fi
+        if [[ -n "${NSYS_GPU_METRICS_FREQUENCY}" ]]; then
+            echo " Nsight Systems GPU metrics frequency: ${NSYS_GPU_METRICS_FREQUENCY}"
+        else
+            echo " Nsight Systems GPU metrics frequency: nsys-default"
+        fi
+    fi
 fi
 echo " Nsight Compute capture: ${COLLECT_NCU}"
 if [[ "${COLLECT_NCU}" == "1" ]]; then

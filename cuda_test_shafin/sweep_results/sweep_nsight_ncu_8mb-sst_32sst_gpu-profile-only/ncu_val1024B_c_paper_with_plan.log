@@ -1,4 +1,4 @@
-==PROF== Connected to process 6105 (/home/1755_project/invalidation-aware-caching/cuda_test_shafin/gpcomp_bench)
+==PROF== Connected to process 12837 (/home/1755_project/invalidation-aware-caching/cuda_test_shafin/gpcomp_bench)
 C-compaction benchmark
   input SSTs: 32
   key bytes: 16  value bytes: 1024  restart interval: 4  block size: 32768
@@ -9,7 +9,7 @@ C-compaction benchmark
   cpu baseline: disabled (--profile_only)
   gpu garbage collection: enabled (CPU after GPU sort, before GPU SST construction)
 
-BENCH_ITERATION_MARKER phase=start index=0 warmup=0 timed=1 runs=1 profile_only=1 gpu_only=1 epoch_ms=1774498266913
+BENCH_ITERATION_MARKER phase=start index=0 warmup=0 timed=1 runs=1 profile_only=1 gpu_only=1 epoch_ms=1774500733311
 ==PROF== Profiling "unpack_kernel" - 0: 0%....50%....100% - 19 passes
 ==PROF== Profiling "unpack_kernel" - 1: 0%....50%....100% - 19 passes
 ==PROF== Profiling "unpack_kernel" - 2: 0%....50%....100% - 19 passes
@@ -49,7 +49,7 @@ BENCH_ITERATION_MARKER phase=start index=0 warmup=0 timed=1 runs=1 profile_only=
 ==PROF== Profiling "gather_largest_keys_kernel" - 36: 0%....50%....100% - 19 passes
 ==PROF== Profiling "assemble_sst_blocks_kernel" - 37: 0%....50%....100% - 19 passes
 ==PROF== Profiling "write_sst_footers_kernel" - 38: 0%....50%....100% - 19 passes
-BENCH_ITERATION_MARKER phase=end index=0 warmup=0 timed=1 runs=1 profile_only=1 gpu_only=1 epoch_ms=1774498276984
-==PROF== Disconnected from process 6105
+BENCH_ITERATION_MARKER phase=end index=0 warmup=0 timed=1 runs=1 profile_only=1 gpu_only=1 epoch_ms=1774500743449
+==PROF== Disconnected from process 12837
 Profile-only GPU compaction complete.
 ==PROF== Report: /home/1755_project/invalidation-aware-caching/cuda_test_shafin/./sweep_results/sweep_nsight_ncu_8mb-sst_32sst_gpu-profile-only/profiles/ncu_val1024B_c_paper_with_plan.ncu-rep
