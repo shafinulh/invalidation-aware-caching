@@ -1,29 +1,0 @@
-Q-compaction benchmark
-  input SSTs: 32
-  key bytes: 16  value bytes: 1024  restart interval: 4  block size: 32768
-  runs: 5  (profile-only, all runs profiled)
-  gpu mode: q_paper_without_plan
-  profile-only mode: enabled
-  storage IO: direct (O_DIRECT + fdatasync)
-  cpu baseline: disabled (--profile_only)
-  gpu garbage collection: disabled (Q-compaction only)
-
-BENCH_ITERATION_MARKER phase=start index=0 warmup=0 timed=1 runs=5 profile_only=1 gpu_only=1 epoch_ms=1774500703688
-BENCH_ITERATION_MARKER phase=end index=0 warmup=0 timed=1 runs=5 profile_only=1 gpu_only=1 epoch_ms=1774500704149
-BENCH_ITERATION_MARKER phase=start index=1 warmup=0 timed=1 runs=5 profile_only=1 gpu_only=1 epoch_ms=1774500704149
-BENCH_ITERATION_MARKER phase=end index=1 warmup=0 timed=1 runs=5 profile_only=1 gpu_only=1 epoch_ms=1774500704537
-BENCH_ITERATION_MARKER phase=start index=2 warmup=0 timed=1 runs=5 profile_only=1 gpu_only=1 epoch_ms=1774500704537
-BENCH_ITERATION_MARKER phase=end index=2 warmup=0 timed=1 runs=5 profile_only=1 gpu_only=1 epoch_ms=1774500704926
-BENCH_ITERATION_MARKER phase=start index=3 warmup=0 timed=1 runs=5 profile_only=1 gpu_only=1 epoch_ms=1774500704926
-BENCH_ITERATION_MARKER phase=end index=3 warmup=0 timed=1 runs=5 profile_only=1 gpu_only=1 epoch_ms=1774500705309
-BENCH_ITERATION_MARKER phase=start index=4 warmup=0 timed=1 runs=5 profile_only=1 gpu_only=1 epoch_ms=1774500705309
-BENCH_ITERATION_MARKER phase=end index=4 warmup=0 timed=1 runs=5 profile_only=1 gpu_only=1 epoch_ms=1774500705698
-Profile-only GPU compaction complete.
-Warning: '--gpu-metrics-device' is deprecated. Use '--gpu-metrics-devices' instead.
-GPU 0: General Metrics for NVIDIA GA10x
-Collecting data...
-Generating '/tmp/nsys-haques24/nsys-report-b698.qdstrm'
-Press Ctrl-C to stop symbol files downloading
-[1/1] [0%                          ] nsys_val1024B_q_paper_without_plan.nsys-rep[1/1] [0%                          ] nsys_val1024B_q_paper_without_plan.nsys-rep[1/1] [13%                         ] nsys_val1024B_q_paper_without_plan.nsys-rep[1/1] [===24%                      ] nsys_val1024B_q_paper_without_plan.nsys-rep[1/1] [======35%                   ] nsys_val1024B_q_paper_without_plan.nsys-rep[1/1] [===========51%              ] nsys_val1024B_q_paper_without_plan.nsys-rep[1/1] [========================100%] nsys_val1024B_q_paper_without_plan.nsys-rep[1/1] [========================100%] nsys_val1024B_q_paper_without_plan.nsys-rep
-Generated:
-	/home/1755_project/invalidation-aware-caching/cuda_test_shafin/./sweep_results/sweep_nsight_ncu_8mb-sst_32sst_gpu-profile-only/profiles/nsys_val1024B_q_paper_without_plan.nsys-rep

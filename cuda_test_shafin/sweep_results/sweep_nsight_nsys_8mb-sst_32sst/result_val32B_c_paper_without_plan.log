@@ -1,40 +1,0 @@
-C-compaction benchmark
-  input SSTs: 32
-  key bytes: 16  value bytes: 32  restart interval: 4  block size: 32768
-  runs: 5  (1 warmup + 4 timed)
-  gpu mode: c_paper_without_plan
-  profile-only mode: disabled
-  storage IO: direct (O_DIRECT + fdatasync)
-  cpu baseline: disabled (--gpu_only)
-  gpu garbage collection: enabled (CPU after GPU sort, before GPU SST construction)
-
-GPU total (Wall): min=544.21 ms  mean=550.54 +- 6.65 ms
-GPU total (CPU-Time): 411.90 ms
-GPU pipeline (Wall): 375.91 ms  (CPU-Time): 313.48 ms  utilization: 83.4%
-CPU baseline: skipped (gpu_only mode)
-
-Best GPU run breakdown (ms):
-  read+parse 83.71  unpack 33.03  sort(merge) 46.74  gc 63.09  plan 0.05  bloom 1.63  pack+assemble 87.32  write 84.57
-  kernel-only: unpack 14.11  sort(merge) 46.59  bloom 0.67  pack 14.09
-  non-kernel overhead (ms): unpack 18.92  sort(merge) 0.15  bloom 0.95  pack 73.22
-  transfer stage detail (measured):
-    unpack  H2D 30.84 ms (268531705 B)  D2H 0.00 ms (0 B)
-    merge   H2D 0.02 ms (516 B)  D2H 0.00 ms (0 B)
-    gc      H2D 30.18 ms (259780704 B)  D2H 22.15 ms (263379456 B)
-    plan    H2D 0.11 ms (67656 B)  D2H 0.00 ms (0 B)
-    bloom   H2D 0.00 ms (33828 B)  D2H 0.00 ms (0 B)
-    pack    H2D 0.04 ms (476584 B)  D2H 20.49 ms (262900003 B)
-  measured transfer totals: H2D 61.19 ms (528890993 B, 8242.62 MB/s)  D2H 42.64 ms (526279459 B, 11771.11 MB/s)
-  transfer lower-bound bytes: H2D 528890993  D2H 526279459
-  estimated transfer+sync BW (lower-bound): 6912.46 MB/s
-  CPU<->GPU (lower-bound): CPU->GPU H2D 528890993 B  GPU->CPU D2H 526279459 B
-  CPU<->GPU envelope: non-kernel total 145.58 ms  estimated BW 6912.46 MB/s
-  output bytes 262866175  data blocks 8457  output files 34
-  I/O profile: input bytes 268436089  estimated SSD read BW 3058.13 MB/s  estimated SSD write BW 2964.35 MB/s
-  SSD<->CPU (estimated): SSD->CPU 83.71 ms (268436089 B, 3058.13 MB/s)  CPU->SSD 84.57 ms (262866175 B, 2964.35 MB/s)
-Collecting data...
-Generating '/tmp/nsys-haques24/nsys-report-ae7c.qdstrm'
-Press Ctrl-C to stop symbol files downloading
-[1/1] [0%                          ] nsys_val32B_c_paper_without_plan.nsys-rep[1/1] [0%                          ] nsys_val32B_c_paper_without_plan.nsys-rep[1/1] [6%                          ] nsys_val32B_c_paper_without_plan.nsys-rep[1/1] [7%                          ] nsys_val32B_c_paper_without_plan.nsys-rep[1/1] [===========51%              ] nsys_val32B_c_paper_without_plan.nsys-rep[1/1] [===========53%              ] nsys_val32B_c_paper_without_plan.nsys-rep[1/1] [========================100%] nsys_val32B_c_paper_without_plan.nsys-rep[1/1] [========================100%] nsys_val32B_c_paper_without_plan.nsys-rep
-Generated:
-	/home/1755_project/invalidation-aware-caching/cuda_test_shafin/./sweep_results/sweep_nsight_nsys_8mb-sst_32sst/profiles/nsys_val32B_c_paper_without_plan.nsys-rep

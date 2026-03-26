@@ -1,40 +1,0 @@
-C-compaction benchmark
-  input SSTs: 4
-  key bytes: 16  value bytes: 256  restart interval: 4  block size: 32768
-  runs: 5  (1 warmup + 4 timed)
-  gpu mode: c_paper_with_plan
-  profile-only mode: disabled
-  storage IO: direct (O_DIRECT + fdatasync)
-  cpu baseline: disabled (--gpu_only)
-  gpu garbage collection: enabled (CPU after GPU sort, before GPU SST construction)
-
-GPU total (Wall): min=63.78 ms  mean=66.77 +- 3.80 ms
-GPU total (CPU-Time): 43.74 ms
-GPU pipeline (Wall): 42.76 ms  (CPU-Time): 34.80 ms  utilization: 81.4%
-CPU baseline: skipped (gpu_only mode)
-
-Best GPU run breakdown (ms):
-  read+parse 9.32  unpack 4.79  sort(merge) 2.37  gc 2.59  plan 1.72  bloom 0.04  pack+assemble 11.82  write 11.69
-  kernel-only: unpack 1.92  sort(merge) 2.23  bloom 0.02  pack 2.15
-  non-kernel overhead (ms): unpack 2.87  sort(merge) 0.14  bloom 0.02  pack 9.67
-  transfer stage detail (measured):
-    unpack  H2D 3.88 ms (33567043 B)  D2H 0.00 ms (0 B)
-    merge   H2D 0.02 ms (68 B)  D2H 0.00 ms (0 B)
-    gc      H2D 2.93 ms (33299600 B)  D2H 3.20 ms (33312384 B)
-    plan    H2D 0.02 ms (8168 B)  D2H 0.07 ms (122428 B)
-    bloom   H2D 0.00 ms (4084 B)  D2H 0.00 ms (0 B)
-    pack    H2D 0.02 ms (57528 B)  D2H 3.06 ms (33513024 B)
-  measured transfer totals: H2D 6.87 ms (66936491 B, 9292.21 MB/s)  D2H 6.33 ms (66947836 B, 10092.02 MB/s)
-  transfer lower-bound bytes: H2D 66936491  D2H 66947836
-  estimated transfer+sync BW (lower-bound): 6780.41 MB/s
-  CPU<->GPU (lower-bound): CPU->GPU H2D 66936491 B  GPU->CPU D2H 66947836 B
-  CPU<->GPU envelope: non-kernel total 18.83 ms  estimated BW 6780.41 MB/s
-  output bytes 33508940  data blocks 1021  output files 4
-  I/O profile: input bytes 33554755  estimated SSD read BW 3433.64 MB/s  estimated SSD write BW 2733.15 MB/s
-  SSD<->CPU (estimated): SSD->CPU 9.32 ms (33554755 B, 3433.64 MB/s)  CPU->SSD 11.69 ms (33508940 B, 2733.15 MB/s)
-Collecting data...
-Generating '/tmp/nsys-haques24/nsys-report-3cd2.qdstrm'
-Press Ctrl-C to stop symbol files downloading
-[1/1] [0%                          ] nsys_val256B_c_paper_with_plan.nsys-rep[1/1] [0%                          ] nsys_val256B_c_paper_with_plan.nsys-rep[1/1] [11%                         ] nsys_val256B_c_paper_with_plan.nsys-rep[1/1] [===23%                      ] nsys_val256B_c_paper_with_plan.nsys-rep[1/1] [==============61%           ] nsys_val256B_c_paper_with_plan.nsys-rep[1/1] [========================100%] nsys_val256B_c_paper_with_plan.nsys-rep[1/1] [========================100%] nsys_val256B_c_paper_with_plan.nsys-rep
-Generated:
-	/home/1755_project/invalidation-aware-caching/cuda_test_shafin/./sweep_results/sweep_nsight_nsys_8mb-sst_4sst/profiles/nsys_val256B_c_paper_with_plan.nsys-rep

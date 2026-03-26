@@ -1,5 +1,0 @@
-#Date       Time        gpu     sm    mem    enc    dec    jpg    ofa     fb   bar1   ccpm 
-#YYYYMMDD   HH:MM:SS    Idx      %      %      %      %      %      %     MB     MB     MB 
- 20260326   00:51:19      0      0      0      0      0      0      0     34      6      0 
- 20260326   00:51:20      0     45      8      0      0      0      0    597      6      0 
- 20260326   00:51:21      0     40      8      0      0      0      0    329      6      0 
