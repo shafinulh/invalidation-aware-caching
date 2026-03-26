@@ -106,6 +106,55 @@ static Stats compute_stats(const std::vector<double>& values)
     return s;
 }
 
+static long long current_epoch_ms()
+{
+    auto now = std::chrono::system_clock::now();
+    return std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
+}
+
+static void print_iteration_marker(int               run_index,
+                                   int               runs,
+                                   bool              profile_only,
+                                   bool              gpu_only,
+                                   const char*       phase,
+                                   long long         epoch_ms,
+                                   const RunSummary* gpu_summary = nullptr,
+                                   const RunSummary* cpu_summary = nullptr)
+{
+    const bool is_warmup = !profile_only && runs > 1 && run_index == 0;
+    const bool is_timed = profile_only || runs <= 1 || run_index > 0;
+
+    std::printf("BENCH_ITERATION_MARKER phase=%s index=%d warmup=%d timed=%d runs=%d profile_only=%d gpu_only=%d epoch_ms=%lld",
+                phase,
+                run_index,
+                is_warmup ? 1 : 0,
+                is_timed ? 1 : 0,
+                runs,
+                profile_only ? 1 : 0,
+                gpu_only ? 1 : 0,
+                epoch_ms);
+    if (gpu_summary != nullptr) {
+        std::printf(" gpu_total_ms=%.3f gpu_pipeline_wall_ms=%.3f gpu_pipeline_cpu_ms=%.3f gpu_read_parse_ms=%.3f gpu_write_ms=%.3f gpu_output_bytes=%zu",
+                    gpu_summary->total_ms,
+                    gpu_summary->pipeline_wall_ms,
+                    gpu_summary->pipeline_cpu_time_ms,
+                    gpu_summary->read_parse_ms,
+                    gpu_summary->write_ms,
+                    gpu_summary->output_bytes);
+    }
+    if (cpu_summary != nullptr) {
+        std::printf(" cpu_total_ms=%.3f cpu_pipeline_wall_ms=%.3f cpu_pipeline_cpu_ms=%.3f cpu_read_parse_ms=%.3f cpu_write_ms=%.3f cpu_output_bytes=%zu",
+                    cpu_summary->total_ms,
+                    cpu_summary->pipeline_wall_ms,
+                    cpu_summary->pipeline_cpu_time_ms,
+                    cpu_summary->read_parse_ms,
+                    cpu_summary->write_ms,
+                    cpu_summary->output_bytes);
+    }
+    std::printf("\n");
+    std::fflush(stdout);
+}
+
 static std::vector<std::string> collect_sst_paths(const std::string& dataset_dir,
                                                   size_t             expected_count = 0)
 {
@@ -610,20 +659,28 @@ int main(int argc, char** argv)
 
     for (int r = 0; r < runs; ++r) {
         NvtxRange iteration_range(std::string("benchmark_iteration:") + std::to_string(r));
+        print_iteration_marker(r, runs, profile_only, gpu_only, "start", current_epoch_ms());
         char gpu_dir[256];
         std::snprintf(gpu_dir, sizeof(gpu_dir), "%s/gpu_run%d", out_dir.c_str(), r);
         ensure_dir(gpu_dir);
         if (profile_only) {
             run_gpu_profile_once(input_paths, gpu_dir, gpu_mode);
+            print_iteration_marker(r, runs, profile_only, gpu_only, "end", current_epoch_ms());
             continue;
         }
+        RunSummary cpu_run;
+        const RunSummary* cpu_summary = nullptr;
         if (!gpu_only) {
             char cpu_dir[256];
             std::snprintf(cpu_dir, sizeof(cpu_dir), "%s/cpu_run%d", out_dir.c_str(), r);
             ensure_dir(cpu_dir);
-            cpu_runs.push_back(run_cpu_once(input_paths, cpu_dir, gpu_mode));
+            cpu_run = run_cpu_once(input_paths, cpu_dir, gpu_mode);
+            cpu_runs.push_back(cpu_run);
+            cpu_summary = &cpu_run;
         }
-        gpu_runs.push_back(run_gpu_once(input_paths, gpu_dir, gpu_mode));
+        RunSummary gpu_run = run_gpu_once(input_paths, gpu_dir, gpu_mode);
+        gpu_runs.push_back(gpu_run);
+        print_iteration_marker(r, runs, profile_only, gpu_only, "end", current_epoch_ms(), &gpu_run, cpu_summary);
     }
 
     if (profile_only) {

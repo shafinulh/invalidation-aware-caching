@@ -1,0 +1,19 @@
+C-compaction benchmark
+  input SSTs: 32
+  key bytes: 16  value bytes: 1024  restart interval: 4  block size: 32768
+  runs: 1  (profile-only, all runs profiled)
+  gpu mode: c_paper_without_plan
+  profile-only mode: enabled
+  storage IO: direct (O_DIRECT + fdatasync)
+  cpu baseline: disabled (--profile_only)
+  gpu garbage collection: enabled (CPU after GPU sort, before GPU SST construction)
+
+BENCH_ITERATION_MARKER phase=start index=0 warmup=0 timed=1 runs=1 profile_only=1 gpu_only=1 epoch_ms=1774498280785
+BENCH_ITERATION_MARKER phase=end index=0 warmup=0 timed=1 runs=1 profile_only=1 gpu_only=1 epoch_ms=1774498281449
+Profile-only GPU compaction complete.
+Collecting data...
+Generating '/tmp/nsys-haques24/nsys-report-dc7b.qdstrm'
+Press Ctrl-C to stop symbol files downloading
+[1/1] [0%                          ] nsys_val1024B_c_paper_without_plan.nsys-rep[1/1] [0%                          ] nsys_val1024B_c_paper_without_plan.nsys-rep[1/1] [12%                         ] nsys_val1024B_c_paper_without_plan.nsys-rep[1/1] [====25%                     ] nsys_val1024B_c_paper_without_plan.nsys-rep[1/1] [====26%                     ] nsys_val1024B_c_paper_without_plan.nsys-rep[1/1] [==============62%           ] nsys_val1024B_c_paper_without_plan.nsys-rep[1/1] [==============63%           ] nsys_val1024B_c_paper_without_plan.nsys-rep[1/1] [========================100%] nsys_val1024B_c_paper_without_plan.nsys-rep[1/1] [========================100%] nsys_val1024B_c_paper_without_plan.nsys-rep
+Generated:
+	/home/1755_project/invalidation-aware-caching/cuda_test_shafin/./sweep_results/sweep_nsight_ncu_8mb-sst_32sst_gpu-profile-only/profiles/nsys_val1024B_c_paper_without_plan.nsys-rep
