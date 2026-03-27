@@ -20,8 +20,14 @@ cuda_test_shafin/gpcomp_bench
 cuda_test_shafin/gpcomp_datagen
 cuda_test_shafin/gpcomp_unit_tests
 
-# Presentation figure trees contain large raw preload / SST outputs that should
-# remain local even when analysis and final figure artifacts are tracked later.
-presentation_figures/final_speedup_preload_*/
-presentation_figures/compaction_parallelism/final-speedup-cpu-*/sst_8MB/
-presentation_figures/compaction_parallelism/final-speedup-cpu-*/per_run_logs/gpcomp_bench_*.log
+# GPU compaction generated datasets
+gpu_compaction/dataset_shafin_V*/
+local_benchmark_artifacts/
+
+# Presentation figures — only track comparison/ folders under each run ID
+presentation_figures/*
+!presentation_figures/initial_gpu_cpu_compaction_microbenchmark/
+presentation_figures/initial_gpu_cpu_compaction_microbenchmark/*
+!presentation_figures/initial_gpu_cpu_compaction_microbenchmark/*/
+presentation_figures/initial_gpu_cpu_compaction_microbenchmark/*/*
+!presentation_figures/initial_gpu_cpu_compaction_microbenchmark/*/comparison/

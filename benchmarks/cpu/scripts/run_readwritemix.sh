@@ -6,8 +6,8 @@ set -euo pipefail
 # Write ratio is percent writes (read ratio = 100 - write ratio).
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=benchmark_common.sh
-source "${SCRIPT_DIR}/benchmark_common.sh"
+# shellcheck source=../../common/benchmark_common.sh
+source "$(cd "${SCRIPT_DIR}/../.." && pwd)/common/benchmark_common.sh"
 
 # ReadWriteMix-specific knobs.
 NUM_KEYS="${NUM_KEYS:-200000000}"

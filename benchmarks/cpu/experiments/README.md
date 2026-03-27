@@ -202,7 +202,7 @@ can study how compaction parallelism scales with:
 The shared runner is:
 
 ```bash
-./benchmarks/cpu/scripts/run_compaction_parallelism.sh
+./benchmarks/cpu_compaction/scripts/cpu_compaction_sweep.sh
 ```
 
 Default flow:

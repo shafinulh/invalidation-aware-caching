@@ -4,7 +4,7 @@ set -euo pipefail
 # FillRandom workload.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "${SCRIPT_DIR}/benchmark_common.sh"
+source "$(cd "${SCRIPT_DIR}/../.." && pwd)/common/benchmark_common.sh"
 
 # FillRandom-specific knobs.
 NUM_KEYS="${NUM_KEYS:-20000000}"

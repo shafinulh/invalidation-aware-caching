@@ -20,6 +20,7 @@ except ImportError as exc:  # pragma: no cover
     raise SystemExit(f"matplotlib is required: {exc}") from exc
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "cpu_compaction" / "plotting"))
 from parse_compaction_profile import events_to_dataframe, parse_compaction_events
 
 
