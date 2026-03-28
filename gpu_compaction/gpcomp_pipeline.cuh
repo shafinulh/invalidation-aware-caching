@@ -942,8 +942,6 @@ static inline GPUCompactionResult gpu_q_compaction_paper_from_parsed(const std::
     result.merge_d2h_ms = merged.d2h_ms;
     result.merge_h2d_bytes = merged.h2d_bytes;
     result.merge_d2h_bytes = merged.d2h_bytes;
-    result.merged.resize((size_t)merged.total);
-
     t0 = std::chrono::steady_clock::now();
     RestartGroupSizeTimedResult group_sizes =
         launch_restart_group_sizes_timed_from_device(merged.d_output, merged.total);
@@ -1060,7 +1058,6 @@ static inline GPUCompactionResult gpu_c_compaction_paper_from_parsed(const std::
                                                                  &result.gc_d2h_ms, &result.gc_d2h_bytes);
     std::vector<KVRef> survivors = garbage_collect_sorted_refs(pinned.data, (size_t)pinned.count);
     pinned.free();
-    result.merged.resize(survivors.size());
     KVRef* d_gc_output = upload_ref_array_to_device(survivors,
                                                     &result.gc_h2d_ms, &result.gc_h2d_bytes);
     t1 = std::chrono::steady_clock::now();
@@ -1258,8 +1255,6 @@ static inline GPUCompactionResult gpu_q_compaction_without_plan_from_parsed(cons
     result.merge_d2h_ms = merged.d2h_ms;
     result.merge_h2d_bytes = merged.h2d_bytes;
     result.merge_d2h_bytes = merged.d2h_bytes;
-    result.merged.resize((size_t)merged.total);
-
     t0 = std::chrono::steady_clock::now();
     std::vector<DataBlockPlanEntry> plans = plan_data_blocks_static((uint32_t)merged.total);
     t1 = std::chrono::steady_clock::now();
@@ -1362,7 +1357,6 @@ static inline GPUCompactionResult gpu_c_compaction_without_plan_from_parsed(cons
                                                                  &result.gc_d2h_ms, &result.gc_d2h_bytes);
     std::vector<KVRef> survivors = garbage_collect_sorted_refs(pinned.data, (size_t)pinned.count);
     pinned.free();
-    result.merged.resize(survivors.size());
     KVRef* d_gc_output = upload_ref_array_to_device(survivors,
                                                     &result.gc_h2d_ms, &result.gc_h2d_bytes);
     t1 = std::chrono::steady_clock::now();
@@ -1564,15 +1558,15 @@ static inline GPUCompactionResult gpu_c_compaction_paper_profile_from_parsed(
     destroy_profile_unpack_states(pstates);
 
     PinnedKVArray pinned = copy_kv_to_pinned_from_device_untimed(merged.d_output, merged.total);
-    result.merged = garbage_collect_sorted_kv(pinned.data, (size_t)pinned.count);
+    std::vector<KVPair> survivors = garbage_collect_sorted_kv(pinned.data, (size_t)pinned.count);
     pinned.free();
 
-    KVPair* d_gc_output = upload_kv_array_to_device_untimed(result.merged);
+    KVPair* d_gc_output = upload_kv_array_to_device_untimed(survivors);
     cudaFree(merged.d_output);
 
-    auto group_sizes = launch_restart_group_sizes_untimed_from_device(d_gc_output, (int)result.merged.size());
+    auto group_sizes = launch_restart_group_sizes_untimed_from_device(d_gc_output, (int)survivors.size());
     auto plans =
-        plan_data_blocks_group_aligned_from_group_sizes(group_sizes, (uint32_t)result.merged.size());
+        plan_data_blocks_group_aligned_from_group_sizes(group_sizes, (uint32_t)survivors.size());
     auto dplans = upload_plans_to_device_untimed(plans);
 
     auto bloom = launch_bloom_filter_batched_untimed_from_plans(

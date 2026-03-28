@@ -405,6 +405,11 @@ struct DeviceMergeUntimedResult {
     int     total = 0;
 };
 
+struct DeviceMergeRefUntimedResult {
+    KVRef* d_output = nullptr;
+    int    total = 0;
+};
+
 static inline DeviceMergeUntimedResult
 launch_merge_untimed_from_device(const std::vector<KVPair*>& d_arrays,
                                  const std::vector<int>&     sizes)
@@ -434,6 +439,43 @@ launch_merge_untimed_from_device(const std::vector<KVPair*>& d_arrays,
     int grid = (result.total + block - 1) / block;
     if (result.total > 0)
         merge_kernel<<<grid, block>>>(d_sst_arrays, d_sst_sizes, d_sst_offsets, num_arrays, result.d_output);
+    cudaDeviceSynchronize();
+
+    cudaFree(d_sst_offsets);
+    cudaFree(d_sst_sizes);
+    cudaFree(d_sst_arrays);
+    return result;
+}
+
+static inline DeviceMergeRefUntimedResult
+launch_merge_refs_untimed_from_device(const std::vector<KVRef*>& d_arrays,
+                                      const std::vector<int>&    sizes)
+{
+    DeviceMergeRefUntimedResult result;
+    int num_arrays = (int)d_arrays.size();
+    std::vector<int> h_offsets((size_t)num_arrays + 1, 0);
+    for (int i = 0; i < num_arrays; ++i)
+        h_offsets[i + 1] = h_offsets[i] + sizes[i];
+    result.total = h_offsets[num_arrays];
+
+    KVRef** d_sst_arrays = nullptr;
+    int*    d_sst_sizes = nullptr;
+    int*    d_sst_offsets = nullptr;
+    cudaMalloc(&d_sst_arrays, (size_t)std::max(num_arrays, 1) * sizeof(KVRef*));
+    cudaMalloc(&d_sst_sizes, (size_t)std::max(num_arrays, 1) * sizeof(int));
+    cudaMalloc(&d_sst_offsets, ((size_t)std::max(num_arrays, 1) + 1) * sizeof(int));
+    cudaMalloc(&result.d_output, (size_t)std::max(result.total, 1) * sizeof(KVRef));
+
+    if (num_arrays > 0) {
+        cudaMemcpy(d_sst_arrays, d_arrays.data(), (size_t)num_arrays * sizeof(KVRef*), cudaMemcpyHostToDevice);
+        cudaMemcpy(d_sst_sizes, sizes.data(), (size_t)num_arrays * sizeof(int), cudaMemcpyHostToDevice);
+    }
+    cudaMemcpy(d_sst_offsets, h_offsets.data(), ((size_t)num_arrays + 1) * sizeof(int), cudaMemcpyHostToDevice);
+
+    int block = 256;
+    int grid = (result.total + block - 1) / block;
+    if (result.total > 0)
+        merge_ref_kernel<<<grid, block>>>(d_sst_arrays, d_sst_sizes, d_sst_offsets, num_arrays, result.d_output);
     cudaDeviceSynchronize();
 
     cudaFree(d_sst_offsets);

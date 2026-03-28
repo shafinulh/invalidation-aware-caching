@@ -4,26 +4,26 @@ Requested input SSTs: 32
 Best CPU subcompaction speedups vs subcomp=1
 ============================================
 
-value=32B: 3.10x +/- 0.07x at subcomp=16
-value=1024B: 1.88x +/- 0.03x at subcomp=4
+value=32B: 3.20x +/- 0.21x at subcomp=16
+value=1024B: 1.82x +/- 0.05x at subcomp=4
 
 GPU mode speedups vs synthetic CPU baseline
 ===========================================
 
 value=32B:
-  c_no_plan: 3.33x +/- 0.00x
-  c_plan: 3.33x +/- 0.00x
-  c_plan_stream_io: 4.60x +/- 0.00x
-  q_no_plan: 4.11x +/- 0.00x
-  q_plan: 4.28x +/- 0.00x
-  q_plan_stream_io: 6.43x +/- 0.00x
+  c_no_plan: 3.73x +/- 0.00x
+  c_plan: 3.82x +/- 0.00x
+  c_plan_stream_io: 4.94x +/- 0.00x
+  q_no_plan: 4.65x +/- 0.00x
+  q_plan: 4.91x +/- 0.00x
+  q_plan_stream_io: 6.32x +/- 0.00x
 value=1024B:
-  c_no_plan: 1.55x +/- 0.00x
-  c_plan: 1.52x +/- 0.00x
-  c_plan_stream_io: 2.51x +/- 0.00x
-  q_no_plan: 1.51x +/- 0.00x
-  q_plan: 1.53x +/- 0.00x
-  q_plan_stream_io: 2.26x +/- 0.00x
+  c_no_plan: 1.85x +/- 0.00x
+  c_plan: 1.78x +/- 0.00x
+  c_plan_stream_io: 2.68x +/- 0.00x
+  q_no_plan: 1.82x +/- 0.00x
+  q_plan: 1.80x +/- 0.00x
+  q_plan_stream_io: 2.49x +/- 0.00x
 
 Normalization note
 ==================

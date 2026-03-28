@@ -6,22 +6,22 @@ Q-compaction benchmark
   profile-only mode: enabled
   storage IO: direct (O_DIRECT + fdatasync)
   cpu baseline: disabled (--profile_only)
-  gpu garbage collection: disabled (Q-compaction only)
+  garbage collection type: none
 
-BENCH_ITERATION_MARKER phase=start index=0 warmup=0 timed=1 runs=5 profile_only=1 gpu_only=1 epoch_ms=1774668904571
-BENCH_ITERATION_MARKER phase=end index=0 warmup=0 timed=1 runs=5 profile_only=1 gpu_only=1 epoch_ms=1774668905039
-BENCH_ITERATION_MARKER phase=start index=1 warmup=0 timed=1 runs=5 profile_only=1 gpu_only=1 epoch_ms=1774668905039
-BENCH_ITERATION_MARKER phase=end index=1 warmup=0 timed=1 runs=5 profile_only=1 gpu_only=1 epoch_ms=1774668905456
-BENCH_ITERATION_MARKER phase=start index=2 warmup=0 timed=1 runs=5 profile_only=1 gpu_only=1 epoch_ms=1774668905456
-BENCH_ITERATION_MARKER phase=end index=2 warmup=0 timed=1 runs=5 profile_only=1 gpu_only=1 epoch_ms=1774668905874
-BENCH_ITERATION_MARKER phase=start index=3 warmup=0 timed=1 runs=5 profile_only=1 gpu_only=1 epoch_ms=1774668905874
-BENCH_ITERATION_MARKER phase=end index=3 warmup=0 timed=1 runs=5 profile_only=1 gpu_only=1 epoch_ms=1774668906282
-BENCH_ITERATION_MARKER phase=start index=4 warmup=0 timed=1 runs=5 profile_only=1 gpu_only=1 epoch_ms=1774668906282
-BENCH_ITERATION_MARKER phase=end index=4 warmup=0 timed=1 runs=5 profile_only=1 gpu_only=1 epoch_ms=1774668906704
+BENCH_ITERATION_MARKER phase=start index=0 warmup=0 timed=1 runs=5 profile_only=1 gpu_only=1 epoch_ms=1774714843608
+BENCH_ITERATION_MARKER phase=end index=0 warmup=0 timed=1 runs=5 profile_only=1 gpu_only=1 epoch_ms=1774714844092
+BENCH_ITERATION_MARKER phase=start index=1 warmup=0 timed=1 runs=5 profile_only=1 gpu_only=1 epoch_ms=1774714844092
+BENCH_ITERATION_MARKER phase=end index=1 warmup=0 timed=1 runs=5 profile_only=1 gpu_only=1 epoch_ms=1774714844513
+BENCH_ITERATION_MARKER phase=start index=2 warmup=0 timed=1 runs=5 profile_only=1 gpu_only=1 epoch_ms=1774714844513
+BENCH_ITERATION_MARKER phase=end index=2 warmup=0 timed=1 runs=5 profile_only=1 gpu_only=1 epoch_ms=1774714844944
+BENCH_ITERATION_MARKER phase=start index=3 warmup=0 timed=1 runs=5 profile_only=1 gpu_only=1 epoch_ms=1774714844944
+BENCH_ITERATION_MARKER phase=end index=3 warmup=0 timed=1 runs=5 profile_only=1 gpu_only=1 epoch_ms=1774714845375
+BENCH_ITERATION_MARKER phase=start index=4 warmup=0 timed=1 runs=5 profile_only=1 gpu_only=1 epoch_ms=1774714845375
+BENCH_ITERATION_MARKER phase=end index=4 warmup=0 timed=1 runs=5 profile_only=1 gpu_only=1 epoch_ms=1774714845792
 Profile-only GPU compaction complete.
 GPU 0: General Metrics for NVIDIA GA10x
 Collecting data...
-Generating '/tmp/nsys-haques24/nsys-report-5fe9.qdstrm'
+Generating '/tmp/nsys-haques24/nsys-report-60c9.qdstrm'
 Press Ctrl-C to stop symbol files downloading
 [1/1] [0%                          ] nsys_val32B_q_paper_with_plan.nsys-rep[1/1] [0%                          ] nsys_val32B_q_paper_with_plan.nsys-rep[1/1] [9%                          ] nsys_val32B_q_paper_with_plan.nsys-rep[1/1] [11%                         ] nsys_val32B_q_paper_with_plan.nsys-rep[1/1] [12%                         ] nsys_val32B_q_paper_with_plan.nsys-rep[1/1] [===22%                      ] nsys_val32B_q_paper_with_plan.nsys-rep[1/1] [=====32%                    ] nsys_val32B_q_paper_with_plan.nsys-rep[1/1] [=======36%                  ] nsys_val32B_q_paper_with_plan.nsys-rep[1/1] [===========51%              ] nsys_val32B_q_paper_with_plan.nsys-rep[1/1] [========================100%] nsys_val32B_q_paper_with_plan.nsys-rep[1/1] [========================100%] nsys_val32B_q_paper_with_plan.nsys-rep
 Generated:

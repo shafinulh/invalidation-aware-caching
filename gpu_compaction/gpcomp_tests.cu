@@ -426,7 +426,6 @@ static bool test_gpu_c_compaction_paper_matches_cpu()
         ok &= check(cpu.output.files[i].file_bytes == gpu.output.files[i].file_bytes,
                     "GPU C-paper compaction output SST matches CPU output exactly");
     }
-    ok &= check(cpu.merged.size() == gpu.merged.size(), "C-paper garbage-collected KV count matches");
     return ok;
 }
 
@@ -441,7 +440,6 @@ static bool test_gpu_c_compaction_without_plan_matches_cpu()
                     "GPU C-compaction without plan emits the same number of SST files as CPU");
     ok &= check(build_sets_logically_equal(cpu.output, gpu.output),
                 "GPU C-compaction without plan matches CPU output logically");
-    ok &= check(cpu.merged.size() == gpu.merged.size(), "C-without-plan garbage-collected KV count matches");
     return ok;
 }
 

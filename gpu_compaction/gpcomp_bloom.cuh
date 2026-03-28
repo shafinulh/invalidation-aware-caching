@@ -620,6 +620,48 @@ launch_bloom_filter_batched_untimed_from_plans(const KVPair*                    
     return result;
 }
 
+static inline DeviceBloomBatchUntimedResult
+launch_bloom_filter_batched_untimed_from_plans(const KVRef*                          d_ref,
+                                               const uint32_t*                       d_first_kv,
+                                               const uint32_t*                       d_num_kv,
+                                               const std::vector<DataBlockPlanEntry>& plans)
+{
+    DeviceBloomBatchUntimedResult result;
+    if (plans.empty()) return result;
+
+    uint32_t max_num_kv = 0;
+    uint32_t total_bytes = 0;
+    result.bitvec_offsets.resize(plans.size());
+    result.bitvec_lengths.resize(plans.size());
+    for (size_t i = 0; i < plans.size(); ++i) {
+        max_num_kv = std::max(max_num_kv, plans[i].num_kv);
+        result.bitvec_offsets[i] = total_bytes;
+        uint32_t byte_vector_len = plans[i].num_kv * GP_BLOOM_BITS_PER_KEY;
+        uint32_t bitvec_len = (byte_vector_len + 7) / 8;
+        result.bitvec_lengths[i] = bitvec_len;
+        total_bytes += bitvec_len;
+    }
+
+    uint32_t* d_offsets = nullptr;
+    cudaMalloc(&d_offsets, plans.size() * sizeof(uint32_t));
+    cudaMemcpy(d_offsets, result.bitvec_offsets.data(),
+               plans.size() * sizeof(uint32_t), cudaMemcpyHostToDevice);
+
+    cudaMalloc(&result.d_filter_bytes, (size_t)std::max(total_bytes, 1u));
+    int max_byte_vector_len = (int)(max_num_kv * GP_BLOOM_BITS_PER_KEY);
+    int max_bitvec_len = (max_byte_vector_len + 7) / 8;
+    int block_dim = ((std::max((int)max_num_kv, max_bitvec_len) + 31) / 32) * 32;
+    if (block_dim < 32) block_dim = 32;
+
+    bloom_filter_kernel_batched_ref<<<(int)plans.size(), block_dim, (size_t)max_byte_vector_len>>>(
+        d_ref, d_first_kv, d_num_kv, d_offsets, GP_BLOOM_BITS_PER_KEY, GP_BLOOM_HASHES,
+        max_byte_vector_len, result.d_filter_bytes);
+    cudaDeviceSynchronize();
+
+    cudaFree(d_offsets);
+    return result;
+}
+
 static inline void destroy_device_bloom_batch_untimed_result(DeviceBloomBatchUntimedResult& result)
 {
     if (result.d_filter_bytes) cudaFree(result.d_filter_bytes);

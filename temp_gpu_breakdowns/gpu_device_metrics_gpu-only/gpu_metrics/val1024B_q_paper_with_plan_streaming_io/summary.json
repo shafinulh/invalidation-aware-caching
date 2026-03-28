@@ -7,28 +7,28 @@
     0
   ],
   "incomplete_iteration_indices": [],
-  "query_sample_count": 5,
-  "dmon_sample_count": 2,
+  "query_sample_count": 6,
+  "dmon_sample_count": 1,
   "force_first_run_warmup": false,
   "timed_duration_ms": {
-    "min": 222.0,
-    "mean": 222.0,
-    "max": 222.0
+    "min": 232.0,
+    "mean": 232.0,
+    "max": 232.0
   },
   "timed_gpu_total_ms": {
-    "min": 222.878,
-    "mean": 222.878,
-    "max": 222.878
+    "min": 231.614,
+    "mean": 231.614,
+    "max": 231.614
   },
   "timed_gpu_util_pct_avg": {
-    "min": 32.0,
-    "mean": 32.0,
-    "max": 32.0
+    "min": 33.667,
+    "mean": 33.667,
+    "max": 33.667
   },
   "timed_gpu_util_pct_max": {
-    "min": 32.0,
-    "mean": 32.0,
-    "max": 32.0
+    "min": 37.0,
+    "mean": 37.0,
+    "max": 37.0
   },
   "timed_memory_used_mb_max": {
     "min": 829.0,
@@ -36,9 +36,9 @@
     "max": 829.0
   },
   "timed_power_draw_w_avg": {
-    "min": 44.35,
-    "mean": 44.35,
-    "max": 44.35
+    "min": 49.05,
+    "mean": 49.05,
+    "max": 49.05
   },
   "timed_dmon_sm_pct_avg": {},
   "timed_dmon_mem_pct_avg": {},

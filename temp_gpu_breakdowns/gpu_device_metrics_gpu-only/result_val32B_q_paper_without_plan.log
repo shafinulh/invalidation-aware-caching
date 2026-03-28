@@ -6,33 +6,33 @@ Q-compaction benchmark
   profile-only mode: disabled
   storage IO: direct (O_DIRECT + fdatasync)
   cpu baseline: disabled (--gpu_only)
-  gpu garbage collection: disabled (Q-compaction only)
+  garbage collection type: none
 
-BENCH_ITERATION_MARKER phase=start index=0 warmup=1 timed=0 runs=2 profile_only=0 gpu_only=1 epoch_ms=1774665957788
-BENCH_ITERATION_MARKER phase=end index=0 warmup=1 timed=0 runs=2 profile_only=0 gpu_only=1 epoch_ms=1774665958308 gpu_total_ms=496.842 gpu_pipeline_wall_ms=271.731 gpu_pipeline_cpu_ms=237.267 gpu_read_parse_ms=135.648 gpu_write_ms=89.439 gpu_output_bytes=266172347
-BENCH_ITERATION_MARKER phase=start index=1 warmup=0 timed=1 runs=2 profile_only=0 gpu_only=1 epoch_ms=1774665958308
-BENCH_ITERATION_MARKER phase=end index=1 warmup=0 timed=1 runs=2 profile_only=0 gpu_only=1 epoch_ms=1774665958778 gpu_total_ms=447.626 gpu_pipeline_wall_ms=275.638 gpu_pipeline_cpu_ms=243.104 gpu_read_parse_ms=83.265 gpu_write_ms=88.699 gpu_output_bytes=266172347
-GPU total (Wall): min=447.63 ms  mean=447.63 +- 0.00 ms
-GPU total (CPU-Time): 339.88 ms
-GPU pipeline (Wall): 275.64 ms  (CPU-Time): 243.10 ms  utilization: 88.2%
+BENCH_ITERATION_MARKER phase=start index=0 warmup=1 timed=0 runs=2 profile_only=0 gpu_only=1 epoch_ms=1774715222320
+BENCH_ITERATION_MARKER phase=end index=0 warmup=1 timed=0 runs=2 profile_only=0 gpu_only=1 epoch_ms=1774715222781 gpu_total_ms=445.462 gpu_pipeline_wall_ms=218.610 gpu_pipeline_cpu_ms=185.455 gpu_read_parse_ms=136.210 gpu_write_ms=90.618 gpu_output_bytes=266172347
+BENCH_ITERATION_MARKER phase=start index=1 warmup=0 timed=1 runs=2 profile_only=0 gpu_only=1 epoch_ms=1774715222781
+BENCH_ITERATION_MARKER phase=end index=1 warmup=0 timed=1 runs=2 profile_only=0 gpu_only=1 epoch_ms=1774715223194 gpu_total_ms=395.896 gpu_pipeline_wall_ms=224.341 gpu_pipeline_cpu_ms=191.817 gpu_read_parse_ms=84.247 gpu_write_ms=87.286 gpu_output_bytes=266172347
+GPU total (Wall): min=395.90 ms  mean=395.90 +- 0.00 ms
+GPU total (CPU-Time): 294.48 ms
+GPU pipeline (Wall): 224.34 ms  (CPU-Time): 191.82 ms  utilization: 85.5%
 CPU baseline: skipped (gpu_only mode)
 
 Best GPU run breakdown (ms):
-  read+parse 83.26  unpack 32.32  sort(merge) 25.86  gc 0.00  plan 0.06  bloom 0.66  pack+assemble 140.49  write 88.70
-  kernel-only: unpack 3.47  sort(merge) 25.78  gc 0.00  bloom 0.54  pack 61.99
-  non-kernel overhead (ms): unpack 28.85  sort(merge) 0.08  gc 0.00  bloom 0.12  pack 78.50
+  read+parse 84.25  unpack 33.14  sort(merge) 25.89  gc 0.00  plan 0.05  bloom 0.62  pack+assemble 140.20  write 87.29
+  kernel-only: unpack 3.49  sort(merge) 25.80  gc 0.00  bloom 0.54  pack 62.10
+  non-kernel overhead (ms): unpack 29.65  sort(merge) 0.08  gc 0.00  bloom 0.08  pack 78.11
   transfer stage detail (measured):
-    unpack  H2D 30.63 ms (268531705 B)  D2H 0.00 ms (0 B)
+    unpack  H2D 31.40 ms (268531705 B)  D2H 0.00 ms (0 B)
     merge   H2D 0.02 ms (516 B)  D2H 0.00 ms (0 B)
     gc      H2D 0.00 ms (0 B)  D2H 0.00 ms (0 B)
-    plan    H2D 0.12 ms (68592 B)  D2H 0.00 ms (0 B)
+    plan    H2D 0.11 ms (68592 B)  D2H 0.00 ms (0 B)
     bloom   H2D 0.01 ms (34296 B)  D2H 0.00 ms (0 B)
-    pack    H2D 0.08 ms (483224 B)  D2H 21.71 ms (266206643 B)
-  measured transfer totals: H2D 30.85 ms (269118333 B, 8320.04 MB/s)  D2H 21.71 ms (266206643 B, 11696.22 MB/s)
+    pack    H2D 0.08 ms (483224 B)  D2H 21.43 ms (266206643 B)
+  measured transfer totals: H2D 31.62 ms (269118333 B, 8117.48 MB/s)  D2H 21.43 ms (266206643 B, 11848.38 MB/s)
   transfer lower-bound bytes: H2D 269118333  D2H 266206643
-  estimated transfer+sync BW (lower-bound): 4746.93 MB/s
+  estimated transfer+sync BW (lower-bound): 4730.61 MB/s
   CPU<->GPU (lower-bound): CPU->GPU H2D 269118333 B  GPU->CPU D2H 266206643 B
-  CPU<->GPU envelope: non-kernel total 107.55 ms  estimated BW 4746.93 MB/s
+  CPU<->GPU envelope: non-kernel total 107.92 ms  estimated BW 4730.61 MB/s
   output bytes 266172347  data blocks 8574  output files 35
-  I/O profile: input bytes 268436089  estimated SSD read BW 3074.54 MB/s  estimated SSD write BW 2861.82 MB/s
-  SSD<->CPU (estimated): SSD->CPU 83.26 ms (268436089 B, 3074.54 MB/s)  CPU->SSD 88.70 ms (266172347 B, 2861.82 MB/s)
+  I/O profile: input bytes 268436089  estimated SSD read BW 3038.68 MB/s  estimated SSD write BW 2908.17 MB/s
+  SSD<->CPU (estimated): SSD->CPU 84.25 ms (268436089 B, 3038.68 MB/s)  CPU->SSD 87.29 ms (266172347 B, 2908.17 MB/s)

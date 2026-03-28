@@ -1834,6 +1834,25 @@ launch_restart_group_sizes_untimed_from_device(const KVPair* d_kv, int total_kv)
     return group_sizes;
 }
 
+static inline std::vector<uint32_t>
+launch_restart_group_sizes_untimed_from_device(const KVRef* d_ref, int total_kv)
+{
+    if (total_kv <= 0) return {};
+    int num_groups = (total_kv + GP_RESTART_INTERVAL - 1) / GP_RESTART_INTERVAL;
+    uint32_t* d_group_sizes = nullptr;
+    cudaMalloc(&d_group_sizes, (size_t)num_groups * sizeof(uint32_t));
+
+    int block = 256;
+    int grid = (num_groups + block - 1) / block;
+    compute_restart_group_sizes_kernel_ref<<<grid, block>>>(d_ref, total_kv, d_group_sizes);
+
+    std::vector<uint32_t> group_sizes((size_t)num_groups);
+    cudaMemcpy(group_sizes.data(), d_group_sizes,
+               (size_t)num_groups * sizeof(uint32_t), cudaMemcpyDeviceToHost);
+    cudaFree(d_group_sizes);
+    return group_sizes;
+}
+
 struct DevicePlanArraysUntimed {
     uint32_t* d_first_kv = nullptr;
     uint32_t* d_num_kv = nullptr;
@@ -1899,6 +1918,44 @@ launch_pack_untimed_from_device_plans(const KVPair*                         d_kv
 
     pack_kernel<<<num_blocks, block_dim, shared_bytes>>>(
         d_kv, d_first_kv, d_num_kv, num_blocks, d_blocks, d_sizes);
+    cudaDeviceSynchronize();
+
+    result.block_sizes.resize((size_t)num_blocks);
+    cudaMemcpy(result.block_sizes.data(), d_sizes,
+               (size_t)num_blocks * sizeof(uint32_t), cudaMemcpyDeviceToHost);
+
+    result.d_blocks = d_blocks;
+    cudaFree(d_sizes);
+    return result;
+}
+
+static inline DevicePackUntimedResult
+launch_pack_untimed_from_device_plans(const KVRef*                          d_ref,
+                                      const uint8_t* const*                 d_source_files,
+                                      const uint32_t*                       d_first_kv,
+                                      const uint32_t*                       d_num_kv,
+                                      const std::vector<DataBlockPlanEntry>& plans)
+{
+    DevicePackUntimedResult result;
+    int num_blocks = (int)plans.size();
+    if (num_blocks <= 0) return result;
+
+    uint8_t*  d_blocks = nullptr;
+    uint32_t* d_sizes = nullptr;
+    cudaMalloc(&d_blocks, (size_t)num_blocks * GP_DATA_BLOCK_BYTES);
+    cudaMalloc(&d_sizes, (size_t)num_blocks * sizeof(uint32_t));
+
+    uint32_t max_restarts = 0;
+    for (const auto& plan : plans)
+        max_restarts = std::max(max_restarts,
+                                (plan.num_kv + (uint32_t)GP_RESTART_INTERVAL - 1u)
+                              / (uint32_t)GP_RESTART_INTERVAL);
+    int block_dim = ((int)max_restarts + 31) / 32 * 32;
+    if (block_dim < 32) block_dim = 32;
+    int shared_bytes = (int)(max_restarts * 3 * sizeof(uint32_t));
+
+    pack_ref_kernel<<<num_blocks, block_dim, shared_bytes>>>(
+        d_ref, d_source_files, d_first_kv, d_num_kv, num_blocks, d_blocks, d_sizes);
     cudaDeviceSynchronize();
 
     result.block_sizes.resize((size_t)num_blocks);

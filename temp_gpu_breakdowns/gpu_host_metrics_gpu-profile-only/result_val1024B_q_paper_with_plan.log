@@ -6,10 +6,10 @@ Q-compaction benchmark
   profile-only mode: enabled
   storage IO: direct (O_DIRECT + fdatasync)
   cpu baseline: disabled (--profile_only)
-  gpu garbage collection: disabled (Q-compaction only)
+  garbage collection type: none
 
-BENCH_ITERATION_MARKER phase=start index=0 warmup=0 timed=1 runs=2 profile_only=1 gpu_only=1 epoch_ms=1774665942096
-BENCH_ITERATION_MARKER phase=end index=0 warmup=0 timed=1 runs=2 profile_only=1 gpu_only=1 epoch_ms=1774665942536
-BENCH_ITERATION_MARKER phase=start index=1 warmup=0 timed=1 runs=2 profile_only=1 gpu_only=1 epoch_ms=1774665942536
-BENCH_ITERATION_MARKER phase=end index=1 warmup=0 timed=1 runs=2 profile_only=1 gpu_only=1 epoch_ms=1774665942911
+BENCH_ITERATION_MARKER phase=start index=0 warmup=0 timed=1 runs=2 profile_only=1 gpu_only=1 epoch_ms=1774715206187
+BENCH_ITERATION_MARKER phase=end index=0 warmup=0 timed=1 runs=2 profile_only=1 gpu_only=1 epoch_ms=1774715206647
+BENCH_ITERATION_MARKER phase=start index=1 warmup=0 timed=1 runs=2 profile_only=1 gpu_only=1 epoch_ms=1774715206647
+BENCH_ITERATION_MARKER phase=end index=1 warmup=0 timed=1 runs=2 profile_only=1 gpu_only=1 epoch_ms=1774715207042
 Profile-only GPU compaction complete.

@@ -861,239 +861,6 @@ static RunSummary run_gpu_streaming_c_ref_once(const std::vector<std::string>& i
     return summary;
 }
 
-static RunSummary run_gpu_streaming_q_once(const std::vector<std::string>& input_paths,
-                                           const std::string&               output_dir)
-{
-    NvtxRange total_range("gpu_streaming_io_total");
-    RunSummary summary;
-    auto total_start = std::chrono::steady_clock::now();
-    double cpu_time_start = get_cpu_time_ms();
-
-    std::vector<StreamedInputFileInfo> inputs;
-    {
-        NvtxRange load_range("gpu_streaming_io_load_metadata");
-        inputs = load_input_metadata_with_timing(input_paths, summary.read_parse_ms);
-    }
-    summary.input_bytes = total_input_bytes(inputs);
-    summary.h2d_lower_bound_bytes = lower_bound_unpack_h2d_bytes(inputs);
-
-    std::vector<GPUUnpackStreamState> unpack_states(inputs.size());
-    double pipeline_cpu_start = get_cpu_time_ms();
-    auto pipeline_wall_start = std::chrono::steady_clock::now();
-    auto unpack_stage_start = std::chrono::steady_clock::now();
-    {
-        NvtxRange pipeline_range("gpu_streaming_io_pipeline");
-
-        for (size_t i = 0; i < inputs.size(); ++i) {
-            const StreamedInputFileInfo& input = inputs[i];
-            GPUUnpackStreamState& state = unpack_states[i];
-            std::vector<DataBlockPlanEntry> plans = plans_from_parsed(input.parsed);
-            state.block_offsets = block_offsets_from_parsed(input.parsed);
-            state.first_kv.resize(plans.size());
-            state.num_kv.resize(plans.size());
-            state.total_kv = input.parsed.footer.total_kv;
-            state.num_blocks = (int)plans.size();
-            for (size_t p = 0; p < plans.size(); ++p) {
-                state.first_kv[p] = plans[p].first_kv;
-                state.num_kv[p] = plans[p].num_kv;
-            }
-            if (state.num_blocks == 0) continue;
-
-            uint32_t max_restarts = 0;
-            for (const auto& plan : plans) {
-                max_restarts = std::max(max_restarts,
-                                        (plan.num_kv + (uint32_t)GP_RESTART_INTERVAL - 1u)
-                                      / (uint32_t)GP_RESTART_INTERVAL);
-            }
-            int block_dim = ((int)max_restarts + 31) / 32 * 32;
-            if (block_dim < 32) block_dim = 32;
-
-            cudaStreamCreate(&state.stream);
-            cudaEventCreate(&state.h2d_start);
-            cudaEventCreate(&state.h2d_stop);
-            cudaEventCreate(&state.kernel_start);
-            cudaEventCreate(&state.kernel_stop);
-            cudaMalloc(&state.d_buf, (size_t)std::max(input.physical_bytes, (size_t)1));
-            cudaMalloc(&state.d_offsets, std::max(state.block_offsets.size(), (size_t)1) * sizeof(uint32_t));
-            cudaMalloc(&state.d_first_kv, std::max(state.first_kv.size(), (size_t)1) * sizeof(uint32_t));
-            cudaMalloc(&state.d_num_kv, std::max(state.num_kv.size(), (size_t)1) * sizeof(uint32_t));
-            cudaMalloc(&state.d_out, (size_t)std::max((int)state.total_kv, 1) * sizeof(KVPair));
-
-            auto input_active_start = std::chrono::steady_clock::now();
-            RegisteredDirectReadBuffer staged_input =
-                read_binary_file_direct_registered(input.path);
-            auto input_active_end = std::chrono::steady_clock::now();
-            summary.input_active_ms += std::chrono::duration<double, std::milli>(
-                input_active_end - input_active_start).count();
-
-            state.h_read_buf = staged_input.data;
-            state.h_read_buf_size = staged_input.physical_size;
-            state.h_read_buf_registered = staged_input.registered;
-            staged_input.data = nullptr;
-            staged_input.physical_size = 0;
-            staged_input.logical_size = 0;
-            staged_input.registered = false;
-
-            cudaEventRecord(state.h2d_start, state.stream);
-            cudaMemcpyAsync(state.d_buf, state.h_read_buf, state.h_read_buf_size,
-                            cudaMemcpyHostToDevice, state.stream);
-            cudaMemcpyAsync(state.d_offsets, state.block_offsets.data(),
-                            state.block_offsets.size() * sizeof(uint32_t),
-                            cudaMemcpyHostToDevice, state.stream);
-            cudaMemcpyAsync(state.d_first_kv, state.first_kv.data(),
-                            state.first_kv.size() * sizeof(uint32_t),
-                            cudaMemcpyHostToDevice, state.stream);
-            cudaMemcpyAsync(state.d_num_kv, state.num_kv.data(),
-                            state.num_kv.size() * sizeof(uint32_t),
-                            cudaMemcpyHostToDevice, state.stream);
-            cudaEventRecord(state.h2d_stop, state.stream);
-
-            state.h2d_bytes = state.h_read_buf_size
-                            + state.block_offsets.size() * sizeof(uint32_t)
-                            + state.first_kv.size() * sizeof(uint32_t)
-                            + state.num_kv.size() * sizeof(uint32_t);
-
-            cudaEventRecord(state.kernel_start, state.stream);
-            unpack_kernel<<<state.num_blocks, block_dim, 0, state.stream>>>(
-                state.d_buf, state.d_offsets, state.d_first_kv, state.d_num_kv,
-                state.num_blocks, state.d_out);
-            cudaEventRecord(state.kernel_stop, state.stream);
-        }
-
-        for (auto& state : unpack_states) {
-            if (state.num_blocks == 0) continue;
-            cudaEventSynchronize(state.kernel_stop);
-            float kernel_ms = 0.0f;
-            cudaEventElapsedTime(&kernel_ms, state.kernel_start, state.kernel_stop);
-            cudaEventElapsedTime(&state.h2d_ms, state.h2d_start, state.h2d_stop);
-            summary.unpack_kernel_ms += kernel_ms;
-            summary.unpack_h2d_ms += state.h2d_ms;
-            summary.unpack_h2d_bytes += state.h2d_bytes;
-            release_unpack_stream_host_buffer(state);
-        }
-        auto unpack_stage_end = std::chrono::steady_clock::now();
-        summary.stage.unpack_ms = std::chrono::duration<double, std::milli>(
-            unpack_stage_end - unpack_stage_start).count();
-        summary.input_idle_ms = std::max(0.0, summary.stage.unpack_ms - summary.input_active_ms);
-
-        std::vector<KVPair*> d_unpacked;
-        std::vector<int> unpack_sizes;
-        d_unpacked.reserve(unpack_states.size());
-        unpack_sizes.reserve(unpack_states.size());
-        for (const auto& state : unpack_states) {
-            d_unpacked.push_back(state.d_out);
-            unpack_sizes.push_back((int)state.total_kv);
-        }
-
-        auto t0 = std::chrono::steady_clock::now();
-        DeviceMergeTimedResult merged = launch_merge_timed_from_device(d_unpacked, unpack_sizes, false);
-        auto t1 = std::chrono::steady_clock::now();
-        summary.stage.merge_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
-        summary.merge_kernel_ms = merged.kernel_ms;
-        summary.merge_h2d_ms = merged.h2d_ms;
-        summary.merge_d2h_ms = merged.d2h_ms;
-        summary.merge_h2d_bytes = merged.h2d_bytes;
-        summary.merge_d2h_bytes = merged.d2h_bytes;
-        for (auto& state : unpack_states) destroy_unpack_stream_state(state);
-
-        t0 = std::chrono::steady_clock::now();
-        RestartGroupSizeTimedResult group_sizes =
-            launch_restart_group_sizes_timed_from_device(merged.d_output, merged.total);
-        std::vector<DataBlockPlanEntry> plans =
-            plan_data_blocks_group_aligned_from_group_sizes(group_sizes.group_sizes, (uint32_t)merged.total);
-        t1 = std::chrono::steady_clock::now();
-        summary.stage.planning_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
-
-        DevicePlanArrays device_plans = upload_plans_to_device(plans);
-        summary.planning_h2d_ms = device_plans.h2d_ms;
-        summary.planning_h2d_bytes = device_plans.h2d_bytes;
-        summary.planning_d2h_ms = std::max(0.0, (double)group_sizes.wall_ms - (double)group_sizes.kernel_ms);
-        summary.planning_d2h_bytes = group_sizes.group_sizes.size() * sizeof(uint32_t);
-
-        t0 = std::chrono::steady_clock::now();
-        DeviceBloomBatchResult bloom = launch_bloom_filter_batched_to_device_from_plans(
-            merged.d_output, device_plans.d_first_kv, device_plans.d_num_kv, plans);
-        t1 = std::chrono::steady_clock::now();
-        summary.stage.bloom_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
-        summary.bloom_kernel_ms = bloom.kernel_ms;
-        summary.bloom_h2d_ms = bloom.h2d_ms;
-        summary.bloom_d2h_ms = bloom.d2h_ms;
-        summary.bloom_h2d_bytes = bloom.h2d_bytes;
-        summary.bloom_d2h_bytes = bloom.d2h_bytes;
-
-        PackResult planned_layout;
-        planned_layout.plans = plans;
-        planned_layout.block_sizes.resize(plans.size());
-        std::vector<uint32_t> predicted_filter_lengths(plans.size());
-        for (size_t i = 0; i < plans.size(); ++i) {
-            planned_layout.block_sizes[i] = plans[i].serialized_size;
-            uint32_t byte_vector_len = plans[i].num_kv * GP_BLOOM_BITS_PER_KEY;
-            predicted_filter_lengths[i] = (byte_vector_len + 7u) / 8u;
-        }
-        std::vector<std::pair<size_t, size_t>> pack_spans =
-            partition_output_blocks(planned_layout, predicted_filter_lengths, GP_TARGET_FILE_BYTES);
-
-        t0 = std::chrono::steady_clock::now();
-        DevicePackTimedResult pack = launch_pack_to_device_from_device_plans(
-            merged.d_output, device_plans.d_first_kv, device_plans.d_num_kv, plans);
-        Key128* d_largest_keys =
-            gather_largest_keys_to_device(merged.d_output, device_plans.d_first_kv, device_plans.d_num_kv,
-                                          device_plans.num_blocks);
-
-        clear_sst_files_in_dir(output_dir);
-        StreamedSSTWriteResult streamed_output = assemble_and_write_sst_files_from_spans_streaming(
-            plans, pack.block_sizes, pack.d_blocks, d_largest_keys, bloom.d_filter_bytes,
-            bloom.bitvec_offsets, bloom.bitvec_lengths, pack_spans, output_dir, "gpu_compacted");
-        t1 = std::chrono::steady_clock::now();
-
-        double pack_total_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
-        summary.stage.pack_ms = std::max(0.0, pack_total_ms - streamed_output.write_ms);
-        summary.pack_kernel_ms = pack.kernel_ms + streamed_output.kernel_ms;
-        summary.pack_h2d_ms = pack.h2d_ms + streamed_output.h2d_ms;
-        summary.pack_d2h_ms = pack.d2h_ms + streamed_output.d2h_ms;
-        summary.pack_h2d_bytes = pack.h2d_bytes + streamed_output.h2d_bytes;
-        summary.pack_d2h_bytes = pack.d2h_bytes + streamed_output.d2h_bytes;
-        summary.output_bytes = streamed_output.output_bytes;
-        summary.output_blocks = streamed_output.output_blocks;
-        summary.output_files = streamed_output.output_files;
-        summary.output_active_ms = streamed_output.output_active_ms;
-        summary.output_idle_ms = streamed_output.output_idle_ms;
-        summary.output_d2h_ms = streamed_output.output_d2h_ms;
-        summary.output_write_ms = streamed_output.write_ms;
-        summary.stream_overlap_pct = streamed_output.stream_overlap_pct;
-        summary.write_ms = streamed_output.write_ms;
-
-        if (d_largest_keys) cudaFree(d_largest_keys);
-        destroy_device_pack_timed_result(pack);
-        destroy_device_bloom_batch_result(bloom);
-        destroy_device_plan_arrays(device_plans);
-        cudaFree(merged.d_output);
-    }
-
-    auto pipeline_wall_end = std::chrono::steady_clock::now();
-    summary.pipeline_cpu_time_ms = get_cpu_time_ms() - pipeline_cpu_start;
-    summary.pipeline_wall_ms = std::chrono::duration<double, std::milli>(
-        pipeline_wall_end - pipeline_wall_start).count();
-    summary.cpu_time_ms = get_cpu_time_ms() - cpu_time_start;
-    auto total_end = std::chrono::steady_clock::now();
-    summary.total_ms = std::chrono::duration<double, std::milli>(total_end - total_start).count();
-
-    summary.h2d_lower_bound_bytes = summary.unpack_h2d_bytes + summary.merge_h2d_bytes
-                                  + summary.gc_h2d_bytes
-                                  + summary.planning_h2d_bytes + summary.bloom_h2d_bytes
-                                  + summary.pack_h2d_bytes;
-    summary.d2h_lower_bound_bytes = summary.unpack_d2h_bytes + summary.merge_d2h_bytes
-                                  + summary.gc_d2h_bytes
-                                  + summary.planning_d2h_bytes + summary.bloom_d2h_bytes
-                                  + summary.pack_d2h_bytes;
-    summary.unpack_non_kernel_ms = clamp_non_kernel(summary.stage.unpack_ms, summary.unpack_kernel_ms);
-    summary.merge_non_kernel_ms = clamp_non_kernel(summary.stage.merge_ms, summary.merge_kernel_ms);
-    summary.gc_non_kernel_ms = clamp_non_kernel(summary.stage.gc_ms, summary.gc_kernel_ms);
-    summary.bloom_non_kernel_ms = clamp_non_kernel(summary.stage.bloom_ms, summary.bloom_kernel_ms);
-    summary.pack_non_kernel_ms = clamp_non_kernel(summary.stage.pack_ms, summary.pack_kernel_ms);
-    return summary;
-}
-
 static RunSummary run_gpu_streaming_once(const std::vector<std::string>& input_paths,
                                          const std::string&               output_dir,
                                          const std::string&               gpu_mode)
@@ -1105,6 +872,148 @@ static RunSummary run_gpu_streaming_once(const std::vector<std::string>& input_p
         return run_gpu_streaming_c_ref_once(input_paths, output_dir);
     }
     throw std::runtime_error("unsupported streaming gpu mode: " + gpu_mode);
+}
+
+static void run_gpu_streaming_q_ref_profile_once(const std::vector<std::string>& input_paths,
+                                                 const std::string&               output_dir)
+{
+    NvtxRange total_range("gpu_streaming_io_profile_total:q_ref");
+
+    std::vector<StreamedInputFileInfo> inputs;
+    {
+        NvtxRange load_range("gpu_streaming_io_profile_load_metadata:q_ref");
+        double unused_read_parse_ms = 0.0;
+        inputs = load_input_metadata_with_timing(input_paths, unused_read_parse_ms);
+    }
+
+    {
+        NvtxRange pipeline_range("gpu_streaming_io_profile_pipeline:q_ref");
+        RunSummary unused_summary;
+        std::vector<GPURefUnpackStreamState> unpack_states(inputs.size());
+        stream_input_unpack_refs(inputs, unused_summary, unpack_states);
+
+        std::vector<KVRef*> d_unpacked;
+        std::vector<int> unpack_sizes;
+        d_unpacked.reserve(unpack_states.size());
+        unpack_sizes.reserve(unpack_states.size());
+        for (const auto& state : unpack_states) {
+            d_unpacked.push_back(state.d_out);
+            unpack_sizes.push_back((int)state.total_kv);
+        }
+
+        DeviceMergeRefUntimedResult merged =
+            launch_merge_refs_untimed_from_device(d_unpacked, unpack_sizes);
+        std::vector<uint32_t> group_sizes =
+            launch_restart_group_sizes_untimed_from_device(merged.d_output, merged.total);
+        std::vector<DataBlockPlanEntry> plans =
+            plan_data_blocks_group_aligned_from_group_sizes(group_sizes, (uint32_t)merged.total);
+        DevicePlanArraysUntimed device_plans = upload_plans_to_device_untimed(plans);
+        DeviceBloomBatchUntimedResult bloom = launch_bloom_filter_batched_untimed_from_plans(
+            merged.d_output, device_plans.d_first_kv, device_plans.d_num_kv, plans);
+
+        PackResult planned_layout;
+        planned_layout.plans = plans;
+        planned_layout.block_sizes.resize(plans.size());
+        for (size_t i = 0; i < plans.size(); ++i) {
+            planned_layout.block_sizes[i] = plans[i].serialized_size;
+        }
+        std::vector<uint32_t> predicted_filter_lengths = predict_filter_lengths_from_plans(plans);
+        std::vector<std::pair<size_t, size_t>> pack_spans =
+            partition_output_blocks(planned_layout, predicted_filter_lengths, GP_TARGET_FILE_BYTES);
+
+        const uint8_t** d_source_files = upload_source_file_ptrs_to_device(unpack_states);
+        DevicePackUntimedResult pack = launch_pack_untimed_from_device_plans(
+            merged.d_output, d_source_files, device_plans.d_first_kv, device_plans.d_num_kv, plans);
+        Key128* d_largest_keys = gather_largest_keys_to_device(
+            merged.d_output, device_plans.d_first_kv, device_plans.d_num_kv, device_plans.num_blocks);
+        clear_sst_files_in_dir(output_dir);
+        (void)assemble_and_write_sst_files_from_spans_streaming(
+            plans, pack.block_sizes, pack.d_blocks, d_largest_keys, bloom.d_filter_bytes,
+            bloom.bitvec_offsets, bloom.bitvec_lengths, pack_spans, output_dir, "gpu_compacted");
+
+        if (d_source_files) cudaFree((void*)d_source_files);
+        if (d_largest_keys) cudaFree(d_largest_keys);
+        destroy_device_pack_untimed_result(pack);
+        destroy_device_bloom_batch_untimed_result(bloom);
+        destroy_device_plan_arrays_untimed(device_plans);
+        if (merged.d_output) cudaFree(merged.d_output);
+        for (auto& state : unpack_states) destroy_unpack_stream_state(state);
+    }
+}
+
+static void run_gpu_streaming_c_ref_profile_once(const std::vector<std::string>& input_paths,
+                                                 const std::string&               output_dir)
+{
+    NvtxRange total_range("gpu_streaming_io_profile_total:c_ref");
+
+    std::vector<StreamedInputFileInfo> inputs;
+    {
+        NvtxRange load_range("gpu_streaming_io_profile_load_metadata:c_ref");
+        double unused_read_parse_ms = 0.0;
+        inputs = load_input_metadata_with_timing(input_paths, unused_read_parse_ms);
+    }
+
+    {
+        NvtxRange pipeline_range("gpu_streaming_io_profile_pipeline:c_ref");
+        RunSummary unused_summary;
+        std::vector<GPURefUnpackStreamState> unpack_states(inputs.size());
+        stream_input_unpack_refs(inputs, unused_summary, unpack_states);
+
+        std::vector<KVRef*> d_unpacked;
+        std::vector<int> unpack_sizes;
+        d_unpacked.reserve(unpack_states.size());
+        unpack_sizes.reserve(unpack_states.size());
+        for (const auto& state : unpack_states) {
+            d_unpacked.push_back(state.d_out);
+            unpack_sizes.push_back((int)state.total_kv);
+        }
+
+        DeviceMergeRefUntimedResult merged =
+            launch_merge_refs_untimed_from_device(d_unpacked, unpack_sizes);
+        PinnedRefArray pinned = copy_ref_array_to_pinned_from_device(merged.d_output, merged.total);
+        std::vector<KVRef> survivors = garbage_collect_sorted_refs(
+            pinned.data, (size_t)pinned.count);
+        pinned.free();
+
+        KVRef* d_gc_output = upload_ref_array_to_device(survivors);
+        if (merged.d_output) cudaFree(merged.d_output);
+
+        std::vector<uint32_t> group_sizes = launch_restart_group_sizes_untimed_from_device(
+            d_gc_output, (int)survivors.size());
+        std::vector<DataBlockPlanEntry> plans = plan_data_blocks_group_aligned_from_group_sizes(
+            group_sizes, (uint32_t)survivors.size());
+        DevicePlanArraysUntimed device_plans = upload_plans_to_device_untimed(plans);
+        DeviceBloomBatchUntimedResult bloom = launch_bloom_filter_batched_untimed_from_plans(
+            d_gc_output, device_plans.d_first_kv, device_plans.d_num_kv, plans);
+
+        PackResult planned_layout;
+        planned_layout.plans = plans;
+        planned_layout.block_sizes.resize(plans.size());
+        for (size_t i = 0; i < plans.size(); ++i) {
+            planned_layout.block_sizes[i] = plans[i].serialized_size;
+        }
+        std::vector<uint32_t> predicted_filter_lengths = predict_filter_lengths_from_plans(plans);
+        std::vector<std::pair<size_t, size_t>> pack_spans =
+            partition_output_blocks(planned_layout, predicted_filter_lengths, GP_TARGET_FILE_BYTES);
+
+        const uint8_t** d_source_files = upload_source_file_ptrs_to_device(unpack_states);
+        DevicePackUntimedResult pack = launch_pack_untimed_from_device_plans(
+            d_gc_output, d_source_files, device_plans.d_first_kv, device_plans.d_num_kv, plans);
+        Key128* d_largest_keys = gather_largest_keys_to_device(
+            d_gc_output, device_plans.d_first_kv, device_plans.d_num_kv, device_plans.num_blocks);
+        clear_sst_files_in_dir(output_dir);
+        (void)assemble_and_write_sst_files_from_spans_streaming(
+            plans, pack.block_sizes, pack.d_blocks, d_largest_keys, bloom.d_filter_bytes,
+            bloom.bitvec_offsets, bloom.bitvec_lengths, pack_spans, output_dir, "gpu_compacted");
+
+        if (d_source_files) cudaFree((void*)d_source_files);
+        if (d_largest_keys) cudaFree(d_largest_keys);
+        destroy_device_pack_untimed_result(pack);
+        destroy_device_bloom_batch_untimed_result(bloom);
+        destroy_device_plan_arrays_untimed(device_plans);
+        if (d_gc_output) cudaFree(d_gc_output);
+        for (auto& state : unpack_states) destroy_unpack_stream_state(state);
+    }
 }
 
 static double clamp_non_kernel(double stage_ms, float kernel_ms)
@@ -1323,22 +1232,27 @@ static void run_gpu_profile_once(const std::vector<std::string>& input_paths,
                                  const std::string&               output_dir,
                                  const std::string&               gpu_mode)
 {
-    if (is_streaming_io_mode(gpu_mode)) {
-        (void)run_gpu_streaming_once(input_paths, output_dir, gpu_mode);
-        return;
-    }
-
     NvtxRange total_range(std::string("gpu_profile_total:") + gpu_mode);
 
-    std::vector<ParsedSST> inputs;
-    {
-        NvtxRange load_range(std::string("gpu_profile_load_inputs:") + gpu_mode);
-        inputs = load_inputs(input_paths);
+    if (gpu_mode == "q_paper_with_plan_streaming_io") {
+        NvtxRange pipeline_range(std::string("gpu_profile_pipeline:") + gpu_mode);
+        run_gpu_streaming_q_ref_profile_once(input_paths, output_dir);
+        return;
+    }
+    if (gpu_mode == "c_paper_with_plan_streaming_io") {
+        NvtxRange pipeline_range(std::string("gpu_profile_pipeline:") + gpu_mode);
+        run_gpu_streaming_c_ref_profile_once(input_paths, output_dir);
+        return;
     }
 
     GPUCompactionResult gpu;
     {
         NvtxRange pipeline_range(std::string("gpu_profile_pipeline:") + gpu_mode);
+        std::vector<ParsedSST> inputs;
+        {
+            NvtxRange load_range(std::string("gpu_profile_load_inputs:") + gpu_mode);
+            inputs = load_inputs(input_paths);
+        }
         if (gpu_mode == "q_paper_with_plan") {
             gpu = gpu_q_compaction_paper_profile_from_parsed(inputs, false);
         }
@@ -1428,10 +1342,8 @@ int main(int argc, char** argv)
     } else {
         std::printf("  cpu baseline: enabled (full GC + group-aligned planning)\n");
     }
-    const char* gc_desc = is_gc_enabled_mode(gpu_mode)
-        ? "enabled (CPU after GPU sort, before GPU SST construction)"
-        : "disabled (Q-compaction only)";
-    std::printf("  gpu garbage collection: %s\n\n", gc_desc);
+    const char* gc_desc = is_gc_enabled_mode(gpu_mode) ? "cpu" : "none";
+    std::printf("  garbage collection type: %s\n\n", gc_desc);
 
     std::vector<RunSummary> cpu_runs, gpu_runs;
     if (!gpu_only) {

@@ -6,23 +6,23 @@ C-compaction benchmark
   profile-only mode: enabled
   storage IO: direct (O_DIRECT + fdatasync)
   cpu baseline: disabled (--profile_only)
-  gpu garbage collection: enabled (CPU after GPU sort, before GPU SST construction)
+  garbage collection type: cpu
 
-BENCH_ITERATION_MARKER phase=start index=0 warmup=0 timed=1 runs=5 profile_only=1 gpu_only=1 epoch_ms=1774668550782
-BENCH_ITERATION_MARKER phase=end index=0 warmup=0 timed=1 runs=5 profile_only=1 gpu_only=1 epoch_ms=1774668551200
-BENCH_ITERATION_MARKER phase=start index=1 warmup=0 timed=1 runs=5 profile_only=1 gpu_only=1 epoch_ms=1774668551200
-BENCH_ITERATION_MARKER phase=end index=1 warmup=0 timed=1 runs=5 profile_only=1 gpu_only=1 epoch_ms=1774668551604
-BENCH_ITERATION_MARKER phase=start index=2 warmup=0 timed=1 runs=5 profile_only=1 gpu_only=1 epoch_ms=1774668551604
-BENCH_ITERATION_MARKER phase=end index=2 warmup=0 timed=1 runs=5 profile_only=1 gpu_only=1 epoch_ms=1774668551982
-BENCH_ITERATION_MARKER phase=start index=3 warmup=0 timed=1 runs=5 profile_only=1 gpu_only=1 epoch_ms=1774668551982
-BENCH_ITERATION_MARKER phase=end index=3 warmup=0 timed=1 runs=5 profile_only=1 gpu_only=1 epoch_ms=1774668552379
-BENCH_ITERATION_MARKER phase=start index=4 warmup=0 timed=1 runs=5 profile_only=1 gpu_only=1 epoch_ms=1774668552379
-BENCH_ITERATION_MARKER phase=end index=4 warmup=0 timed=1 runs=5 profile_only=1 gpu_only=1 epoch_ms=1774668552771
+BENCH_ITERATION_MARKER phase=start index=0 warmup=0 timed=1 runs=5 profile_only=1 gpu_only=1 epoch_ms=1774714795783
+BENCH_ITERATION_MARKER phase=end index=0 warmup=0 timed=1 runs=5 profile_only=1 gpu_only=1 epoch_ms=1774714796247
+BENCH_ITERATION_MARKER phase=start index=1 warmup=0 timed=1 runs=5 profile_only=1 gpu_only=1 epoch_ms=1774714796247
+BENCH_ITERATION_MARKER phase=end index=1 warmup=0 timed=1 runs=5 profile_only=1 gpu_only=1 epoch_ms=1774714796706
+BENCH_ITERATION_MARKER phase=start index=2 warmup=0 timed=1 runs=5 profile_only=1 gpu_only=1 epoch_ms=1774714796706
+BENCH_ITERATION_MARKER phase=end index=2 warmup=0 timed=1 runs=5 profile_only=1 gpu_only=1 epoch_ms=1774714797170
+BENCH_ITERATION_MARKER phase=start index=3 warmup=0 timed=1 runs=5 profile_only=1 gpu_only=1 epoch_ms=1774714797170
+BENCH_ITERATION_MARKER phase=end index=3 warmup=0 timed=1 runs=5 profile_only=1 gpu_only=1 epoch_ms=1774714797617
+BENCH_ITERATION_MARKER phase=start index=4 warmup=0 timed=1 runs=5 profile_only=1 gpu_only=1 epoch_ms=1774714797617
+BENCH_ITERATION_MARKER phase=end index=4 warmup=0 timed=1 runs=5 profile_only=1 gpu_only=1 epoch_ms=1774714798059
 Profile-only GPU compaction complete.
 GPU 0: General Metrics for NVIDIA GA10x
 Collecting data...
-Generating '/tmp/nsys-haques24/nsys-report-f9c8.qdstrm'
+Generating '/tmp/nsys-haques24/nsys-report-5ada.qdstrm'
 Press Ctrl-C to stop symbol files downloading
-[1/1] [0%                          ] nsys_val32B_c_paper_with_plan_streaming_io.nsys-rep[1/1] [0%                          ] nsys_val32B_c_paper_with_plan_streaming_io.nsys-rep[1/1] [8%                          ] nsys_val32B_c_paper_with_plan_streaming_io.nsys-rep[1/1] [=17%                        ] nsys_val32B_c_paper_with_plan_streaming_io.nsys-rep[1/1] [==19%                       ] nsys_val32B_c_paper_with_plan_streaming_io.nsys-rep[1/1] [==20%                       ] nsys_val32B_c_paper_with_plan_streaming_io.nsys-rep[1/1] [=====29%                    ] nsys_val32B_c_paper_with_plan_streaming_io.nsys-rep[1/1] [=====30%                    ] nsys_val32B_c_paper_with_plan_streaming_io.nsys-rep[1/1] [==========47%               ] nsys_val32B_c_paper_with_plan_streaming_io.nsys-rep[1/1] [===========51%              ] nsys_val32B_c_paper_with_plan_streaming_io.nsys-rep[1/1] [========================100%] nsys_val32B_c_paper_with_plan_streaming_io.nsys-rep[1/1] [========================100%] nsys_val32B_c_paper_with_plan_streaming_io.nsys-rep
+[1/1] [0%                          ] nsys_val32B_c_paper_with_plan_streaming_io.nsys-rep[1/1] [0%                          ] nsys_val32B_c_paper_with_plan_streaming_io.nsys-rep[1/1] [8%                          ] nsys_val32B_c_paper_with_plan_streaming_io.nsys-rep[1/1] [9%                          ] nsys_val32B_c_paper_with_plan_streaming_io.nsys-rep[1/1] [10%                         ] nsys_val32B_c_paper_with_plan_streaming_io.nsys-rep[1/1] [11%                         ] nsys_val32B_c_paper_with_plan_streaming_io.nsys-rep[1/1] [==19%                       ] nsys_val32B_c_paper_with_plan_streaming_io.nsys-rep[1/1] [====27%                     ] nsys_val32B_c_paper_with_plan_streaming_io.nsys-rep[1/1] [=====31%                    ] nsys_val32B_c_paper_with_plan_streaming_io.nsys-rep[1/1] [==========47%               ] nsys_val32B_c_paper_with_plan_streaming_io.nsys-rep[1/1] [===========51%              ] nsys_val32B_c_paper_with_plan_streaming_io.nsys-rep[1/1] [========================100%] nsys_val32B_c_paper_with_plan_streaming_io.nsys-rep[1/1] [========================100%] nsys_val32B_c_paper_with_plan_streaming_io.nsys-rep
 Generated:
 	/home/1755_project/invalidation-aware-caching/local_benchmark_artifacts/gpu_compaction/sweep_results/quick-test_c_modes_nsys_gpu-profile-only/profiles/nsys_val32B_c_paper_with_plan_streaming_io.nsys-rep

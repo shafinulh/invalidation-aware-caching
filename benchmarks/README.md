@@ -106,7 +106,7 @@ Measures GPU compaction throughput using `gpcomp_bench`. Sweeps across value siz
 |---|---|
 | _(default)_ | Runs with CPU baseline comparison |
 | `--gpu_only` | GPU-only, no CPU baseline; enables host metrics at 0.1s |
-| `--profile_only` | GPU-only, skips throughput measurement, focuses on resource utilization |
+| `--profile_only` | GPU-only, skips throughput measurement and minimizes benchmark timing overhead during profiled runs |
 
 ### Scripts
 
@@ -121,7 +121,7 @@ Primary sweep script. Collects per-stage timing breakdown (read, unpack, sort, g
 | `--runs` | `5` | Iterations per mode |
 | `--num_ssts` | _(from compile constant)_ | Override `GP_NUM_INPUT_SSTS` |
 | `--gpu_only` | off | GPU-only mode |
-| `--profile_only` | off | Profile-only mode (implies `--gpu_only`) |
+| `--profile_only` | off | Profile-only mode: implies `--gpu_only` and minimizes benchmark timing overhead during profiled runs |
 | `--host_metrics_interval_sec` | auto | Host metrics sampling interval |
 | `--zipf_alpha` | `0.0` | Key distribution (0.0 = uniform) |
 | `--user_key_space` | `200000000` | Key space size |

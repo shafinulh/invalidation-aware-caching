@@ -6,10 +6,10 @@ C-compaction benchmark
   profile-only mode: enabled
   storage IO: direct (O_DIRECT + fdatasync)
   cpu baseline: disabled (--profile_only)
-  gpu garbage collection: enabled (CPU after GPU sort, before GPU SST construction)
+  garbage collection type: cpu
 
-BENCH_ITERATION_MARKER phase=start index=0 warmup=0 timed=1 runs=2 profile_only=1 gpu_only=1 epoch_ms=1774665931904
-BENCH_ITERATION_MARKER phase=end index=0 warmup=0 timed=1 runs=2 profile_only=1 gpu_only=1 epoch_ms=1774665932522
-BENCH_ITERATION_MARKER phase=start index=1 warmup=0 timed=1 runs=2 profile_only=1 gpu_only=1 epoch_ms=1774665932522
-BENCH_ITERATION_MARKER phase=end index=1 warmup=0 timed=1 runs=2 profile_only=1 gpu_only=1 epoch_ms=1774665933100
+BENCH_ITERATION_MARKER phase=start index=0 warmup=0 timed=1 runs=2 profile_only=1 gpu_only=1 epoch_ms=1774715195859
+BENCH_ITERATION_MARKER phase=end index=0 warmup=0 timed=1 runs=2 profile_only=1 gpu_only=1 epoch_ms=1774715196431
+BENCH_ITERATION_MARKER phase=start index=1 warmup=0 timed=1 runs=2 profile_only=1 gpu_only=1 epoch_ms=1774715196431
+BENCH_ITERATION_MARKER phase=end index=1 warmup=0 timed=1 runs=2 profile_only=1 gpu_only=1 epoch_ms=1774715196967
 Profile-only GPU compaction complete.

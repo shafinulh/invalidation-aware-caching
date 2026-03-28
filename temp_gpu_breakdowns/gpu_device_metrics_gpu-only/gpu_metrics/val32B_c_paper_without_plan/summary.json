@@ -7,28 +7,28 @@
     0
   ],
   "incomplete_iteration_indices": [],
-  "query_sample_count": 13,
+  "query_sample_count": 12,
   "dmon_sample_count": 3,
   "force_first_run_warmup": false,
   "timed_duration_ms": {
-    "min": 572.0,
-    "mean": 572.0,
-    "max": 572.0
+    "min": 526.0,
+    "mean": 526.0,
+    "max": 526.0
   },
   "timed_gpu_total_ms": {
-    "min": 548.908,
-    "mean": 548.908,
-    "max": 548.908
+    "min": 507.804,
+    "mean": 507.804,
+    "max": 507.804
   },
   "timed_gpu_util_pct_avg": {
-    "min": 35.667,
-    "mean": 35.667,
-    "max": 35.667
+    "min": 36.333,
+    "mean": 36.333,
+    "max": 36.333
   },
   "timed_gpu_util_pct_max": {
-    "min": 56.0,
-    "mean": 56.0,
-    "max": 56.0
+    "min": 47.0,
+    "mean": 47.0,
+    "max": 47.0
   },
   "timed_memory_used_mb_max": {
     "min": 1343.0,
@@ -36,29 +36,29 @@
     "max": 1343.0
   },
   "timed_power_draw_w_avg": {
-    "min": 70.577,
-    "mean": 70.577,
-    "max": 70.577
+    "min": 73.293,
+    "mean": 73.293,
+    "max": 73.293
   },
   "timed_dmon_sm_pct_avg": {
-    "min": 15.5,
-    "mean": 15.5,
-    "max": 15.5
+    "min": 0.0,
+    "mean": 0.0,
+    "max": 0.0
   },
   "timed_dmon_mem_pct_avg": {
-    "min": 4.5,
-    "mean": 4.5,
-    "max": 4.5
+    "min": 0.0,
+    "mean": 0.0,
+    "max": 0.0
   },
   "timed_sm_active_pct_avg": {
-    "min": 15.5,
-    "mean": 15.5,
-    "max": 15.5
+    "min": 0.0,
+    "mean": 0.0,
+    "max": 0.0
   },
   "timed_dram_active_pct_avg": {
-    "min": 4.5,
-    "mean": 4.5,
-    "max": 4.5
+    "min": 0.0,
+    "mean": 0.0,
+    "max": 0.0
   },
   "notes": {
     "query_gpu_metrics": "Sampled from nvidia-smi --query-gpu at subsecond cadence.",
