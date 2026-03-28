@@ -1,0 +1,16 @@
+secs_elapsed,tid,thread_name,thread_role,cpu_pct,cpu_id,state
+0.102,94314,gpcomp_bench,other,29.6026,8,S
+0.102,94329,cuda-EvtHandlr,other,0.0,12,S
+0.102,94330,cuda-EvtHandlr,other,0.0,12,S
+0.202,94314,gpcomp_bench,other,49.6123,4,S
+0.202,94329,cuda-EvtHandlr,other,0.0,12,S
+0.202,94330,cuda-EvtHandlr,other,0.0,12,S
+0.202,94331,gpcomp_bench,other,0.0,13,S
+0.303,94314,gpcomp_bench,other,19.8196,8,S
+0.303,94329,cuda-EvtHandlr,other,0.0,12,S
+0.303,94330,cuda-EvtHandlr,other,0.0,2,S
+0.303,94331,gpcomp_bench,other,0.0,13,S
+0.404,94314,gpcomp_bench,other,49.6863,4,S
+0.404,94329,cuda-EvtHandlr,other,0.0,12,S
+0.404,94330,cuda-EvtHandlr,other,0.0,2,S
+0.404,94331,gpcomp_bench,other,0.0,13,S

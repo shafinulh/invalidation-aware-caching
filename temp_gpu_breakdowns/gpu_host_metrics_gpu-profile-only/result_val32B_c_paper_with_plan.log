@@ -1,0 +1,15 @@
+C-compaction benchmark
+  input SSTs: 32
+  key bytes: 16  value bytes: 32  restart interval: 4  block size: 32768
+  runs: 2  (profile-only, all runs profiled)
+  gpu mode: c_paper_with_plan
+  profile-only mode: enabled
+  storage IO: direct (O_DIRECT + fdatasync)
+  cpu baseline: disabled (--profile_only)
+  gpu garbage collection: enabled (CPU after GPU sort, before GPU SST construction)
+
+BENCH_ITERATION_MARKER phase=start index=0 warmup=0 timed=1 runs=2 profile_only=1 gpu_only=1 epoch_ms=1774665929498
+BENCH_ITERATION_MARKER phase=end index=0 warmup=0 timed=1 runs=2 profile_only=1 gpu_only=1 epoch_ms=1774665930158
+BENCH_ITERATION_MARKER phase=start index=1 warmup=0 timed=1 runs=2 profile_only=1 gpu_only=1 epoch_ms=1774665930158
+BENCH_ITERATION_MARKER phase=end index=1 warmup=0 timed=1 runs=2 profile_only=1 gpu_only=1 epoch_ms=1774665930752
+Profile-only GPU compaction complete.
