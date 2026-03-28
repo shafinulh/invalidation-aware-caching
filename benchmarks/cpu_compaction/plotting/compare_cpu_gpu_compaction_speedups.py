@@ -23,22 +23,28 @@ except ImportError as exc:  # pragma: no cover
 
 GPU_MODE_ORDER = [
     "q_paper_with_plan",
+    "q_paper_with_plan_streaming_io",
     "q_paper_without_plan",
     "c_paper_with_plan",
+    "c_paper_with_plan_streaming_io",
     "c_paper_without_plan",
 ]
 
 GPU_MODE_LABELS = {
     "q_paper_with_plan": "q_plan",
+    "q_paper_with_plan_streaming_io": "q_plan_stream_io",
     "q_paper_without_plan": "q_no_plan",
     "c_paper_with_plan": "c_plan",
+    "c_paper_with_plan_streaming_io": "c_plan_stream_io",
     "c_paper_without_plan": "c_no_plan",
 }
 
 GPU_MODE_COLORS = {
     "q_paper_with_plan": "#33b39f",
+    "q_paper_with_plan_streaming_io": "#2a9d8f",
     "q_paper_without_plan": "#16897b",
     "c_paper_with_plan": "#f4a261",
+    "c_paper_with_plan_streaming_io": "#84a98c",
     "c_paper_without_plan": "#e76f51",
 }
 
@@ -317,7 +323,12 @@ def plot_comparison(
     width = min(0.82 / max(slot_count, 1), 0.12)
     offsets = (np.arange(slot_count) - (slot_count - 1) / 2.0) * width
 
-    fig, ax = plt.subplots(figsize=(max(10.5, len(value_sizes) * 1.55), 7.2))
+    legend_cols = min(4, max(1, len(method_order)))
+    legend_rows = int(math.ceil(len(method_order) / legend_cols))
+
+    fig_width = max(13.5, len(value_sizes) * 3.2)
+    fig_height = 8.2 + 0.45 * max(0, legend_rows - 1)
+    fig, ax = plt.subplots(figsize=(fig_width, fig_height))
     for idx, method_key in enumerate(method_order):
         heights = []
         errors = []
@@ -361,19 +372,20 @@ def plot_comparison(
     fig.suptitle(
         f"CPU Subcompaction vs GPU Compaction Speedup\n"
         f"SST={sst_size_mb}MB, Input={input_sst_count} SSTs",
-        y=0.975,
-        fontsize=17,
+        y=0.985,
+        fontsize=18,
     )
     fig.legend(
         handles=legend_handles,
         labels=[labels[method_key] for method_key in method_order],
         loc="upper center",
-        bbox_to_anchor=(0.5, 0.90),
-        ncol=min(len(method_order), 5),
+        bbox_to_anchor=(0.5, 0.935),
+        ncol=legend_cols,
         frameon=False,
-        fontsize=13,
-        columnspacing=1.8,
-        handletextpad=0.8,
+        fontsize=11.5,
+        columnspacing=1.4,
+        handletextpad=0.7,
+        labelspacing=0.8,
     )
 
     fig.text(
@@ -385,13 +397,14 @@ def plot_comparison(
         fontsize=9,
     )
 
-    fig.tight_layout(rect=(0, 0.06, 1, 0.76))
+    top_rect = 0.80 - 0.05 * max(0, legend_rows - 1)
+    fig.tight_layout(rect=(0.02, 0.06, 0.98, top_rect))
     prefix = normalize_prefix(sst_size_mb, input_sst_count)
     png_path = output_dir / f"{prefix}_{output_name}.png"
     pdf_path = output_dir / f"{prefix}_{output_name}.pdf"
     if pdf_path.exists():
         pdf_path.unlink()
-    fig.savefig(png_path, dpi=180)
+    fig.savefig(png_path, dpi=180, bbox_inches="tight")
     plt.close(fig)
     return png_path
 
@@ -518,7 +531,7 @@ def main() -> int:
     )
     parser.add_argument(
         "--gpu-modes",
-        default="q_paper_with_plan q_paper_without_plan c_paper_with_plan c_paper_without_plan",
+        default="q_paper_with_plan q_paper_with_plan_streaming_io q_paper_without_plan c_paper_with_plan c_paper_with_plan_streaming_io c_paper_without_plan",
         help="space-separated GPComp mode list",
     )
     args = parser.parse_args()

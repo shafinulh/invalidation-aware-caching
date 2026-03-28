@@ -3,15 +3,20 @@
 #include "gpcomp_bloom.cuh"
 #include "gpcomp_pack.cuh"
 
+#include <algorithm>
 #include <cerrno>
 #include <chrono>
+#include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <dirent.h>
 #include <fcntl.h>
+#include <mutex>
 #include <string>
 #include <sys/stat.h>
+#include <thread>
 #include <unistd.h>
 #include <vector>
 
@@ -216,6 +221,172 @@ static inline std::vector<uint8_t> read_binary_file_direct(const std::string& pa
     return bytes;
 }
 
+struct RegisteredDirectReadBuffer {
+    uint8_t* data = nullptr;
+    size_t   logical_size = 0;
+    size_t   physical_size = 0;
+    bool     registered = false;
+
+    RegisteredDirectReadBuffer() = default;
+    RegisteredDirectReadBuffer(const RegisteredDirectReadBuffer&) = delete;
+    RegisteredDirectReadBuffer& operator=(const RegisteredDirectReadBuffer&) = delete;
+
+    RegisteredDirectReadBuffer(RegisteredDirectReadBuffer&& other) noexcept
+        : data(other.data),
+          logical_size(other.logical_size),
+          physical_size(other.physical_size),
+          registered(other.registered)
+    {
+        other.data = nullptr;
+        other.logical_size = 0;
+        other.physical_size = 0;
+        other.registered = false;
+    }
+
+    RegisteredDirectReadBuffer& operator=(RegisteredDirectReadBuffer&& other) noexcept
+    {
+        if (this != &other) {
+            reset();
+            data = other.data;
+            logical_size = other.logical_size;
+            physical_size = other.physical_size;
+            registered = other.registered;
+            other.data = nullptr;
+            other.logical_size = 0;
+            other.physical_size = 0;
+            other.registered = false;
+        }
+        return *this;
+    }
+
+    ~RegisteredDirectReadBuffer() { reset(); }
+
+    void reset()
+    {
+        if (data) {
+            if (registered) cudaHostUnregister(data);
+            std::free(data);
+        }
+        data = nullptr;
+        logical_size = 0;
+        physical_size = 0;
+        registered = false;
+    }
+};
+
+static inline RegisteredDirectReadBuffer read_binary_file_direct_registered(const std::string& path)
+{
+    RegisteredDirectReadBuffer result;
+
+    struct stat st{};
+    gp_fail_if(stat(path.c_str(), &st) != 0,
+               "Failed to stat '" + path + "': " + std::string(std::strerror(errno)));
+    gp_fail_if(st.st_size < (off_t)sizeof(SSTFooter),
+               "SST file is too small: '" + path + "'");
+
+    result.physical_size = (size_t)st.st_size;
+    result.logical_size = result.physical_size;
+
+    gp_fail_if(posix_memalign((void**)&result.data, GP_DIRECT_IO_ALIGNMENT, result.physical_size) != 0,
+               "Failed to allocate aligned read buffer for '" + path + "'");
+
+    int flags = O_RDONLY;
+    if (gpcomp_direct_io_enabled()) flags |= O_DIRECT;
+    int fd = open(path.c_str(), flags);
+    if (fd < 0 && (flags & O_DIRECT)) {
+        fd = open(path.c_str(), O_RDONLY);
+    }
+    if (fd < 0) {
+        result.reset();
+        gp_fail_if(true, "Failed to open '" + path + "' for read: " + std::string(std::strerror(errno)));
+    }
+
+    size_t read_total = 0;
+    while (read_total < result.physical_size) {
+        ssize_t read_now = read(fd, result.data + read_total, result.physical_size - read_total);
+        if (read_now < 0) {
+            int saved_errno = errno;
+            close(fd);
+            result.reset();
+            gp_fail_if(true, "Read failed for '" + path + "': " + std::string(std::strerror(saved_errno)));
+        }
+        gp_fail_if(read_now == 0, "Unexpected EOF during read of '" + path + "'");
+        read_total += (size_t)read_now;
+    }
+    close(fd);
+
+    if (result.physical_size >= sizeof(DirectIoTrailer)) {
+        DirectIoTrailer trailer{};
+        std::memcpy(&trailer,
+                    result.data + result.physical_size - sizeof(DirectIoTrailer),
+                    sizeof(DirectIoTrailer));
+        if (trailer.magic == GP_DIRECT_IO_TRAILER_MAGIC) {
+            gp_fail_if(trailer.logical_size > result.physical_size - sizeof(DirectIoTrailer),
+                       "Corrupt direct-I/O trailer in '" + path + "'");
+            result.logical_size = (size_t)trailer.logical_size;
+        }
+    }
+
+    cudaError_t register_err =
+        cudaHostRegister(result.data, result.physical_size, cudaHostRegisterDefault);
+    gp_fail_if(register_err != cudaSuccess,
+               "Failed to register pinned read buffer for '" + path + "': "
+                   + std::string(cudaGetErrorString(register_err)));
+    result.registered = true;
+    return result;
+}
+
+static inline void ensure_registered_direct_read_buffer(uint8_t*& data,
+                                                        size_t&   capacity,
+                                                        bool&     registered,
+                                                        size_t    required_size)
+{
+    if (capacity >= required_size && data) return;
+
+    if (data) {
+        if (registered) cudaHostUnregister(data);
+        std::free(data);
+        data = nullptr;
+        capacity = 0;
+        registered = false;
+    }
+
+    gp_fail_if(posix_memalign((void**)&data, GP_DIRECT_IO_ALIGNMENT, required_size) != 0,
+               "Failed to allocate aligned reusable read buffer");
+    cudaError_t register_err = cudaHostRegister(data, required_size, cudaHostRegisterDefault);
+    gp_fail_if(register_err != cudaSuccess,
+               "Failed to register reusable pinned read buffer: "
+                   + std::string(cudaGetErrorString(register_err)));
+    capacity = required_size;
+    registered = true;
+}
+
+static inline void read_binary_file_direct_into_registered(const std::string& path,
+                                                           uint8_t*           data,
+                                                           size_t             physical_size)
+{
+    int flags = O_RDONLY;
+    if (gpcomp_direct_io_enabled()) flags |= O_DIRECT;
+    int fd = open(path.c_str(), flags);
+    if (fd < 0 && (flags & O_DIRECT)) {
+        fd = open(path.c_str(), O_RDONLY);
+    }
+    gp_fail_if(fd < 0, "Failed to open '" + path + "' for read: " + std::string(std::strerror(errno)));
+
+    size_t read_total = 0;
+    while (read_total < physical_size) {
+        ssize_t read_now = read(fd, data + read_total, physical_size - read_total);
+        if (read_now < 0) {
+            int saved_errno = errno;
+            close(fd);
+            gp_fail_if(true, "Read failed for '" + path + "': " + std::string(std::strerror(saved_errno)));
+        }
+        gp_fail_if(read_now == 0, "Unexpected EOF during read of '" + path + "'");
+        read_total += (size_t)read_now;
+    }
+    close(fd);
+}
+
 static inline std::vector<uint8_t> build_cpu_filter_bytes(const std::vector<KVPair>& kv_array,
                                                           const std::vector<DataBlockPlanEntry>& plans,
                                                           std::vector<uint32_t>& bitvec_offsets,
@@ -235,6 +406,37 @@ static inline std::vector<uint8_t> build_cpu_filter_bytes(const std::vector<KVPa
                               GP_BLOOM_HASHES,
                               byte_vector_len,
                               byte_vector.data());
+        cpu_pack_bit_vector(byte_vector.data(), byte_vector_len, bit_vector.data());
+        bitvec_offsets[i] = offset;
+        bitvec_lengths[i] = (uint32_t)bitvec_len;
+        out.insert(out.end(), bit_vector.begin(), bit_vector.end());
+        offset += (uint32_t)bitvec_len;
+    }
+    return out;
+}
+
+static inline std::vector<uint8_t> build_cpu_filter_bytes(const std::vector<KVRef>& ref_array,
+                                                          const std::vector<DataBlockPlanEntry>& plans,
+                                                          std::vector<uint32_t>& bitvec_offsets,
+                                                          std::vector<uint32_t>& bitvec_lengths)
+{
+    bitvec_offsets.resize(plans.size());
+    bitvec_lengths.resize(plans.size());
+    std::vector<uint8_t> out;
+    uint32_t offset = 0;
+    for (size_t i = 0; i < plans.size(); ++i) {
+        int byte_vector_len = (int)plans[i].num_kv * GP_BLOOM_BITS_PER_KEY;
+        int bitvec_len = (byte_vector_len + 7) / 8;
+        std::vector<uint8_t> byte_vector((size_t)byte_vector_len);
+        std::vector<uint8_t> bit_vector((size_t)bitvec_len);
+        std::fill(byte_vector.begin(), byte_vector.end(), 0);
+        for (uint32_t j = 0; j < plans[i].num_kv; ++j) {
+            const Key128& key = ref_array[plans[i].first_kv + j].key;
+            for (int k = 1; k <= GP_BLOOM_HASHES; ++k) {
+                uint32_t h = bloom_hash_key(key, k);
+                byte_vector[h % (uint32_t)byte_vector_len] = 1;
+            }
+        }
         cpu_pack_bit_vector(byte_vector.data(), byte_vector_len, bit_vector.data());
         bitvec_offsets[i] = offset;
         bitvec_lengths[i] = (uint32_t)bitvec_len;
@@ -916,6 +1118,101 @@ static inline ParsedSST read_sst_file(const std::string& path)
     return parse_sst_bytes(read_binary_file(path));
 }
 
+struct ParsedSSTMetadataOnly {
+    ParsedSST parsed;
+    size_t    logical_size = 0;
+    size_t    physical_size = 0;
+};
+
+static inline void pread_full_or_fail(int fd,
+                                      void* data,
+                                      size_t size,
+                                      off_t offset,
+                                      const std::string& path)
+{
+    uint8_t* dst = (uint8_t*)data;
+    size_t total = 0;
+    while (total < size) {
+        ssize_t read_now = pread(fd, dst + total, size - total, offset + (off_t)total);
+        if (read_now < 0) {
+            gp_fail_if(true, "pread failed for '" + path + "': " + std::string(std::strerror(errno)));
+        }
+        gp_fail_if(read_now == 0, "Unexpected EOF during pread of '" + path + "'");
+        total += (size_t)read_now;
+    }
+}
+
+static inline ParsedSSTMetadataOnly read_sst_file_metadata_only(const std::string& path)
+{
+    ParsedSSTMetadataOnly meta;
+
+    struct stat st{};
+    gp_fail_if(stat(path.c_str(), &st) != 0,
+               "Failed to stat '" + path + "': " + std::string(std::strerror(errno)));
+    gp_fail_if(st.st_size < (off_t)sizeof(SSTFooter),
+               "SST file is too small: '" + path + "'");
+
+    meta.physical_size = (size_t)st.st_size;
+    meta.logical_size = meta.physical_size;
+
+    int fd = open(path.c_str(), O_RDONLY);
+    gp_fail_if(fd < 0, "Failed to open '" + path + "': " + std::string(std::strerror(errno)));
+
+    if (meta.physical_size >= sizeof(DirectIoTrailer)) {
+        DirectIoTrailer trailer{};
+        pread_full_or_fail(fd, &trailer, sizeof(trailer),
+                           (off_t)(meta.physical_size - sizeof(DirectIoTrailer)), path);
+        if (trailer.magic == GP_DIRECT_IO_TRAILER_MAGIC) {
+            gp_fail_if(trailer.logical_size > meta.physical_size - sizeof(DirectIoTrailer),
+                       "Corrupt direct-I/O trailer in '" + path + "'");
+            meta.logical_size = (size_t)trailer.logical_size;
+        }
+    }
+
+    gp_fail_if(meta.logical_size < sizeof(SSTFooter),
+               "Logical SST size is too small: '" + path + "'");
+
+    pread_full_or_fail(fd, &meta.parsed.footer, sizeof(SSTFooter),
+                       (off_t)(meta.logical_size - sizeof(SSTFooter)), path);
+
+    gp_fail_if(meta.parsed.footer.magic != GP_SST_MAGIC, "SST magic mismatch in '" + path + "'");
+    gp_fail_if(meta.parsed.footer.version != GP_SST_VERSION, "SST version mismatch in '" + path + "'");
+    gp_fail_if(meta.parsed.footer.key_bytes != GP_KEY_BYTES, "Unexpected key size in '" + path + "'");
+    gp_fail_if(meta.parsed.footer.value_bytes != GP_VALUE_BYTES, "Unexpected value size in '" + path + "'");
+    gp_fail_if(meta.parsed.footer.restart_interval != GP_RESTART_INTERVAL,
+               "Unexpected restart interval in '" + path + "'");
+    gp_fail_if(meta.parsed.footer.data_block_size != GP_DATA_BLOCK_BYTES,
+               "Unexpected data block size in '" + path + "'");
+
+    meta.parsed.data_blocks.resize(meta.parsed.footer.num_data_blocks);
+    meta.parsed.filter_blocks.resize(meta.parsed.footer.num_data_blocks);
+
+    if (!meta.parsed.data_blocks.empty()) {
+        gp_fail_if(meta.parsed.footer.data_meta_offset
+                       + meta.parsed.data_blocks.size() * sizeof(DataBlockMeta)
+                       > meta.logical_size,
+                   "Data block metadata out of bounds in '" + path + "'");
+        gp_fail_if(meta.parsed.footer.filter_meta_offset
+                       + meta.parsed.filter_blocks.size() * sizeof(FilterBlockMeta)
+                       > meta.logical_size,
+                   "Filter block metadata out of bounds in '" + path + "'");
+
+        pread_full_or_fail(fd,
+                           meta.parsed.data_blocks.data(),
+                           meta.parsed.data_blocks.size() * sizeof(DataBlockMeta),
+                           (off_t)meta.parsed.footer.data_meta_offset,
+                           path);
+        pread_full_or_fail(fd,
+                           meta.parsed.filter_blocks.data(),
+                           meta.parsed.filter_blocks.size() * sizeof(FilterBlockMeta),
+                           (off_t)meta.parsed.footer.filter_meta_offset,
+                           path);
+    }
+
+    close(fd);
+    return meta;
+}
+
 static inline SSTBuildArtifacts artifacts_from_serialized_sst(std::vector<uint8_t> file_bytes)
 {
     ParsedSST parsed = parse_sst_bytes(std::move(file_bytes));
@@ -963,6 +1260,23 @@ struct DeviceAssembleSSTResult {
     float       d2h_ms = 0.0f;
     size_t      h2d_bytes = 0;
     size_t      d2h_bytes = 0;
+};
+
+struct StreamedSSTWriteResult {
+    float       kernel_ms = 0.0f;
+    float       h2d_ms = 0.0f;
+    float       d2h_ms = 0.0f;
+    size_t      h2d_bytes = 0;
+    size_t      d2h_bytes = 0;
+    double      write_ms = 0.0;
+    double      output_window_ms = 0.0;
+    double      output_active_ms = 0.0;
+    double      output_idle_ms = 0.0;
+    double      output_d2h_ms = 0.0;
+    double      stream_overlap_pct = 0.0;
+    size_t      output_bytes = 0;
+    size_t      output_blocks = 0;
+    size_t      output_files = 0;
 };
 
 __global__ static void assemble_sst_blocks_kernel(uint8_t*                    all_file_bytes,
@@ -1231,6 +1545,330 @@ assemble_sst_files_from_spans_on_device(const std::vector<DataBlockPlanEntry>&  
     return result;
 }
 
+struct StreamedSSTFilePlan {
+    DeviceSSTFileLayout        layout{};
+    std::vector<DeviceSSTBlockTask> tasks;
+    size_t                     block_begin = 0;
+    size_t                     block_end = 0;
+};
+
+static inline StreamedSSTFilePlan
+build_streamed_sst_file_plan(const std::vector<DataBlockPlanEntry>& plans,
+                             const std::vector<uint32_t>&           block_sizes,
+                             const std::vector<uint32_t>&           filter_offsets,
+                             const std::vector<uint32_t>&           filter_lengths,
+                             const std::pair<size_t, size_t>&       span,
+                             size_t                                 file_index,
+                             uint64_t                               buffer_offset = 0)
+{
+    StreamedSSTFilePlan file_plan;
+    file_plan.block_begin = span.first;
+    file_plan.block_end = span.second;
+
+    gp_fail_if(span.first >= span.second, "invalid SST block range");
+    size_t block_count = span.second - span.first;
+    size_t kv_begin = plans[span.first].first_kv;
+    size_t kv_end = plans[span.second - 1].first_kv + plans[span.second - 1].num_kv;
+
+    uint64_t data_region_size = 0;
+    uint64_t filter_region_size = 0;
+    for (size_t global = span.first; global < span.second; ++global) {
+        data_region_size += block_sizes[global];
+        filter_region_size += sizeof(FilterBlockHeader) + filter_lengths[global];
+    }
+
+    DeviceSSTFileLayout& layout = file_plan.layout;
+    layout.buffer_offset = buffer_offset;
+    layout.filter_region_offset = data_region_size;
+    layout.filter_region_size = (uint32_t)filter_region_size;
+    layout.index_region_offset = layout.filter_region_offset + filter_region_size;
+    layout.index_region_size = (uint32_t)(block_count * sizeof(IndexEntry));
+    layout.filter_meta_offset = layout.index_region_offset + layout.index_region_size;
+    layout.filter_meta_size = (uint32_t)(block_count * sizeof(FilterBlockMeta));
+    layout.data_meta_offset = layout.filter_meta_offset + layout.filter_meta_size;
+    layout.data_meta_size = (uint32_t)(block_count * sizeof(DataBlockMeta));
+    layout.num_data_blocks = (uint32_t)block_count;
+    layout.total_kv = (uint32_t)(kv_end - kv_begin);
+    layout.total_size = layout.data_meta_offset + layout.data_meta_size + sizeof(SSTFooter);
+
+    file_plan.tasks.reserve(block_count);
+    uint64_t running_data_offset = 0;
+    uint64_t running_filter_offset = layout.filter_region_offset;
+    for (size_t local = 0; local < block_count; ++local) {
+        size_t global = span.first + local;
+        DeviceSSTBlockTask task{};
+        task.file_index = 0;
+        task.local_block_index = (uint32_t)local;
+        task.global_block_index = (uint32_t)global;
+        task.data_dst_offset = running_data_offset;
+        task.filter_dst_offset = running_filter_offset;
+        task.block_size = block_sizes[global];
+        task.filter_src_offset = filter_offsets[global];
+        task.filter_length = filter_lengths[global];
+        task.local_first_kv = (uint32_t)(plans[global].first_kv - kv_begin);
+        task.num_kv = plans[global].num_kv;
+        file_plan.tasks.push_back(task);
+
+        running_data_offset += block_sizes[global];
+        running_filter_offset += sizeof(FilterBlockHeader) + filter_lengths[global];
+    }
+
+    return file_plan;
+}
+
+static inline StreamedSSTWriteResult
+assemble_and_write_sst_files_from_spans_streaming(const std::vector<DataBlockPlanEntry>&       plans,
+                                                  const std::vector<uint32_t>&                  block_sizes,
+                                                  const uint8_t*                                d_packed_blocks,
+                                                  const Key128*                                 d_largest_keys,
+                                                  const uint8_t*                                d_filter_bytes,
+                                                  const std::vector<uint32_t>&                  filter_offsets,
+                                                  const std::vector<uint32_t>&                  filter_lengths,
+                                                  const std::vector<std::pair<size_t, size_t>>& spans,
+                                                  const std::string&                            out_dir,
+                                                  const std::string&                            prefix)
+{
+    StreamedSSTWriteResult result;
+    if (spans.empty()) return result;
+
+    std::vector<StreamedSSTFilePlan> file_plans;
+    file_plans.reserve(spans.size());
+    for (size_t file_idx = 0; file_idx < spans.size(); ++file_idx) {
+        file_plans.push_back(build_streamed_sst_file_plan(
+            plans, block_sizes, filter_offsets, filter_lengths, spans[file_idx], file_idx));
+        result.output_bytes += (size_t)file_plans.back().layout.total_size;
+        result.output_blocks += spans[file_idx].second - spans[file_idx].first;
+    }
+    result.output_files = file_plans.size();
+
+    struct StreamSlot {
+        uint8_t*            d_file = nullptr;
+        size_t              d_capacity = 0;
+        uint8_t*            h_file = nullptr;
+        size_t              h_capacity = 0;
+        DeviceSSTFileLayout* d_layout = nullptr;
+        DeviceSSTBlockTask* d_tasks = nullptr;
+        size_t              task_capacity = 0;
+        cudaStream_t        stream = nullptr;
+        cudaEvent_t         kernel_start = nullptr;
+        cudaEvent_t         kernel_stop = nullptr;
+        cudaEvent_t         d2h_start = nullptr;
+        cudaEvent_t         d2h_stop = nullptr;
+        bool                pending = false;
+        bool                queued = false;
+        bool                writing = false;
+        bool                metrics_recorded = false;
+        size_t              pending_file_index = 0;
+        size_t              pending_size = 0;
+        std::string         pending_path;
+    };
+
+    auto destroy_slot = [](StreamSlot& slot) {
+        if (slot.d2h_stop) cudaEventDestroy(slot.d2h_stop);
+        if (slot.d2h_start) cudaEventDestroy(slot.d2h_start);
+        if (slot.kernel_stop) cudaEventDestroy(slot.kernel_stop);
+        if (slot.kernel_start) cudaEventDestroy(slot.kernel_start);
+        if (slot.stream) cudaStreamDestroy(slot.stream);
+        if (slot.d_tasks) cudaFree(slot.d_tasks);
+        if (slot.d_layout) cudaFree(slot.d_layout);
+        if (slot.h_file) cudaFreeHost(slot.h_file);
+        if (slot.d_file) cudaFree(slot.d_file);
+        slot = StreamSlot{};
+    };
+
+    auto ensure_slot_capacity = [](StreamSlot& slot, size_t byte_capacity, size_t task_count) {
+        if (!slot.stream) cudaStreamCreateWithFlags(&slot.stream, cudaStreamNonBlocking);
+        if (!slot.kernel_start) cudaEventCreate(&slot.kernel_start);
+        if (!slot.kernel_stop) cudaEventCreate(&slot.kernel_stop);
+        if (!slot.d2h_start) cudaEventCreate(&slot.d2h_start);
+        if (!slot.d2h_stop) cudaEventCreate(&slot.d2h_stop);
+
+        if (slot.d_capacity < byte_capacity) {
+            if (slot.d_file) cudaFree(slot.d_file);
+            cudaMalloc(&slot.d_file, (size_t)std::max(byte_capacity, (size_t)1));
+            slot.d_capacity = byte_capacity;
+        }
+        if (slot.h_capacity < byte_capacity) {
+            if (slot.h_file) cudaFreeHost(slot.h_file);
+            cudaMallocHost(&slot.h_file, (size_t)std::max(byte_capacity, (size_t)1));
+            slot.h_capacity = byte_capacity;
+        }
+        if (slot.task_capacity < task_count) {
+            if (slot.d_tasks) cudaFree(slot.d_tasks);
+            cudaMalloc(&slot.d_tasks, std::max(task_count, (size_t)1) * sizeof(DeviceSSTBlockTask));
+            slot.task_capacity = task_count;
+        }
+        if (!slot.d_layout) cudaMalloc(&slot.d_layout, sizeof(DeviceSSTFileLayout));
+    };
+
+    static constexpr int kStreamSlotDepth = 3;
+    StreamSlot slots[kStreamSlotDepth];
+    std::mutex writer_mu;
+    std::condition_variable writer_cv;
+    std::condition_variable slot_cv;
+    std::deque<int> write_queue;
+    bool shutdown_writer = false;
+    double write_ms_total = 0.0;
+
+    std::thread writer_thread([&]() {
+        for (;;) {
+            int slot_idx = -1;
+            {
+                std::unique_lock<std::mutex> lock(writer_mu);
+                writer_cv.wait(lock, [&]() { return shutdown_writer || !write_queue.empty(); });
+                if (write_queue.empty()) {
+                    if (shutdown_writer) break;
+                    continue;
+                }
+                slot_idx = write_queue.front();
+                write_queue.pop_front();
+            }
+
+            StreamSlot& slot = slots[slot_idx];
+            auto write_start = std::chrono::steady_clock::now();
+            write_binary_file_span(slot.pending_path, slot.h_file, slot.pending_size);
+            auto write_end = std::chrono::steady_clock::now();
+
+            {
+                std::lock_guard<std::mutex> lock(writer_mu);
+                write_ms_total += std::chrono::duration<double, std::milli>(write_end - write_start).count();
+                slot.pending = false;
+                slot.queued = false;
+                slot.writing = false;
+                slot.metrics_recorded = false;
+                slot.pending_size = 0;
+                slot.pending_path.clear();
+            }
+            slot_cv.notify_all();
+        }
+    });
+
+    auto queue_slot_for_write = [&](int slot_idx, bool wait_for_completion) {
+        StreamSlot& slot = slots[slot_idx];
+        {
+            std::lock_guard<std::mutex> lock(writer_mu);
+            if (!slot.pending || slot.queued || slot.writing) return;
+        }
+
+        if (wait_for_completion) {
+            cudaEventSynchronize(slot.d2h_stop);
+        } else {
+            cudaError_t status = cudaEventQuery(slot.d2h_stop);
+            gp_fail_if(status != cudaSuccess && status != cudaErrorNotReady,
+                       "cudaEventQuery failed while queueing streamed SST write");
+            if (status == cudaErrorNotReady) return;
+        }
+
+        if (!slot.metrics_recorded) {
+            float kernel_ms = 0.0f;
+            float d2h_ms = 0.0f;
+            cudaEventElapsedTime(&kernel_ms, slot.kernel_start, slot.kernel_stop);
+            cudaEventElapsedTime(&d2h_ms, slot.d2h_start, slot.d2h_stop);
+            result.kernel_ms += kernel_ms;
+            result.d2h_ms += d2h_ms;
+            result.output_d2h_ms += d2h_ms;
+            result.d2h_bytes += slot.pending_size;
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(writer_mu);
+            if (!slot.pending || slot.queued || slot.writing) return;
+            slot.metrics_recorded = true;
+            slot.queued = true;
+            slot.writing = true;
+            write_queue.push_back(slot_idx);
+        }
+        writer_cv.notify_one();
+    };
+
+    auto window_start = std::chrono::steady_clock::now();
+    bool launched_any = false;
+
+    for (size_t file_idx = 0; file_idx < file_plans.size(); ++file_idx) {
+        const int slot_idx = (int)(file_idx % (size_t)kStreamSlotDepth);
+        StreamSlot& slot = slots[slot_idx];
+        queue_slot_for_write(slot_idx, true);
+        {
+            std::unique_lock<std::mutex> lock(writer_mu);
+            slot_cv.wait(lock, [&]() { return !slot.pending && !slot.queued && !slot.writing; });
+        }
+
+        const StreamedSSTFilePlan& file_plan = file_plans[file_idx];
+        ensure_slot_capacity(slot, (size_t)file_plan.layout.total_size, file_plan.tasks.size());
+
+        auto h2d_start = std::chrono::steady_clock::now();
+        cudaMemcpyAsync(slot.d_layout, &file_plan.layout, sizeof(DeviceSSTFileLayout),
+                        cudaMemcpyHostToDevice, slot.stream);
+        if (!file_plan.tasks.empty()) {
+            cudaMemcpyAsync(slot.d_tasks, file_plan.tasks.data(),
+                            file_plan.tasks.size() * sizeof(DeviceSSTBlockTask),
+                            cudaMemcpyHostToDevice, slot.stream);
+        }
+        auto h2d_end = std::chrono::steady_clock::now();
+        result.h2d_ms += (float)std::chrono::duration<double, std::milli>(h2d_end - h2d_start).count();
+        result.h2d_bytes += sizeof(DeviceSSTFileLayout)
+                          + file_plan.tasks.size() * sizeof(DeviceSSTBlockTask);
+
+        if (!launched_any) {
+            window_start = std::chrono::steady_clock::now();
+            launched_any = true;
+        }
+
+        cudaEventRecord(slot.kernel_start, slot.stream);
+        assemble_sst_blocks_kernel<<<(int)file_plan.tasks.size(), 256, 0, slot.stream>>>(
+            slot.d_file, slot.d_layout, slot.d_tasks, (int)file_plan.tasks.size(),
+            d_packed_blocks, d_filter_bytes, d_largest_keys);
+        write_sst_footers_kernel<<<1, 1, 0, slot.stream>>>(slot.d_file, slot.d_layout, 1);
+        cudaEventRecord(slot.kernel_stop, slot.stream);
+
+        cudaEventRecord(slot.d2h_start, slot.stream);
+        cudaMemcpyAsync(slot.h_file, slot.d_file, (size_t)file_plan.layout.total_size,
+                        cudaMemcpyDeviceToHost, slot.stream);
+        cudaEventRecord(slot.d2h_stop, slot.stream);
+
+        char name[256];
+        std::snprintf(name, sizeof(name), "%s_%04zu.sst", prefix.c_str(), file_idx);
+        {
+            std::lock_guard<std::mutex> lock(writer_mu);
+            slot.pending = true;
+            slot.queued = false;
+            slot.writing = false;
+            slot.metrics_recorded = false;
+            slot.pending_file_index = file_idx;
+            slot.pending_size = (size_t)file_plan.layout.total_size;
+            slot.pending_path = out_dir + "/" + name;
+        }
+
+        for (int i = 0; i < kStreamSlotDepth; ++i) {
+            if (i == slot_idx) continue;
+            queue_slot_for_write(i, false);
+        }
+    }
+
+    for (int i = 0; i < kStreamSlotDepth; ++i) queue_slot_for_write(i, true);
+    {
+        std::unique_lock<std::mutex> lock(writer_mu);
+        shutdown_writer = true;
+    }
+    writer_cv.notify_one();
+    writer_thread.join();
+    result.write_ms = write_ms_total;
+    auto window_end = std::chrono::steady_clock::now();
+
+    result.output_window_ms = launched_any
+        ? std::chrono::duration<double, std::milli>(window_end - window_start).count()
+        : 0.0;
+    result.output_active_ms = result.output_d2h_ms + result.write_ms;
+    result.output_idle_ms = std::max(0.0, result.output_window_ms - result.output_active_ms);
+    if (result.output_active_ms > 0.0 && result.output_window_ms > 0.0) {
+        double overlap_ms = std::max(0.0, result.output_active_ms - result.output_window_ms);
+        result.stream_overlap_pct = (overlap_ms / result.output_active_ms) * 100.0;
+    }
+
+    for (int i = 0; i < kStreamSlotDepth; ++i) destroy_slot(slots[i]);
+    return result;
+}
+
 struct DeviceAssembleSSTUntimedResult {
     SSTBuildSet output;
     SerializedSSTHostSet serialized_output;
@@ -1401,4 +2039,24 @@ static inline std::vector<KVPair> cpu_unpack_sst(const ParsedSST& parsed)
                           block_offsets_from_parsed(parsed),
                           plans_from_parsed(parsed),
                           parsed.footer.total_kv);
+}
+
+static inline std::vector<KVRef> cpu_unpack_sst_refs(const ParsedSST& parsed, uint32_t source_sst)
+{
+    return cpu_unpack_all_refs(parsed.file_bytes,
+                               block_offsets_from_parsed(parsed),
+                               plans_from_parsed(parsed),
+                               parsed.footer.total_kv,
+                               source_sst);
+}
+
+static inline KVPair materialize_kv_from_ref(const ParsedSST& parsed, const KVRef& ref)
+{
+    KVPair kv{};
+    kv.key = ref.key;
+    gp_fail_if(ref.value_size != GP_VALUE_BYTES, "Unexpected KVRef value size during materialization");
+    gp_fail_if((size_t)ref.value_offset + (size_t)ref.value_size > parsed.file_bytes.size(),
+               "KVRef value offset out of bounds during materialization");
+    std::memcpy(kv.value.bytes, parsed.file_bytes.data() + ref.value_offset, GP_VALUE_BYTES);
+    return kv;
 }

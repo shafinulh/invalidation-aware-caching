@@ -94,8 +94,10 @@ Measures GPU compaction throughput using `gpcomp_bench`. Sweeps across value siz
 | Mode | Description |
 |---|---|
 | `q_paper_with_plan` | Query-based compaction with planning |
+| `q_paper_with_plan_streaming_io` | Query-based compaction with planning and streaming SST IO |
 | `q_paper_without_plan` | Query-based compaction without planning |
 | `c_paper_with_plan` | Compaction-based with planning |
+| `c_paper_with_plan_streaming_io` | Compaction-based with planning and streaming SST IO |
 | `c_paper_without_plan` | Compaction-based without planning |
 
 ### Execution Modes
@@ -115,7 +117,7 @@ Primary sweep script. Collects per-stage timing breakdown (read, unpack, sort, g
 | CLI Argument | Default | Description |
 |---|---|---|
 | `--values` | `32 64 128 256 512 1024` | Value sizes to sweep |
-| `--modes` | all 4 modes | GPU modes to run |
+| `--modes` | all 6 default modes | GPU modes to run |
 | `--runs` | `5` | Iterations per mode |
 | `--num_ssts` | _(from compile constant)_ | Override `GP_NUM_INPUT_SSTS` |
 | `--gpu_only` | off | GPU-only mode |
@@ -183,6 +185,10 @@ Dedicated profiling sweep without nvidia-smi collection.
 |---|---|---|
 | `--tool` | _(required)_ | `nsys` or `ncu` |
 | `--cpuctxsw` | `none` | CPU context switch tracing (nsys only) |
+| `--gpu_metrics` | off | Enable Nsight Systems GPU metrics with default device/frequency |
+| `--gpu_metrics_devices` | `cuda-visible` | GPU metrics device selector (nsys only) |
+| `--gpu_metrics_set` | _(nsys default)_ | GPU metrics set alias such as `ga10x` (nsys only) |
+| `--gpu_metrics_frequency` | `10000` | GPU metrics sampling frequency in Hz (nsys only) |
 | `--plot` | off | Generate result plots |
 
 #### `nsight_profile.sh` — single-run profiling utility
@@ -191,7 +197,7 @@ Quick one-off profiling of a specific mode:
 
 ```bash
 ./scripts/nsight_profile.sh --tool nsys --dataset /abs/path/to/dataset_V32 --gpu_mode q_paper_with_plan --out_dir /abs/path/to/results/
-./scripts/nsight_profile.sh --tool ncu  --dataset /abs/path/to/dataset_V32 --gpu_mode c_paper_with_plan --out_dir /abs/path/to/results/
+./scripts/nsight_profile.sh --tool ncu  --dataset /abs/path/to/dataset_V32 --gpu_mode c_paper_with_plan_streaming_io --out_dir /abs/path/to/results/
 ```
 
 ### Standalone usage
@@ -209,7 +215,7 @@ Quick one-off profiling of a specific mode:
 # Full sweep with nvidia-smi device metrics
 bash ./benchmarks/gpu_compaction/scripts/gpu_compaction_sweep_metrics.sh \
   --values "32 64 128 256 512 1024" \
-  --modes "q_paper_with_plan c_paper_with_plan" \
+  --modes "q_paper_with_plan q_paper_with_plan_streaming_io c_paper_with_plan c_paper_with_plan_streaming_io" \
   --runs 5 --gpu_only
 
 # nvidia-smi + Nsight Systems + Nsight Compute
@@ -245,7 +251,7 @@ End-to-end orchestrator that runs CPU and GPU compaction sweeps with matched par
 | `RUN_ID` | `full-sweep` | Run identifier |
 | `VALUE_SIZES` | `32 64 128 256 512 1024` | Value sizes in bytes |
 | `SUBCOMP_THREADS_LIST` | `1 2 4 8 16 32` | CPU subcompaction threads to sweep |
-| `GPU_MODES` | all 4 modes | GPU modes to benchmark |
+| `GPU_MODES` | all 6 default modes | GPU modes to benchmark |
 | `GPU_RUNS` | `5` | GPU repetitions per config |
 | `CPU_RUNS` | `5` | CPU repetitions per config |
 | `RUN_PAUSE_SECONDS` | `2` | Pause between runs |
@@ -267,7 +273,7 @@ CLI arguments `--sst-size-mb` and `--input-ssts` control the SST geometry.
 RUN_ID="8mb_sst_32sst_full" \
 VALUE_SIZES="32 64 128 256 512 1024" \
 SUBCOMP_THREADS_LIST="1 2 4 8 16" \
-GPU_MODES="q_paper_with_plan q_paper_without_plan c_paper_with_plan c_paper_without_plan" \
+GPU_MODES="q_paper_with_plan q_paper_with_plan_streaming_io q_paper_without_plan c_paper_with_plan c_paper_with_plan_streaming_io c_paper_without_plan" \
 GPU_RUNS=5 CPU_RUNS=5 \
 bash ./benchmarks/initial_gpu_cpu_compaction_microbenchmark/run_sweep.sh \
   --config full_sweep --sst-size-mb 8 --input-ssts 32

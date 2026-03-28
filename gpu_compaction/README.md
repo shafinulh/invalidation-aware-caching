@@ -2,17 +2,14 @@
 
 This is the small GPComp sandbox for end-to-end GPU compaction experiments.
 
-Right now the benchmark compares one CPU baseline against 4 main GPU modes:
+Right now the benchmark compares one CPU baseline against 6 main GPU modes:
 
 - `q_paper_with_plan`
+- `q_paper_with_plan_streaming_io`
 - `q_paper_without_plan`
 - `c_paper_with_plan`
+- `c_paper_with_plan_streaming_io`
 - `c_paper_without_plan`
-
-There are also two extra experimental modes for C-compaction:
-
-- `c_paper_keys_only_with_plan`
-- `c_paper_keys_only_without_plan`
 
 ## CPU baseline used everywhere
 
@@ -25,7 +22,7 @@ Every benchmark run compares against the same CPU baseline:
 - CPU bloom generation
 - CPU pack + SST assembly + write
 
-## The 4 GPU modes
+## The GPU modes
 
 - `q_paper_with_plan`
   - GPU does unpack + merge.
@@ -35,8 +32,13 @@ Every benchmark run compares against the same CPU baseline:
   - GPU packs and writes.
   - Overhead: planning round trip.
 
+- `q_paper_with_plan_streaming_io`
+  - Same logical pipeline as `q_paper_with_plan`.
+  - Streams SST reads and writes instead of materializing the whole IO path on the host.
+  - Overhead: planning round trip, but less host-side IO staging.
+
 - `q_paper_without_plan`
-  - GPU does unpack + merge.
+  - Uses the same ref-based unpack + merge pipeline as `q_paper_with_plan`.
   - No GPU GC.
   - No CPU planning round trip.
   - Uses static planning.
@@ -48,9 +50,14 @@ Every benchmark run compares against the same CPU baseline:
   - After GC, GPU computes restart-group sizes, CPU does planning, GPU packs and writes.
   - Overhead: GC round trip + planning round trip.
 
+- `c_paper_with_plan_streaming_io`
+  - Same logical pipeline as `c_paper_with_plan`.
+  - Streams SST reads and writes instead of staging the full IO path in host memory.
+  - Overhead: GC round trip + planning round trip, with less host-side IO staging.
+
 - `c_paper_without_plan`
-  - GPU does unpack + merge.
-  - Then data goes to CPU for garbage collection.
+  - Uses the same ref-based unpack + merge pipeline as `c_paper_with_plan`.
+  - Then refs go to CPU for garbage collection.
   - After GC, it skips CPU planning and uses static planning.
   - Overhead: GC round trip, but less metadata traffic than `c_paper_with_plan`.
 
@@ -103,16 +110,11 @@ Useful knobs:
 
 ```bash
 ./gpcomp_bench --dataset dataset --out_dir results_tmp --runs 5 --gpu_mode q_paper_with_plan
+./gpcomp_bench --dataset dataset --out_dir results_tmp --runs 5 --gpu_mode q_paper_with_plan_streaming_io
 ./gpcomp_bench --dataset dataset --out_dir results_tmp --runs 5 --gpu_mode q_paper_without_plan
 ./gpcomp_bench --dataset dataset --out_dir results_tmp --runs 5 --gpu_mode c_paper_with_plan
+./gpcomp_bench --dataset dataset --out_dir results_tmp --runs 5 --gpu_mode c_paper_with_plan_streaming_io
 ./gpcomp_bench --dataset dataset --out_dir results_tmp --runs 5 --gpu_mode c_paper_without_plan
-```
-
-Keys-only GC experiment:
-
-```bash
-./gpcomp_bench --dataset dataset --out_dir results_tmp --runs 5 --gpu_mode c_paper_keys_only_with_plan
-./gpcomp_bench --dataset dataset --out_dir results_tmp --runs 5 --gpu_mode c_paper_keys_only_without_plan
 ```
 
 ## Sweeps and plots
@@ -135,7 +137,7 @@ Current defaults in `run_sweep.sh`:
 
 - uniform data (`--zipf_alpha 0.0`)
 - user key space `20000000`
-- modes `q_paper_with_plan q_paper_without_plan c_paper_with_plan c_paper_without_plan`
+- modes `q_paper_with_plan q_paper_with_plan_streaming_io q_paper_without_plan c_paper_with_plan c_paper_with_plan_streaming_io c_paper_without_plan`
 
 For the normal sweep, the plots currently generated are:
 

@@ -175,6 +175,7 @@ if [[ "${SKIP_GPU_BREAKDOWN:-0}" != "1" ]]; then
   echo "═══ Phase 2: GPU compaction with stage breakdown ═══"
   (
     bash "${REPO_ROOT}/benchmarks/gpu_compaction/scripts/gpu_compaction_sweep.sh" \
+      --sst-size-mb "${SST_SIZE_MB}" \
       --num_ssts "${INPUT_SSTS}" \
       --label "${GPU_BREAKDOWN_LABEL}" \
       --values "${VALUE_SIZES}" \
@@ -196,6 +197,7 @@ if [[ "${SKIP_GPU_HOST_METRICS:-0}" != "1" ]]; then
   echo "═══ Phase 3: GPU compaction with host CPU/IO metrics ═══"
   (
     bash "${REPO_ROOT}/benchmarks/gpu_compaction/scripts/gpu_compaction_sweep.sh" \
+      --sst-size-mb "${SST_SIZE_MB}" \
       --num_ssts "${INPUT_SSTS}" \
       --label "${GPU_HOST_METRICS_LABEL}" \
       --values "${VALUE_SIZES}" \
@@ -219,6 +221,7 @@ if [[ "${SKIP_GPU_DEVICE_METRICS:-0}" != "1" ]]; then
   echo "═══ Phase 4: GPU compaction with nvidia-smi device metrics ═══"
   (
     bash "${REPO_ROOT}/benchmarks/gpu_compaction/scripts/gpu_compaction_sweep_metrics.sh" \
+      --sst-size-mb "${SST_SIZE_MB}" \
       --num_ssts "${INPUT_SSTS}" \
       --label "${GPU_DEVICE_METRICS_LABEL}" \
       --values "${VALUE_SIZES}" \

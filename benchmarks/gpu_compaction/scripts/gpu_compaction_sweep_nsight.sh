@@ -13,6 +13,10 @@ fi
 TOOL="${TOOL:-nsys}"
 NSYS_BIN="${NSYS_BIN:-}"
 NSYS_CPUCTXSW="${NSYS_CPUCTXSW:-none}"
+NSYS_GPU_METRICS="${NSYS_GPU_METRICS:-0}"
+NSYS_GPU_METRICS_DEVICES="${NSYS_GPU_METRICS_DEVICES:-cuda-visible}"
+NSYS_GPU_METRICS_SET="${NSYS_GPU_METRICS_SET:-}"
+NSYS_GPU_METRICS_FREQUENCY="${NSYS_GPU_METRICS_FREQUENCY:-10000}"
 GRAPH_DIR="${GRAPH_DIR:-}"
 PLOT_RESULTS="${PLOT_RESULTS:-0}"
 TIMESTAMP_OUTPUT="${TIMESTAMP_OUTPUT:-0}"
@@ -23,6 +27,11 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --tool) TOOL="$2"; shift 2 ;;
         --cpuctxsw) NSYS_CPUCTXSW="$2"; shift 2 ;;
+        --gpu_metrics) NSYS_GPU_METRICS="1"; shift ;;
+        --no_gpu_metrics) NSYS_GPU_METRICS="0"; shift ;;
+        --gpu_metrics_devices) NSYS_GPU_METRICS_DEVICES="$2"; shift 2 ;;
+        --gpu_metrics_set) NSYS_GPU_METRICS_SET="$2"; shift 2 ;;
+        --gpu_metrics_frequency) NSYS_GPU_METRICS_FREQUENCY="$2"; shift 2 ;;
         --graph_dir) GRAPH_DIR="$2"; shift 2 ;;
         --plot) PLOT_RESULTS="1"; shift ;;
         --no_plot) PLOT_RESULTS="0"; shift ;;
@@ -52,13 +61,14 @@ fi
 # ── Setup ─────────────────────────────────────────────────────────
 gpu_sweep_save_originals
 CURRENT_SSTS=$(gpu_sweep_current_ssts)
+CURRENT_SST_SIZE_MB=$(gpu_sweep_current_sst_size_mb)
 
 PROFILE_SUFFIX=""
 if [[ "$PROFILE_ONLY" == "1" ]]; then
     PROFILE_SUFFIX="_gpu-profile-only"
 fi
 if [[ -z "$LABEL" ]]; then
-    LABEL="nsight_${TOOL}_8mb-sst_${CURRENT_SSTS}sst${PROFILE_SUFFIX}"
+    LABEL="nsight_${TOOL}_${CURRENT_SST_SIZE_MB}mb-sst_${CURRENT_SSTS}sst${PROFILE_SUFFIX}"
 elif [[ "$PROFILE_ONLY" == "1" && "$LABEL" != *"${PROFILE_SUFFIX}" ]]; then
     LABEL="${LABEL}${PROFILE_SUFFIX}"
 fi
@@ -92,6 +102,12 @@ echo " tool: $TOOL"
 if [[ "$TOOL" == "nsys" ]]; then
     echo " tool path: $TOOL_CMD"
     echo " cpu context switches: $NSYS_CPUCTXSW"
+    echo " gpu metrics: $NSYS_GPU_METRICS"
+    if [[ "$NSYS_GPU_METRICS" == "1" ]]; then
+        echo " gpu metrics devices: $NSYS_GPU_METRICS_DEVICES"
+        echo " gpu metrics set: ${NSYS_GPU_METRICS_SET:-<nsys default>}"
+        echo " gpu metrics frequency: $NSYS_GPU_METRICS_FREQUENCY"
+    fi
 fi
 echo " label: $LABEL"
 echo " output: $OUTDIR"
@@ -108,6 +124,7 @@ echo " gpu-only benchmark mode: $GPU_ONLY"
 echo " profile-only benchmark mode: $PROFILE_ONLY"
 echo " storage IO mode: direct IO for SST reads and writes"
 echo " input SSTs: $CURRENT_SSTS"
+echo " target SST size: ${CURRENT_SST_SIZE_MB} MB"
 echo " dataset user key space: $DATASET_USER_KEY_SPACE"
 echo "========================================================="
 
@@ -131,6 +148,16 @@ for VAL in $VALUES_STR; do
         gpu_sweep_bench_args "${DATASET_DIR}" "${BENCH_OUTDIR}" "${RUNS}" "${MODE}"
 
         if [[ "$TOOL" == "nsys" ]]; then
+            NSYS_EXTRA_ARGS=()
+            if [[ "$NSYS_GPU_METRICS" == "1" ]]; then
+                NSYS_EXTRA_ARGS+=(
+                    --gpu-metrics-devices="$NSYS_GPU_METRICS_DEVICES"
+                    --gpu-metrics-frequency="$NSYS_GPU_METRICS_FREQUENCY"
+                )
+                if [[ -n "$NSYS_GPU_METRICS_SET" ]]; then
+                    NSYS_EXTRA_ARGS+=(--gpu-metrics-set="$NSYS_GPU_METRICS_SET")
+                fi
+            fi
             set +e
             "$TOOL_CMD" profile \
                 --force-overwrite true \
@@ -138,6 +165,7 @@ for VAL in $VALUES_STR; do
                 --trace=cuda,osrt,nvtx \
                 --sample=none \
                 --cpuctxsw="$NSYS_CPUCTXSW" \
+                "${NSYS_EXTRA_ARGS[@]}" \
                 "$BENCH_BIN" "${BENCH_ARGS[@]}" \
                 > "$LOG_PATH" 2>&1
             EXIT_CODE="$?"

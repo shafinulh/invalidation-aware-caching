@@ -30,7 +30,7 @@ cd "${GPU_COMPACTION_DIR}"
 RUNS="${RUNS:-${COMPACTION_DEFAULT_RUNS:-5}}"
 VALUES_STR="${VALUES:-${COMPACTION_DEFAULT_VALUE_SIZES:-32 64 128 256 512 1024}}"
 DATASET_PREFIX="${DATASET_PREFIX:-dataset_V}"
-MODES_STR="${MODES:-${COMPACTION_DEFAULT_GPU_MODES:-q_paper_with_plan q_paper_without_plan c_paper_with_plan c_paper_without_plan}}"
+MODES_STR="${MODES:-${COMPACTION_DEFAULT_GPU_MODES:-q_paper_with_plan q_paper_with_plan_streaming_io q_paper_without_plan c_paper_with_plan c_paper_with_plan_streaming_io c_paper_without_plan}}"
 DATASET_ZIPF_ALPHA="${DATASET_ZIPF_ALPHA:-${COMPACTION_DEFAULT_ZIPF_ALPHA:-0.0}}"
 DATASET_USER_KEY_SPACE="${DATASET_USER_KEY_SPACE:-${COMPACTION_DEFAULT_USER_KEY_SPACE:-200000000}}"
 GPU_COMPACTION_OUT_ROOT="${GPU_COMPACTION_OUT_ROOT:-${REPO_ROOT}/local_benchmark_artifacts/gpu_compaction/sweep_results}"
@@ -40,6 +40,7 @@ OUT_ROOT="${OUT_ROOT:-${GPU_COMPACTION_OUT_ROOT}}"
 GPU_ONLY="${GPU_ONLY:-0}"
 PROFILE_ONLY="${PROFILE_ONLY:-0}"
 NUM_SSTS="${NUM_SSTS:-}"
+SST_SIZE_MB="${SST_SIZE_MB:-}"
 LABEL="${LABEL:-}"
 BENCH_BIN="${GPU_COMPACTION_DIR}/gpcomp_bench"
 DATAGEN_BIN="${GPU_COMPACTION_DIR}/gpcomp_datagen"
@@ -68,6 +69,7 @@ gpu_sweep_parse_common_args() {
             --user_key_space) DATASET_USER_KEY_SPACE="$2"; shift 2 ;;
             --out_root) OUT_ROOT="$2"; shift 2 ;;
             --num_ssts) NUM_SSTS="$2"; shift 2 ;;
+            --sst-size-mb) SST_SIZE_MB="$2"; shift 2 ;;
             --label) LABEL="$2"; shift 2 ;;
             *) EXTRA_ARGS+=("$1"); shift ;;
         esac
@@ -77,23 +79,51 @@ gpu_sweep_parse_common_args() {
 # ── Compile-time constant patching ────────────────────────────────
 ORIG_NUM_SSTS=""
 ORIG_VALUE_BYTES=""
+ORIG_TARGET_FILE_BYTES=""
+
+gpu_sweep_target_file_bytes() {
+    local rhs
+    rhs=$(grep -oP 'GP_TARGET_FILE_BYTES\s*=\s*\K[^;]+' gpcomp_common.cuh | head -n 1)
+    rhs="${rhs//[[:space:]]/}"
+    if [[ -z "${rhs}" ]]; then
+        return 1
+    fi
+    printf '%s\n' "$(( rhs ))"
+}
 
 gpu_sweep_save_originals() {
     ORIG_NUM_SSTS=$(grep -oP 'GP_NUM_INPUT_SSTS\s*=\s*\K[0-9]+' gpcomp_common.cuh | head -n 1)
     ORIG_VALUE_BYTES=$(grep -oP 'GP_VALUE_BYTES\s*=\s*\K[0-9]+' gpcomp_common.cuh | head -n 1)
+    ORIG_TARGET_FILE_BYTES=$(gpu_sweep_target_file_bytes)
 
     if [[ -n "${NUM_SSTS}" ]]; then
         sed -i -E "s/static constexpr int GP_NUM_INPUT_SSTS     = [0-9]+;/static constexpr int GP_NUM_INPUT_SSTS     = ${NUM_SSTS};/g" gpcomp_common.cuh
+    fi
+    if [[ -n "${SST_SIZE_MB}" ]]; then
+        local target_file_bytes
+        target_file_bytes=$(( SST_SIZE_MB * 1024 * 1024 ))
+        sed -i -E "s/static constexpr int GP_TARGET_FILE_BYTES  = [0-9]+ \\* 1024 \\* 1024;/static constexpr int GP_TARGET_FILE_BYTES  = ${target_file_bytes};/g" gpcomp_common.cuh
+        sed -i -E "s/static constexpr int GP_TARGET_FILE_BYTES  = [0-9]+;/static constexpr int GP_TARGET_FILE_BYTES  = ${target_file_bytes};/g" gpcomp_common.cuh
     fi
 }
 
 gpu_sweep_restore_originals() {
     sed -i -E "s/static constexpr int GP_VALUE_BYTES        = [0-9]+;/static constexpr int GP_VALUE_BYTES        = ${ORIG_VALUE_BYTES};/g" gpcomp_common.cuh
     sed -i -E "s/static constexpr int GP_NUM_INPUT_SSTS     = [0-9]+;/static constexpr int GP_NUM_INPUT_SSTS     = ${ORIG_NUM_SSTS};/g" gpcomp_common.cuh
+    sed -i -E "s/static constexpr int GP_TARGET_FILE_BYTES  = [0-9]+;/static constexpr int GP_TARGET_FILE_BYTES  = ${ORIG_TARGET_FILE_BYTES};/g" gpcomp_common.cuh
 }
 
 gpu_sweep_current_ssts() {
     grep -oP 'GP_NUM_INPUT_SSTS\s*=\s*\K[0-9]+' gpcomp_common.cuh
+}
+
+gpu_sweep_current_sst_size_mb() {
+    local target_file_bytes
+    target_file_bytes=$(gpu_sweep_target_file_bytes)
+    if [[ -z "${target_file_bytes}" ]]; then
+        return 1
+    fi
+    printf '%s\n' $(( target_file_bytes / 1024 / 1024 ))
 }
 
 # ── Build + datagen per value size ────────────────────────────────

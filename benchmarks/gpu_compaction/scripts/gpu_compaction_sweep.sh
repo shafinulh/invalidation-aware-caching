@@ -127,9 +127,10 @@ run_bench_with_optional_host_metrics() {
 # ── Setup ─────────────────────────────────────────────────────────
 gpu_sweep_save_originals
 CURRENT_SSTS=$(gpu_sweep_current_ssts)
+CURRENT_SST_SIZE_MB=$(gpu_sweep_current_sst_size_mb)
 
 if [[ -z "$LABEL" ]]; then
-    LABEL="8mb-sst_${CURRENT_SSTS}sst"
+    LABEL="${CURRENT_SST_SIZE_MB}mb-sst_${CURRENT_SSTS}sst"
 fi
 if [[ "${PROFILE_ONLY}" == "1" && "${LABEL}" != *gpu-profile-only* ]]; then
     LABEL="${LABEL}_gpu-profile-only"
@@ -185,6 +186,7 @@ if [[ "${GPU_ONLY}" == "1" ]]; then
     fi
 fi
 echo " input SSTs: $CURRENT_SSTS"
+echo " target SST size: ${CURRENT_SST_SIZE_MB} MB"
 echo " dataset distribution: uniform"
 echo " dataset user key space: $DATASET_USER_KEY_SPACE"
 echo "========================================================="

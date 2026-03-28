@@ -17,8 +17,10 @@ DEFAULT_GRAPH_DIR = os.environ.get("GPCOMP_GRAPHS_DIR", "graphs")
 
 GPU_MODE_ORDER = [
     "q_paper_with_plan",
+    "q_paper_with_plan_streaming_io",
     "q_paper_without_plan",
     "c_paper_with_plan",
+    "c_paper_with_plan_streaming_io",
     "c_paper_without_plan",
 ]
 FULL_MODE_ORDER = ["cpu_baseline", *GPU_MODE_ORDER]
@@ -26,16 +28,20 @@ FULL_MODE_ORDER = ["cpu_baseline", *GPU_MODE_ORDER]
 MODE_LABELS = {
     "cpu_baseline": "CPU Baseline",
     "q_paper_with_plan": "Q (With Plan)",
+    "q_paper_with_plan_streaming_io": "Q (With Plan, Stream IO)",
     "q_paper_without_plan": "Q (Without Plan)",
     "c_paper_with_plan": "C (With Plan)",
+    "c_paper_with_plan_streaming_io": "C (With Plan, Stream IO)",
     "c_paper_without_plan": "C (Without Plan)",
 }
 
 MODE_COLORS = {
     "cpu_baseline": "#f4e7c5",
     "q_paper_with_plan": "#c6dbef",
+    "q_paper_with_plan_streaming_io": "#6db1bf",
     "q_paper_without_plan": "#9ecae1",
     "c_paper_with_plan": "#c7e9c0",
+    "c_paper_with_plan_streaming_io": "#90be6d",
     "c_paper_without_plan": "#74c476",
 }
 

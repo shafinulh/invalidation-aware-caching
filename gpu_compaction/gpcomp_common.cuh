@@ -13,7 +13,7 @@ static constexpr int GP_KEY_BYTES          = 16;
 static constexpr int GP_VALUE_BYTES        = 32;
 static constexpr int GP_RESTART_INTERVAL   = 4;
 static constexpr int GP_DATA_BLOCK_BYTES   = 32 * 1024;
-static constexpr int GP_TARGET_FILE_BYTES  = 8 * 1024 * 1024;
+static constexpr int GP_TARGET_FILE_BYTES  = 8388608;
 static constexpr int GP_NUM_INPUT_SSTS     = 4;
 static constexpr int GP_BLOOM_BITS_PER_KEY = 10;
 static constexpr int GP_BLOOM_HASHES       = 7;
@@ -31,6 +31,13 @@ struct Value32 {
 struct KVPair {
     Key128  key;
     Value32 value;
+};
+
+struct KVRef {
+    Key128   key;
+    uint32_t source_sst = 0;
+    uint32_t value_offset = 0;
+    uint32_t value_size = 0;
 };
 
 struct DataBlockPlanEntry {
@@ -137,6 +144,16 @@ static inline bool kv_key_less(const KVPair& a, const KVPair& b)
 }
 
 static inline bool kv_user_key_equal(const KVPair& a, const KVPair& b)
+{
+    return load_be64(a.key.bytes) == load_be64(b.key.bytes);
+}
+
+static inline bool kvref_key_less(const KVRef& a, const KVRef& b)
+{
+    return key_compare(a.key, b.key) < 0;
+}
+
+static inline bool kvref_user_key_equal(const KVRef& a, const KVRef& b)
 {
     return load_be64(a.key.bytes) == load_be64(b.key.bytes);
 }
@@ -276,6 +293,28 @@ static inline std::vector<KVPair> cpu_merge_reference(const std::vector<std::vec
     return merged;
 }
 
+static inline std::vector<KVRef> cpu_merge_ref_reference(const std::vector<std::vector<KVRef>>& arrays)
+{
+    std::vector<KVRef> merged;
+    size_t total = 0;
+    for (const auto& arr : arrays) total += arr.size();
+    merged.reserve(total);
+
+    std::vector<size_t> indices(arrays.size(), 0);
+    for (;;) {
+        int best = -1;
+        for (int i = 0; i < (int)arrays.size(); ++i) {
+            if (indices[i] >= arrays[i].size()) continue;
+            if (best < 0 || kvref_key_less(arrays[i][indices[i]], arrays[best][indices[best]])) {
+                best = i;
+            }
+        }
+        if (best < 0) break;
+        merged.push_back(arrays[best][indices[best]++]);
+    }
+    return merged;
+}
+
 static inline std::vector<KVPair> garbage_collect_sorted_kv(const std::vector<KVPair>& sorted_kv)
 {
     std::vector<KVPair> survivors;
@@ -310,6 +349,36 @@ static inline std::vector<KVPair> garbage_collect_sorted_kv(const KVPair* sorted
     return survivors;
 }
 
+static inline std::vector<KVRef> garbage_collect_sorted_refs(const std::vector<KVRef>& sorted_refs)
+{
+    std::vector<KVRef> survivors;
+    survivors.reserve(sorted_refs.size());
+
+    size_t i = 0;
+    while (i < sorted_refs.size()) {
+        size_t j = i + 1;
+        while (j < sorted_refs.size() && kvref_user_key_equal(sorted_refs[i], sorted_refs[j])) ++j;
+        survivors.push_back(sorted_refs[j - 1]);
+        i = j;
+    }
+    return survivors;
+}
+
+static inline std::vector<KVRef> garbage_collect_sorted_refs(const KVRef* sorted_refs, size_t count)
+{
+    std::vector<KVRef> survivors;
+    survivors.reserve(count);
+
+    size_t i = 0;
+    while (i < count) {
+        size_t j = i + 1;
+        while (j < count && kvref_user_key_equal(sorted_refs[i], sorted_refs[j])) ++j;
+        survivors.push_back(sorted_refs[j - 1]);
+        i = j;
+    }
+    return survivors;
+}
+
 static inline std::vector<uint32_t> garbage_collect_sorted_keys_to_indices(const std::vector<Key128>& sorted_keys)
 {
     std::vector<uint32_t> survivor_indices;
@@ -325,8 +394,31 @@ static inline std::vector<uint32_t> garbage_collect_sorted_keys_to_indices(const
     return survivor_indices;
 }
 
+static inline std::vector<uint32_t> garbage_collect_sorted_keys_to_indices(const Key128* sorted_keys, size_t count)
+{
+    std::vector<uint32_t> survivor_indices;
+    survivor_indices.reserve(count);
+
+    size_t i = 0;
+    while (i < count) {
+        size_t j = i + 1;
+        while (j < count && key_user_equal(sorted_keys[i], sorted_keys[j])) ++j;
+        survivor_indices.push_back((uint32_t)(j - 1));
+        i = j;
+    }
+    return survivor_indices;
+}
+
 static inline bool kv_equal(const KVPair& a, const KVPair& b)
 {
     return key_equal(a.key, b.key) &&
            std::memcmp(a.value.bytes, b.value.bytes, GP_VALUE_BYTES) == 0;
+}
+
+static inline bool kvref_equal(const KVRef& a, const KVRef& b)
+{
+    return key_equal(a.key, b.key)
+        && a.source_sst == b.source_sst
+        && a.value_offset == b.value_offset
+        && a.value_size == b.value_size;
 }

@@ -1,0 +1,32 @@
+SST size: 64MB
+Requested input SSTs: 16
+
+Best CPU subcompaction speedups vs subcomp=1
+============================================
+
+value=32B: 5.29x +/- 0.08x at subcomp=16
+value=1024B: 2.11x +/- 0.01x at subcomp=4
+
+GPU mode speedups vs synthetic CPU baseline
+===========================================
+
+value=32B:
+  c_no_plan: 2.46x +/- 0.00x
+  c_plan: 2.49x +/- 0.00x
+  c_plan_stream_io: 3.80x +/- 0.00x
+  q_no_plan: 2.93x +/- 0.00x
+  q_plan: 3.03x +/- 0.00x
+  q_plan_stream_io: 5.12x +/- 0.00x
+value=1024B:
+  c_no_plan: 1.52x +/- 0.00x
+  c_plan: 1.52x +/- 0.00x
+  c_plan_stream_io: 2.81x +/- 0.00x
+  q_no_plan: 1.56x +/- 0.00x
+  q_plan: 1.57x +/- 0.00x
+  q_plan_stream_io: 2.93x +/- 0.00x
+
+Normalization note
+==================
+
+CPU bars use RocksDB subcomp=1 as the baseline and show mean +/- stddev over repeated rocksdb.compaction.times.micros measurements.
+GPU bars use the GPComp benchmark's synthetic CPU baseline and show mean speedup derived from CPU/GPU mean wall time.

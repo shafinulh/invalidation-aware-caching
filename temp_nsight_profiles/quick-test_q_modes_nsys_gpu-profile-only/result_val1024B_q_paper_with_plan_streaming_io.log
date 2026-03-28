@@ -1,0 +1,28 @@
+Q-compaction benchmark
+  input SSTs: 32
+  key bytes: 16  value bytes: 1024  restart interval: 4  block size: 32768
+  runs: 5  (profile-only, all runs profiled)
+  gpu mode: q_paper_with_plan_streaming_io
+  profile-only mode: enabled
+  storage IO: direct (O_DIRECT + fdatasync)
+  cpu baseline: disabled (--profile_only)
+  gpu garbage collection: disabled (Q-compaction only)
+
+BENCH_ITERATION_MARKER phase=start index=0 warmup=0 timed=1 runs=5 profile_only=1 gpu_only=1 epoch_ms=1774668935033
+BENCH_ITERATION_MARKER phase=end index=0 warmup=0 timed=1 runs=5 profile_only=1 gpu_only=1 epoch_ms=1774668935288
+BENCH_ITERATION_MARKER phase=start index=1 warmup=0 timed=1 runs=5 profile_only=1 gpu_only=1 epoch_ms=1774668935288
+BENCH_ITERATION_MARKER phase=end index=1 warmup=0 timed=1 runs=5 profile_only=1 gpu_only=1 epoch_ms=1774668935558
+BENCH_ITERATION_MARKER phase=start index=2 warmup=0 timed=1 runs=5 profile_only=1 gpu_only=1 epoch_ms=1774668935558
+BENCH_ITERATION_MARKER phase=end index=2 warmup=0 timed=1 runs=5 profile_only=1 gpu_only=1 epoch_ms=1774668935803
+BENCH_ITERATION_MARKER phase=start index=3 warmup=0 timed=1 runs=5 profile_only=1 gpu_only=1 epoch_ms=1774668935803
+BENCH_ITERATION_MARKER phase=end index=3 warmup=0 timed=1 runs=5 profile_only=1 gpu_only=1 epoch_ms=1774668936070
+BENCH_ITERATION_MARKER phase=start index=4 warmup=0 timed=1 runs=5 profile_only=1 gpu_only=1 epoch_ms=1774668936070
+BENCH_ITERATION_MARKER phase=end index=4 warmup=0 timed=1 runs=5 profile_only=1 gpu_only=1 epoch_ms=1774668936314
+Profile-only GPU compaction complete.
+GPU 0: General Metrics for NVIDIA GA10x
+Collecting data...
+Generating '/tmp/nsys-haques24/nsys-report-2c8a.qdstrm'
+Press Ctrl-C to stop symbol files downloading
+[1/1] [0%                          ] nsys_val1024B_q_paper_with_plan_streaming_io.nsys-rep[1/1] [0%                          ] nsys_val1024B_q_paper_with_plan_streaming_io.nsys-rep[1/1] [=15%                        ] nsys_val1024B_q_paper_with_plan_streaming_io.nsys-rep[1/1] [====26%                     ] nsys_val1024B_q_paper_with_plan_streaming_io.nsys-rep[1/1] [====27%                     ] nsys_val1024B_q_paper_with_plan_streaming_io.nsys-rep[1/1] [===========50%              ] nsys_val1024B_q_paper_with_plan_streaming_io.nsys-rep[1/1] [===========51%              ] nsys_val1024B_q_paper_with_plan_streaming_io.nsys-rep[1/1] [========================100%] nsys_val1024B_q_paper_with_plan_streaming_io.nsys-rep[1/1] [========================100%] nsys_val1024B_q_paper_with_plan_streaming_io.nsys-rep
+Generated:
+	/home/1755_project/invalidation-aware-caching/local_benchmark_artifacts/gpu_compaction/sweep_results/quick-test_q_modes_nsys_gpu-profile-only/profiles/nsys_val1024B_q_paper_with_plan_streaming_io.nsys-rep

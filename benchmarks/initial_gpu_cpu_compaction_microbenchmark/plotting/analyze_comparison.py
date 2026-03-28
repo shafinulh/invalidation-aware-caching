@@ -26,22 +26,28 @@ from matplotlib.patches import Patch
 
 GPU_MODE_ORDER = [
     "q_paper_with_plan",
+    "q_paper_with_plan_streaming_io",
     "q_paper_without_plan",
     "c_paper_with_plan",
+    "c_paper_with_plan_streaming_io",
     "c_paper_without_plan",
 ]
 
 GPU_MODE_LABELS = {
     "q_paper_with_plan": "q_plan",
+    "q_paper_with_plan_streaming_io": "q_plan_stream_io",
     "q_paper_without_plan": "q_no_plan",
     "c_paper_with_plan": "c_plan",
+    "c_paper_with_plan_streaming_io": "c_plan_stream_io",
     "c_paper_without_plan": "c_no_plan",
 }
 
 GPU_MODE_COLORS = {
     "q_paper_with_plan": "#33b39f",
+    "q_paper_with_plan_streaming_io": "#2a9d8f",
     "q_paper_without_plan": "#16897b",
     "c_paper_with_plan": "#f4a261",
+    "c_paper_with_plan_streaming_io": "#84a98c",
     "c_paper_without_plan": "#e76f51",
 }
 

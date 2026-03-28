@@ -17,11 +17,20 @@ static constexpr int PACK_HEADER_BYTES    = (int)sizeof(PackBlockHeader);
 static constexpr int PACK_MAX_ENTRY_BYTES = 2 + GP_KEY_BYTES + GP_VALUE_BYTES;
 static constexpr int PACK_GROUP_MAX_BYTES = GP_RESTART_INTERVAL * PACK_MAX_ENTRY_BYTES;
 
+__host__ __device__ static inline uint32_t packed_entry_size_from_key(const Key128& current,
+                                                                      const Key128* previous_in_group,
+                                                                      uint32_t      value_size)
+{
+    int shared = previous_in_group ? key_shared_prefix(*previous_in_group, current) : 0;
+    return (uint32_t)(2 + (GP_KEY_BYTES - shared) + value_size);
+}
+
 static inline uint32_t packed_entry_size(const KVPair& current,
                                          const KVPair* previous_in_group)
 {
-    int shared = previous_in_group ? key_shared_prefix(previous_in_group->key, current.key) : 0;
-    return (uint32_t)(2 + (GP_KEY_BYTES - shared) + GP_VALUE_BYTES);
+    return packed_entry_size_from_key(current.key,
+                                      previous_in_group ? &previous_in_group->key : nullptr,
+                                      GP_VALUE_BYTES);
 }
 
 static inline std::vector<DataBlockPlanEntry> plan_data_blocks(const std::vector<KVPair>& kv_array)
@@ -73,6 +82,26 @@ static inline std::vector<uint32_t> compute_restart_group_sizes_cpu(const std::v
             int shared = 0;
             if (i > start) shared = key_shared_prefix(kv_array[i - 1].key, kv_array[i].key);
             group_bytes += (uint32_t)(2 + (GP_KEY_BYTES - shared) + GP_VALUE_BYTES);
+        }
+        group_sizes[group] = group_bytes;
+    }
+    return group_sizes;
+}
+
+static inline std::vector<uint32_t> compute_restart_group_sizes_cpu(const std::vector<KVRef>& ref_array)
+{
+    std::vector<uint32_t> group_sizes;
+    if (ref_array.empty()) return group_sizes;
+
+    size_t num_groups = (ref_array.size() + (size_t)GP_RESTART_INTERVAL - 1) / (size_t)GP_RESTART_INTERVAL;
+    group_sizes.resize(num_groups);
+    for (size_t group = 0; group < num_groups; ++group) {
+        size_t start = group * (size_t)GP_RESTART_INTERVAL;
+        size_t end = std::min(start + (size_t)GP_RESTART_INTERVAL, ref_array.size());
+        uint32_t group_bytes = 0;
+        for (size_t i = start; i < end; ++i) {
+            const Key128* prev = (i > start) ? &ref_array[i - 1].key : nullptr;
+            group_bytes += packed_entry_size_from_key(ref_array[i].key, prev, ref_array[i].value_size);
         }
         group_sizes[group] = group_bytes;
     }
@@ -162,6 +191,12 @@ static inline std::vector<DataBlockPlanEntry> plan_data_blocks_group_aligned(con
 {
     return plan_data_blocks_group_aligned_from_group_sizes(
         compute_restart_group_sizes_cpu(kv_array), (uint32_t)kv_array.size());
+}
+
+static inline std::vector<DataBlockPlanEntry> plan_data_blocks_group_aligned(const std::vector<KVRef>& ref_array)
+{
+    return plan_data_blocks_group_aligned_from_group_sizes(
+        compute_restart_group_sizes_cpu(ref_array), (uint32_t)ref_array.size());
 }
 
 struct RestartGroupSizeTimedResult {
@@ -259,6 +294,25 @@ __global__ void compute_restart_group_sizes_kernel(const KVPair* __restrict__ kv
         int shared = 0;
         if (i > start) shared = key_shared_prefix(kv_array[i - 1].key, kv_array[i].key);
         group_bytes += (uint32_t)(2 + (GP_KEY_BYTES - shared) + GP_VALUE_BYTES);
+    }
+    group_sizes[group_id] = group_bytes;
+}
+
+__global__ void compute_restart_group_sizes_kernel_ref(const KVRef* __restrict__ ref_array,
+                                                       int                       total_kv,
+                                                       uint32_t* __restrict__    group_sizes)
+{
+    int group_id = (int)(blockIdx.x * blockDim.x + threadIdx.x);
+    int start = group_id * GP_RESTART_INTERVAL;
+    if (start >= total_kv) return;
+
+    int end = start + GP_RESTART_INTERVAL;
+    if (end > total_kv) end = total_kv;
+
+    uint32_t group_bytes = 0;
+    for (int i = start; i < end; ++i) {
+        const Key128* prev = (i > start) ? &ref_array[i - 1].key : nullptr;
+        group_bytes += packed_entry_size_from_key(ref_array[i].key, prev, ref_array[i].value_size);
     }
     group_sizes[group_id] = group_bytes;
 }
@@ -403,6 +457,45 @@ static inline RestartGroupSizeTimedResult launch_restart_group_sizes_timed_from_
     int grid = (num_groups + block - 1) / block;
     cudaEventRecord(ev0, stream);
     compute_restart_group_sizes_kernel<<<grid, block, 0, stream>>>(d_kv, total_kv, d_group_sizes);
+    cudaEventRecord(ev1, stream);
+    cudaMemcpyAsync(h_group_sizes, d_group_sizes,
+                    (size_t)num_groups * sizeof(uint32_t), cudaMemcpyDeviceToHost, stream);
+    cudaStreamSynchronize(stream);
+    cudaEventElapsedTime(&result.kernel_ms, ev0, ev1);
+    result.group_sizes.assign(h_group_sizes, h_group_sizes + num_groups);
+    auto wall_end = std::chrono::steady_clock::now();
+    result.wall_ms = (float)std::chrono::duration<double, std::milli>(wall_end - wall_start).count();
+
+    cudaEventDestroy(ev1);
+    cudaEventDestroy(ev0);
+    cudaStreamDestroy(stream);
+    cudaFreeHost(h_group_sizes);
+    cudaFree(d_group_sizes);
+    return result;
+}
+
+static inline RestartGroupSizeTimedResult launch_restart_group_sizes_timed_from_device(const KVRef* d_ref,
+                                                                                        int          total_kv)
+{
+    RestartGroupSizeTimedResult result;
+    if (total_kv <= 0) return result;
+
+    int num_groups = (total_kv + GP_RESTART_INTERVAL - 1) / GP_RESTART_INTERVAL;
+    uint32_t* d_group_sizes = nullptr;
+    cudaMalloc(&d_group_sizes, (size_t)num_groups * sizeof(uint32_t));
+    uint32_t* h_group_sizes = nullptr;
+    cudaHostAlloc(&h_group_sizes, (size_t)num_groups * sizeof(uint32_t), cudaHostAllocDefault);
+
+    auto wall_start = std::chrono::steady_clock::now();
+    cudaEvent_t ev0, ev1;
+    cudaStream_t stream = nullptr;
+    cudaEventCreate(&ev0);
+    cudaEventCreate(&ev1);
+    cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking);
+    int block = 256;
+    int grid = (num_groups + block - 1) / block;
+    cudaEventRecord(ev0, stream);
+    compute_restart_group_sizes_kernel_ref<<<grid, block, 0, stream>>>(d_ref, total_kv, d_group_sizes);
     cudaEventRecord(ev1, stream);
     cudaMemcpyAsync(h_group_sizes, d_group_sizes,
                     (size_t)num_groups * sizeof(uint32_t), cudaMemcpyDeviceToHost, stream);
@@ -677,6 +770,93 @@ __global__ void pack_kernel(const KVPair* __restrict__ kv_array,
     }
 }
 
+__global__ void pack_ref_kernel(const KVRef*       __restrict__ ref_array,
+                                const uint8_t* const* __restrict__ source_files,
+                                const uint32_t*  __restrict__ block_first_kv,
+                                const uint32_t*  __restrict__ block_num_kv,
+                                int                           num_blocks,
+                                uint8_t*        __restrict__ block_out,
+                                uint32_t*       __restrict__ block_sizes)
+{
+    int block_id = (int)blockIdx.x;
+    if (block_id >= num_blocks) return;
+
+    int tid = (int)threadIdx.x;
+    int first_kv = (int)block_first_kv[block_id];
+    int block_entries = (int)block_num_kv[block_id];
+    int num_restarts = (block_entries + GP_RESTART_INTERVAL - 1) / GP_RESTART_INTERVAL;
+
+    extern __shared__ uint32_t smem[];
+    uint32_t* interval_bytes = smem;
+    uint32_t* interval_offsets = smem + num_restarts;
+    uint32_t* restart_offsets = smem + 2 * num_restarts;
+
+    const KVRef* block_refs = ref_array + first_kv;
+
+    if (tid < num_restarts) {
+        uint32_t bytes = 0;
+        int start = tid * GP_RESTART_INTERVAL;
+        int end = (start + GP_RESTART_INTERVAL < block_entries)
+                ? (start + GP_RESTART_INTERVAL)
+                : block_entries;
+        for (int i = start; i < end; ++i) {
+            const Key128* prev = (i > start) ? &block_refs[i - 1].key : nullptr;
+            bytes += packed_entry_size_from_key(block_refs[i].key, prev, block_refs[i].value_size);
+        }
+        interval_bytes[tid] = bytes;
+    }
+    __syncthreads();
+
+    if (tid == 0) {
+        uint32_t prefix = 0;
+        for (int i = 0; i < num_restarts; ++i) {
+            restart_offsets[i] = prefix;
+            interval_offsets[i] = prefix;
+            prefix += interval_bytes[i];
+        }
+
+        PackBlockHeader header{};
+        header.num_entries = (uint32_t)block_entries;
+        header.restart_interval = GP_RESTART_INTERVAL;
+        header.num_restarts = (uint32_t)num_restarts;
+        header.data_size = prefix;
+        uint8_t* dst = block_out + (size_t)block_id * GP_DATA_BLOCK_BYTES;
+        const uint8_t* hdr_bytes = reinterpret_cast<const uint8_t*>(&header);
+        for (int i = 0; i < PACK_HEADER_BYTES; ++i) dst[i] = hdr_bytes[i];
+
+        uint8_t* restart_dst = dst + PACK_HEADER_BYTES + header.data_size;
+        for (int i = 0; i < num_restarts; ++i) {
+            uint32_t value = restart_offsets[i];
+            const uint8_t* src = reinterpret_cast<const uint8_t*>(&value);
+            for (int b = 0; b < (int)sizeof(uint32_t); ++b) {
+                restart_dst[i * sizeof(uint32_t) + b] = src[b];
+            }
+        }
+        block_sizes[block_id] = PACK_HEADER_BYTES + header.data_size
+                              + (uint32_t)num_restarts * sizeof(uint32_t);
+    }
+    __syncthreads();
+
+    if (tid < num_restarts) {
+        uint8_t* dst = block_out + (size_t)block_id * GP_DATA_BLOCK_BYTES
+                     + PACK_HEADER_BYTES + interval_offsets[tid];
+        int start = tid * GP_RESTART_INTERVAL;
+        int end = (start + GP_RESTART_INTERVAL < block_entries)
+                ? (start + GP_RESTART_INTERVAL)
+                : block_entries;
+        for (int i = start; i < end; ++i) {
+            int shared = 0;
+            if (i > start) shared = key_shared_prefix(block_refs[i - 1].key, block_refs[i].key);
+            int unshared = GP_KEY_BYTES - shared;
+            *dst++ = (uint8_t)shared;
+            *dst++ = (uint8_t)unshared;
+            for (int b = 0; b < unshared; ++b) *dst++ = block_refs[i].key.bytes[shared + b];
+            const uint8_t* value_src = source_files[block_refs[i].source_sst] + block_refs[i].value_offset;
+            for (uint32_t b = 0; b < block_refs[i].value_size; ++b) *dst++ = value_src[b];
+        }
+    }
+}
+
 __global__ void assemble_precompressed_blocks_kernel(const uint8_t* __restrict__  group_payloads,
                                                      const uint32_t* __restrict__ group_sizes,
                                                      const uint32_t* __restrict__ block_first_kv,
@@ -792,6 +972,101 @@ __global__ void unpack_kernel(const uint8_t*  __restrict__ block_buf,
         kv_out[kv_base + i] = out;
         prev_key = current;
     }
+}
+
+__global__ void unpack_ref_kernel(const uint8_t*  __restrict__ block_buf,
+                                  const uint32_t* __restrict__ block_offsets,
+                                  const uint32_t* __restrict__ block_first_kv,
+                                  const uint32_t* __restrict__ block_num_kv,
+                                  int                          num_blocks,
+                                  uint32_t                     source_sst,
+                                  KVRef*         __restrict__ kv_out)
+{
+    int block_id = (int)blockIdx.x;
+    if (block_id >= num_blocks) return;
+
+    const uint8_t* block = block_buf + block_offsets[block_id];
+    PackBlockHeader header{};
+    uint8_t* header_bytes = reinterpret_cast<uint8_t*>(&header);
+    for (int i = 0; i < PACK_HEADER_BYTES; ++i) header_bytes[i] = block[i];
+
+    int tid = (int)threadIdx.x;
+    int block_entries = (int)header.num_entries;
+    int num_restarts = (int)header.num_restarts;
+    if (tid >= num_restarts) return;
+
+    const uint8_t* restart_src = block + PACK_HEADER_BYTES + header.data_size;
+    uint32_t restart_offset = 0;
+    uint8_t* restart_bytes = reinterpret_cast<uint8_t*>(&restart_offset);
+    for (int i = 0; i < (int)sizeof(uint32_t); ++i) {
+        restart_bytes[i] = restart_src[tid * sizeof(uint32_t) + i];
+    }
+
+    int start = tid * GP_RESTART_INTERVAL;
+    int end = (start + GP_RESTART_INTERVAL < block_entries)
+            ? (start + GP_RESTART_INTERVAL)
+            : block_entries;
+    const uint8_t* p = block + PACK_HEADER_BYTES + restart_offset;
+    Key128 prev_key{};
+    int kv_base = (int)block_first_kv[block_id];
+
+    for (int i = start; i < end; ++i) {
+        int shared = p[0];
+        int unshared = p[1];
+        p += 2;
+        Key128 current{};
+        if (i > start) std::memcpy(current.bytes, prev_key.bytes, (size_t)shared);
+        std::memcpy(current.bytes + shared, p, (size_t)unshared);
+        p += unshared;
+
+        KVRef out{};
+        out.key = current;
+        out.source_sst = source_sst;
+        out.value_offset = (uint32_t)(p - block_buf);
+        out.value_size = GP_VALUE_BYTES;
+        p += GP_VALUE_BYTES;
+        kv_out[kv_base + i] = out;
+        prev_key = current;
+    }
+}
+
+static inline int cpu_unpack_block_refs(const uint8_t* block,
+                                        size_t         block_len,
+                                        uint32_t       source_sst,
+                                        uint32_t       block_offset,
+                                        KVRef*         out)
+{
+    if (block_len < (size_t)PACK_HEADER_BYTES) return 0;
+    PackBlockHeader header{};
+    std::memcpy(&header, block, PACK_HEADER_BYTES);
+    const uint8_t* data = block + PACK_HEADER_BYTES;
+    const uint8_t* data_end = data + header.data_size;
+    Key128 prev_key{};
+
+    int count = 0;
+    const uint8_t* p = data;
+    while (count < (int)header.num_entries && p + 2 <= data_end) {
+        int shared = p[0];
+        int unshared = p[1];
+        p += 2;
+        if (p + unshared + GP_VALUE_BYTES > data_end) break;
+
+        Key128 current{};
+        if ((count % GP_RESTART_INTERVAL) != 0) {
+            std::memcpy(current.bytes, prev_key.bytes, (size_t)shared);
+        }
+        std::memcpy(current.bytes + shared, p, (size_t)unshared);
+        p += unshared;
+
+        out[count].key = current;
+        out[count].source_sst = source_sst;
+        out[count].value_offset = block_offset + (uint32_t)(p - block);
+        out[count].value_size = GP_VALUE_BYTES;
+        p += GP_VALUE_BYTES;
+        prev_key = current;
+        ++count;
+    }
+    return count;
 }
 
 struct PackResult {
@@ -1116,6 +1391,62 @@ launch_pack_to_device_from_device_plans(const KVPair*                         d_
     cudaEventRecord(ev0, 0);
     pack_kernel<<<num_blocks, block_dim, shared_bytes>>>(
         d_kv, d_first_kv, d_num_kv, num_blocks, d_blocks, d_sizes);
+    cudaEventRecord(ev1, 0);
+    cudaEventSynchronize(ev1);
+    cudaEventElapsedTime(&timed.kernel_ms, ev0, ev1);
+
+    timed.block_sizes.resize((size_t)num_blocks);
+    auto d2h_start = std::chrono::steady_clock::now();
+    cudaMemcpy(timed.block_sizes.data(), d_sizes,
+               (size_t)num_blocks * sizeof(uint32_t), cudaMemcpyDeviceToHost);
+    auto d2h_end = std::chrono::steady_clock::now();
+    timed.d2h_ms = (float)std::chrono::duration<double, std::milli>(d2h_end - d2h_start).count();
+    timed.d2h_bytes = (size_t)num_blocks * sizeof(uint32_t);
+
+    auto wall_end = std::chrono::steady_clock::now();
+    timed.wall_ms = (float)std::chrono::duration<double, std::milli>(wall_end - wall_start).count();
+    timed.d_blocks = d_blocks;
+
+    cudaEventDestroy(ev1);
+    cudaEventDestroy(ev0);
+    cudaFree(d_sizes);
+    return timed;
+}
+
+static inline DevicePackTimedResult
+launch_pack_to_device_from_device_plans(const KVRef*                          d_ref,
+                                        const uint8_t* const*                 d_source_files,
+                                        const uint32_t*                       d_first_kv,
+                                        const uint32_t*                       d_num_kv,
+                                        const std::vector<DataBlockPlanEntry>& plans)
+{
+    DevicePackTimedResult timed;
+    timed.plans = plans;
+    int num_blocks = (int)plans.size();
+    if (num_blocks <= 0) return timed;
+
+    uint8_t*  d_blocks = nullptr;
+    uint32_t* d_sizes = nullptr;
+    cudaMalloc(&d_blocks, (size_t)num_blocks * GP_DATA_BLOCK_BYTES);
+    cudaMalloc(&d_sizes, (size_t)num_blocks * sizeof(uint32_t));
+
+    uint32_t max_restarts = 0;
+    for (const auto& plan : plans) {
+        max_restarts = std::max(max_restarts,
+                                (plan.num_kv + (uint32_t)GP_RESTART_INTERVAL - 1u)
+                              / (uint32_t)GP_RESTART_INTERVAL);
+    }
+    int block_dim = ((int)max_restarts + 31) / 32 * 32;
+    if (block_dim < 32) block_dim = 32;
+    int shared_bytes = (int)(max_restarts * 3 * sizeof(uint32_t));
+
+    auto wall_start = std::chrono::steady_clock::now();
+    cudaEvent_t ev0, ev1;
+    cudaEventCreate(&ev0);
+    cudaEventCreate(&ev1);
+    cudaEventRecord(ev0, 0);
+    pack_ref_kernel<<<num_blocks, block_dim, shared_bytes>>>(
+        d_ref, d_source_files, d_first_kv, d_num_kv, num_blocks, d_blocks, d_sizes);
     cudaEventRecord(ev1, 0);
     cudaEventSynchronize(ev1);
     cudaEventElapsedTime(&timed.kernel_ms, ev0, ev1);
@@ -1464,6 +1795,20 @@ static inline std::vector<KVPair> cpu_unpack_all(const std::vector<uint8_t>&    
     for (size_t i = 0; i < plans.size(); ++i) {
         cpu_unpack_block(block_buf.data() + block_offsets[i], plans[i].serialized_size,
                          out.data() + plans[i].first_kv);
+    }
+    return out;
+}
+
+static inline std::vector<KVRef> cpu_unpack_all_refs(const std::vector<uint8_t>&            block_buf,
+                                                     const std::vector<uint32_t>&           block_offsets,
+                                                     const std::vector<DataBlockPlanEntry>& plans,
+                                                     uint32_t                               total_kv,
+                                                     uint32_t                               source_sst)
+{
+    std::vector<KVRef> out(total_kv);
+    for (size_t i = 0; i < plans.size(); ++i) {
+        cpu_unpack_block_refs(block_buf.data() + block_offsets[i], plans[i].serialized_size,
+                              source_sst, block_offsets[i], out.data() + plans[i].first_kv);
     }
     return out;
 }

@@ -199,6 +199,7 @@ run_nsys_profile() {
 # ── Setup ─────────────────────────────────────────────────────────
 gpu_sweep_save_originals
 CURRENT_SSTS=$(gpu_sweep_current_ssts)
+CURRENT_SST_SIZE_MB=$(gpu_sweep_current_sst_size_mb)
 
 PROFILE_SUFFIX=""
 if [[ "${PROFILE_ONLY}" == "1" ]]; then
@@ -208,9 +209,9 @@ elif [[ "${GPU_ONLY}" == "1" ]]; then
 fi
 if [[ -z "${LABEL}" ]]; then
     if [[ "${COLLECT_NSYS}" == "1" || "${COLLECT_NCU}" == "1" ]]; then
-        LABEL="nsight_ncu_8mb-sst_${CURRENT_SSTS}sst${PROFILE_SUFFIX}"
+        LABEL="nsight_ncu_${CURRENT_SST_SIZE_MB}mb-sst_${CURRENT_SSTS}sst${PROFILE_SUFFIX}"
     else
-        LABEL="gpu_metrics_8mb-sst_${CURRENT_SSTS}sst${PROFILE_SUFFIX}"
+        LABEL="gpu_metrics_${CURRENT_SST_SIZE_MB}mb-sst_${CURRENT_SSTS}sst${PROFILE_SUFFIX}"
     fi
 elif [[ -n "${PROFILE_SUFFIX}" && "${LABEL}" != *"${PROFILE_SUFFIX}" ]]; then
     LABEL="${LABEL}${PROFILE_SUFFIX}"
@@ -283,6 +284,7 @@ if [[ "${COLLECT_NCU}" == "1" ]]; then
 fi
 echo " force first run warmup in summary: ${FORCE_FIRST_RUN_WARMUP}"
 echo " input SSTs: ${CURRENT_SSTS}"
+echo " target SST size: ${CURRENT_SST_SIZE_MB} MB"
 echo " dataset user key space: ${DATASET_USER_KEY_SPACE}"
 echo "========================================================="
 

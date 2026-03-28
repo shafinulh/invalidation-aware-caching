@@ -12,7 +12,7 @@ COMPACTION_DEFAULT_ZIPF_ALPHA="${COMPACTION_DEFAULT_ZIPF_ALPHA:-0.0}"
 COMPACTION_DEFAULT_USER_KEY_SPACE="${COMPACTION_DEFAULT_USER_KEY_SPACE:-200000000}"
 
 # --- GPU modes ---
-COMPACTION_DEFAULT_GPU_MODES="${COMPACTION_DEFAULT_GPU_MODES:-q_paper_with_plan q_paper_without_plan c_paper_with_plan c_paper_without_plan}"
+COMPACTION_DEFAULT_GPU_MODES="${COMPACTION_DEFAULT_GPU_MODES:-q_paper_with_plan q_paper_with_plan_streaming_io q_paper_without_plan c_paper_with_plan c_paper_with_plan_streaming_io c_paper_without_plan}"
 
 # --- CPU sweep ---
 COMPACTION_DEFAULT_SST_SIZE_MB_LIST="${COMPACTION_DEFAULT_SST_SIZE_MB_LIST:-8}"
